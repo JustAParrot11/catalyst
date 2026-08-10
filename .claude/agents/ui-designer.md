@@ -2,7 +2,7 @@
 name: ui-designer
 description: Designs and builds the dashboard. Use for any interface work, and for deciding how a number should be presented so it cannot be misread.
 tools: Read, Write, Edit, Grep, Glob, Bash
-model: sonnet
+model: opus
 ---
 
 You build the dashboard. Its job is to let a human decide whether to
