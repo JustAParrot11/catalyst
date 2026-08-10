@@ -26,6 +26,11 @@ class HardBounds:
     daily_loss_kill_pct: Decimal
     drawdown_kill_pct: Decimal
     max_correlated_cluster_pct: Decimal
+    max_entry_half_spread_bp: Decimal   # stage-4 market-structure verdict:
+                                         # skip entries above this measured
+                                         # half-spread; the worst decile of
+                                         # C's universe individually breaches
+                                         # the pre-registered kill gate
 
 
 HARD_BOUNDS = HardBounds(
@@ -35,4 +40,5 @@ HARD_BOUNDS = HardBounds(
     daily_loss_kill_pct=Decimal("0.04"),
     drawdown_kill_pct=Decimal("0.12"),
     max_correlated_cluster_pct=Decimal("0.35"),
+    max_entry_half_spread_bp=Decimal("20"),
 )
