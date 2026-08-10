@@ -109,23 +109,23 @@ def index_chart(
         f'<svg id="{chart_id}" class="chart" viewBox="0 0 {width} {height}" '
         f'width="100%" height="{height}" role="img" '
         f'aria-label="{y_axis_title}" xmlns="http://www.w3.org/2000/svg">',
-        f'<rect x="0" y="0" width="{width}" height="{height}" fill="#fbfbfd" stroke="#d7d7e0"/>',
+        f'<rect x="0" y="0" width="{width}" height="{height}" fill="var(--surface)" stroke="var(--hairline)"/>',
     ]
 
     out.append(
         f'<text x="{m_left:.1f}" y="16" font-size="{FONT_SIZE}" text-anchor="start" '
-        f'fill="#333">{y_axis_title}</text>'
+        f'fill="var(--ink-2)">{y_axis_title}</text>'
     )
 
     for value, label in zip(ticks, tick_labels):
         y = py(value)
         out.append(
             f'<line x1="{m_left:.1f}" y1="{y:.1f}" x2="{m_left + plot_w:.1f}" y2="{y:.1f}" '
-            f'stroke="#e4e4ee"/>'
+            f'stroke="var(--hairline)"/>'
         )
         out.append(
             f'<text x="{m_left - 6:.1f}" y="{y + 4:.1f}" font-size="{FONT_SIZE}" '
-            f'text-anchor="end" fill="#555">{label}</text>'
+            f'text-anchor="end" fill="var(--muted)">{label}</text>'
         )
 
     # The 100 line: "no change" is where a reader's eye goes first.
@@ -133,7 +133,7 @@ def index_chart(
         y100 = py(100.0)
         out.append(
             f'<line x1="{m_left:.1f}" y1="{y100:.1f}" x2="{m_left + plot_w:.1f}" '
-            f'y2="{y100:.1f}" stroke="#999" stroke-dasharray="4 3"/>'
+            f'y2="{y100:.1f}" stroke="var(--baseline)" stroke-dasharray="4 3"/>'
         )
 
     for x, label in x_labels:
@@ -146,11 +146,11 @@ def index_chart(
             anchor, cx = "end", min(cx, width - 2)
         out.append(
             f'<line x1="{px(x):.1f}" y1="{m_top + plot_h:.1f}" x2="{px(x):.1f}" '
-            f'y2="{m_top + plot_h + 4:.1f}" stroke="#999"/>'
+            f'y2="{m_top + plot_h + 4:.1f}" stroke="var(--baseline)"/>'
         )
         out.append(
             f'<text x="{cx:.1f}" y="{m_top + plot_h + 17:.1f}" font-size="{FONT_SIZE}" '
-            f'text-anchor="{anchor}" fill="#555">{label}</text>'
+            f'text-anchor="{anchor}" fill="var(--muted)">{label}</text>'
         )
 
     for s in usable:
@@ -172,11 +172,143 @@ def index_chart(
             )
             out.append(
                 f'<text x="{lx + 24:.1f}" y="{ly:.1f}" font-size="{FONT_SIZE}" '
-                f'text-anchor="start" fill="#333">{s.label}</text>'
+                f'text-anchor="start" fill="var(--ink-2)">{s.label}</text>'
             )
             lx += w
         ly += 16
 
+    out.append("</svg>")
+    return "\n".join(out)
+
+
+def placeholder(
+    *,
+    chart_id: str,
+    title: str,
+    explanation: str,
+    width: int = 820,
+    height: int = 190,
+) -> str:
+    """An empty chart drawn as an EMPTY CHART, not as nothing.
+
+    A blank space where a graph belongs reads as a broken page. This
+    draws the frame, the baseline and a plain-English line saying what
+    will appear here and what has to happen first - so "no data yet"
+    and "the query is broken" stay visually distinct, which is the same
+    reason empty_block() prints its raw query beside every zero.
+    """
+    m_left, m_bottom, m_top = 46, 26, 30
+    plot_w = width - m_left - 12
+    plot_h = height - m_top - m_bottom
+    out = [
+        f'<svg id="{chart_id}" class="chart" viewBox="0 0 {width} {height}" '
+        f'width="100%" height="{height}" role="img" '
+        f'aria-label="{title}: {explanation}" '
+        f'xmlns="http://www.w3.org/2000/svg">',
+        f'<rect x="0" y="0" width="{width}" height="{height}" '
+        f'fill="var(--surface)" stroke="var(--hairline)"/>',
+        f'<text x="{m_left:.1f}" y="16" font-size="{FONT_SIZE}" '
+        f'text-anchor="start" fill="var(--ink-2)">{title}</text>',
+    ]
+    for i in range(4):
+        y = m_top + plot_h * i / 3
+        out.append(
+            f'<line x1="{m_left}" y1="{y:.1f}" x2="{m_left + plot_w}" '
+            f'y2="{y:.1f}" stroke="var(--hairline)" stroke-dasharray="3 4"/>')
+    out.append(
+        f'<line x1="{m_left}" y1="{m_top + plot_h:.1f}" x2="{m_left + plot_w}" '
+        f'y2="{m_top + plot_h:.1f}" stroke="var(--baseline)"/>')
+    out.append(
+        f'<text x="{m_left + plot_w / 2:.1f}" y="{m_top + plot_h / 2:.1f}" '
+        f'font-size="{FONT_SIZE}" text-anchor="middle" '
+        f'fill="var(--muted)">{explanation}</text>')
+    out.append("</svg>")
+    return "\n".join(out)
+
+
+def bar_chart(
+    bars: list,                 # [(label, value_float, tooltip_str)]
+    *,
+    chart_id: str,
+    title: str,
+    value_fmt=lambda v: f"{v:,.2f}",
+    reference: tuple | None = None,   # (value, label) e.g. the daily cap
+    width: int = 820,
+    height: int = 240,
+    color: str = "var(--series-1)",
+) -> str:
+    """Vertical bars for a single measure over time (daily spend).
+
+    One series, so no legend box - the title names it (a legend for one
+    series is noise). Bars carry a <title> child, which is the whole
+    hover layer: a real tooltip with no JavaScript and nothing fetched
+    from outside, which this page could not load anyway.
+    """
+    if not bars:
+        raise ValueError("bar_chart called with no bars; use placeholder()")
+    values = [b[1] for b in bars]
+    top = max(values + ([reference[0]] if reference else []) + [0.0])
+    if top <= 0:
+        top = 1.0
+    top *= 1.15
+
+    tick_labels = [value_fmt(top * i / 4) for i in range(5)]
+    m_left = max(len(t) for t in tick_labels) * CHAR_W + 12
+    m_right, m_top, m_bottom = 14, 30, 40
+    plot_w = width - m_left - m_right
+    plot_h = height - m_top - m_bottom
+
+    def py(v: float) -> float:
+        return m_top + (1 - v / top) * plot_h
+
+    out = [
+        f'<svg id="{chart_id}" class="chart" viewBox="0 0 {width} {height}" '
+        f'width="100%" height="{height}" role="img" aria-label="{title}" '
+        f'xmlns="http://www.w3.org/2000/svg">',
+        f'<rect x="0" y="0" width="{width}" height="{height}" '
+        f'fill="var(--surface)" stroke="var(--hairline)"/>',
+        f'<text x="{m_left:.1f}" y="16" font-size="{FONT_SIZE}" '
+        f'text-anchor="start" fill="var(--ink-2)">{title}</text>',
+    ]
+    for i, label in enumerate(tick_labels):
+        y = py(top * i / 4)
+        out.append(
+            f'<line x1="{m_left:.1f}" y1="{y:.1f}" x2="{m_left + plot_w:.1f}" '
+            f'y2="{y:.1f}" stroke="var(--hairline)"/>')
+        out.append(
+            f'<text x="{m_left - 6:.1f}" y="{y + 4:.1f}" font-size="{FONT_SIZE}" '
+            f'text-anchor="end" fill="var(--muted)">{label}</text>')
+
+    # 2px surface gap between neighbouring bars, per the mark spec.
+    slot = plot_w / len(bars)
+    bar_w = max(2.0, min(46.0, slot - 2))
+    for i, (label, value, tip) in enumerate(bars):
+        cx = m_left + slot * (i + 0.5)
+        x = cx - bar_w / 2
+        y = py(max(value, 0.0))
+        h = max(1.0, m_top + plot_h - y)
+        out.append(
+            f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_w:.1f}" height="{h:.1f}" '
+            f'rx="3" fill="{color}"><title>{tip}</title></rect>')
+        # Label every bar only while they are few enough to stay legible;
+        # past that, first and last only - never a number on every mark.
+        if len(bars) <= 12 or i in (0, len(bars) - 1):
+            out.append(
+                f'<text x="{cx:.1f}" y="{m_top + plot_h + 15:.1f}" '
+                f'font-size="{FONT_SIZE}" text-anchor="middle" '
+                f'fill="var(--muted)">{label}</text>')
+
+    if reference is not None:
+        rv, rlabel = reference
+        ry = py(rv)
+        out.append(
+            f'<line x1="{m_left:.1f}" y1="{ry:.1f}" x2="{m_left + plot_w:.1f}" '
+            f'y2="{ry:.1f}" stroke="var(--critical)" stroke-width="2" '
+            f'stroke-dasharray="6 4"/>')
+        out.append(
+            f'<text x="{m_left + plot_w:.1f}" y="{ry - 5:.1f}" '
+            f'font-size="{FONT_SIZE}" text-anchor="end" '
+            f'fill="var(--critical)">{rlabel}</text>')
     out.append("</svg>")
     return "\n".join(out)
 

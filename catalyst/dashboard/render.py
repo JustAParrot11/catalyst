@@ -57,55 +57,164 @@ PAPER_PNL_CAVEAT = (
     "not the same kind of number and the excess figure inherits that."
 )
 
+#: Palette provenance: the categorical, ordinal and status values below
+#: are the data-viz reference palette, validated with its own script
+#: against THIS dashboard's surfaces (#ffffff light, #1a1a19 dark) -
+#: not eyeballed. Recorded results, so a future edit knows what it must
+#: re-clear:
+#:   categorical #2a78d6 + #eb6834, light/white: lightness band, chroma
+#:     floor, CVD separation (worst adjacent dE 24.7 protan), normal
+#:     vision (33.6), contrast >= 3:1 - ALL PASS.
+#:   ordinal funnel ramp #86b6ef,#5598e7,#2a78d6,#1c5cab,#104281:
+#:     monotone lightness, adjacent dL >= 0.06, light end 2.11:1 vs
+#:     surface, single hue - ALL PASS. (The obvious 6-step version
+#:     FAILED adjacent dL at 0.047; the steps are 100 apart for that
+#:     reason, not by taste.)
+#: Status colors are reserved and never used for a data series; each is
+#: shipped with a glyph AND a word, never colour alone.
 _CSS = """
-:root { color-scheme: light; }
+:root {
+  color-scheme: light;
+  --page:        #f7f7f5;
+  --surface:     #ffffff;
+  --surface-2:   #f2f2ef;
+  --ink:         #0b0b0b;
+  --ink-2:       #52514e;
+  --muted:       #898781;
+  --hairline:    #e1e0d9;
+  --baseline:    #c3c2b7;
+  --series-1:    #2a78d6;
+  --series-2:    #eb6834;
+  --good:        #0ca30c;
+  --good-ink:    #006300;
+  --warning:     #fab219;
+  --serious:     #ec835a;
+  --critical:    #d03b3b;
+  --good-wash:   #eef7ee;
+  --warn-wash:   #fdf6e6;
+  --crit-wash:   #fdeeee;
+  --step-1:      #86b6ef;
+  --step-2:      #5598e7;
+  --step-3:      #2a78d6;
+  --step-4:      #1c5cab;
+  --step-5:      #104281;
+  --header:      #17171a;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page:      #0d0d0d;
+    --surface:   #1a1a19;
+    --surface-2: #232322;
+    --ink:       #ffffff;
+    --ink-2:     #c3c2b7;
+    --muted:     #898781;
+    --hairline:  #2c2c2a;
+    --baseline:  #383835;
+    --series-1:  #3987e5;
+    --series-2:  #d95926;
+    --good-ink:  #0ca30c;
+    --good-wash: #12251a;
+    --warn-wash: #2a2312;
+    --crit-wash: #2b1615;
+    --step-1:    #184f95;
+    --step-2:    #256abf;
+    --step-3:    #3987e5;
+    --step-4:    #6da7ec;
+    --step-5:    #9ec5f4;
+    --header:    #000000;
+  }
+}
 * { box-sizing: border-box; }
-body { font: 14px/1.5 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-       margin: 0; color: #1b1b23; background: #f4f4f8; }
-header { background: #1b1b23; color: #fff; padding: 10px 18px; }
-header h1 { font-size: 16px; margin: 0 0 6px 0; font-weight: 600; }
-nav a { color: #cfd4ff; margin-right: 14px; text-decoration: none; font-size: 13px; }
-nav a.active { color: #fff; font-weight: 700; text-decoration: underline; }
-main { padding: 14px 18px 40px 18px; max-width: 1180px; }
-section { background: #fff; border: 1px solid #d7d7e0; border-radius: 5px;
-          padding: 12px 14px; margin-bottom: 16px; }
-section > h2 { font-size: 15px; margin: 0 0 8px 0; }
-h3 { font-size: 13px; margin: 14px 0 6px 0; }
-.prov { color: #55555f; font-size: 12px; margin: 4px 0; }
-.caveat { background: #fff8e1; border-left: 4px solid #c99700; padding: 8px 10px;
-          margin: 8px 0; font-size: 13px; }
-.alarm { background: #fdecec; border-left: 4px solid #b3261e; padding: 8px 10px;
-         margin: 8px 0; font-size: 13px; }
-.ok { background: #eaf6ec; border-left: 4px solid #2e7d32; padding: 8px 10px;
-      margin: 8px 0; font-size: 13px; }
-.empty { background: #f0f0f5; border: 1px dashed #9a9aa8; padding: 8px 10px;
-         margin: 8px 0; font-size: 12px; }
-.big { font-size: 26px; font-weight: 700; }
-.pos { color: #1e6b2a; } .neg { color: #b3261e; }
-table { border-collapse: collapse; width: 100%; margin: 6px 0; font-size: 13px; }
-th, td { border: 1px solid #dcdce4; padding: 4px 7px; text-align: left;
-         vertical-align: top; }
-th { background: #f0f0f6; font-weight: 600; }
+body { font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+       margin: 0; color: var(--ink); background: var(--page); }
+header { background: var(--header); color: #fff; padding: 12px 20px; }
+header h1 { font-size: 15px; margin: 0 0 8px 0; font-weight: 600;
+            letter-spacing: .01em; }
+nav { display: flex; flex-wrap: wrap; gap: 2px; }
+nav a { color: rgba(255,255,255,.72); text-decoration: none; font-size: 13px;
+        padding: 4px 9px; border-radius: 5px; }
+nav a:hover { background: rgba(255,255,255,.10); color: #fff; }
+nav a.active { color: #fff; background: rgba(255,255,255,.16); font-weight: 600; }
+main { padding: 18px 20px 48px 20px; max-width: 1180px; }
+section { background: var(--surface); border: 1px solid var(--hairline);
+          border-radius: 10px; padding: 16px 18px; margin-bottom: 18px; }
+section > h2 { font-size: 12px; margin: 0 0 12px 0; text-transform: uppercase;
+               letter-spacing: .07em; color: var(--ink-2); font-weight: 600; }
+h3 { font-size: 13px; margin: 18px 0 6px 0; }
+.prov { color: var(--muted); font-size: 12px; margin: 5px 0; }
+.caveat { background: var(--warn-wash); border-left: 3px solid var(--warning);
+          padding: 9px 11px; margin: 9px 0; font-size: 13px; border-radius: 0 6px 6px 0; }
+.alarm { background: var(--crit-wash); border-left: 3px solid var(--critical);
+         padding: 9px 11px; margin: 9px 0; font-size: 13px; border-radius: 0 6px 6px 0; }
+.ok { background: var(--good-wash); border-left: 3px solid var(--good);
+      padding: 9px 11px; margin: 9px 0; font-size: 13px; border-radius: 0 6px 6px 0; }
+.empty { background: var(--surface-2); border: 1px dashed var(--baseline);
+         padding: 10px 12px; margin: 9px 0; font-size: 12px; border-radius: 8px; }
+.big { font-size: 30px; font-weight: 650; letter-spacing: -.02em; }
+.pos { color: var(--good-ink); } .neg { color: var(--critical); }
+
+/* KPI tiles - the at-a-glance row. Every tile carries its own
+   provenance line, so a number can never be read without its source. */
+.tiles { display: grid; gap: 10px; margin: 2px 0 14px 0;
+         grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+.tile { background: var(--surface-2); border: 1px solid var(--hairline);
+        border-radius: 9px; padding: 11px 13px; }
+.tile-label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+              color: var(--muted); margin: 0 0 5px 0; }
+.tile-value { font-size: 23px; font-weight: 650; letter-spacing: -.02em;
+              margin: 0; line-height: 1.2; }
+.tile-sub { font-size: 11.5px; color: var(--ink-2); margin: 5px 0 0 0; }
+.pill { display: inline-flex; align-items: center; gap: 5px; font-size: 12px;
+        font-weight: 600; padding: 2px 9px; border-radius: 999px;
+        border: 1px solid transparent; }
+.pill-good { background: var(--good-wash); color: var(--good-ink);
+             border-color: var(--good); }
+.pill-warn { background: var(--warn-wash); color: var(--ink);
+             border-color: var(--warning); }
+.pill-crit { background: var(--crit-wash); color: var(--critical);
+             border-color: var(--critical); }
+.pill-idle { background: var(--surface-2); color: var(--ink-2);
+             border-color: var(--baseline); }
+
+table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 13px; }
+th, td { border-bottom: 1px solid var(--hairline); padding: 7px 9px;
+         text-align: left; vertical-align: top; }
+th { background: var(--surface-2); font-weight: 600; font-size: 11px;
+     text-transform: uppercase; letter-spacing: .05em; color: var(--ink-2);
+     border-bottom: 1px solid var(--baseline); }
+tbody tr:hover { background: var(--surface-2); }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-pre { background: #1b1b23; color: #e6e6f0; padding: 8px; overflow-x: auto;
-      font-size: 12px; border-radius: 4px; white-space: pre-wrap;
+.scroll-x { overflow-x: auto; }
+pre { background: #14140f; color: #e8e8e0; padding: 10px; overflow-x: auto;
+      font-size: 12px; border-radius: 7px; white-space: pre-wrap;
       word-break: break-word; max-height: 380px; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-details { margin: 6px 0; }
-summary { cursor: pointer; font-size: 13px; color: #2b3a8f; }
-footer { color: #55555f; font-size: 12px; padding: 10px 18px 24px 18px; }
-.funnel-row { display: flex; align-items: center; gap: 10px; margin: 3px 0; }
-.funnel-bar { background: #3a4bbf; height: 17px; border-radius: 2px; min-width: 2px; }
-.funnel-label { width: 210px; font-size: 13px; }
-.funnel-n { width: 74px; text-align: right; font-variant-numeric: tabular-nums; }
-.funnel-drop { color: #8a2f2f; font-size: 12px; }
-.blame { background: #fdecec; border-left: 4px solid #b3261e; padding: 8px 10px;
-         font-size: 13px; margin: 8px 0; }
-form.inline { display: inline-block; margin: 6px 0; }
-input, select, button { font: inherit; padding: 3px 6px; }
-.chart { display: block; margin: 6px 0; }
-.tag { display: inline-block; background: #ececf4; border: 1px solid #d0d0dc;
-       border-radius: 3px; padding: 0 5px; font-size: 12px; margin-right: 4px; }
+details { margin: 7px 0; }
+summary { cursor: pointer; font-size: 13px; color: var(--series-1); }
+footer { color: var(--muted); font-size: 12px; padding: 12px 20px 28px 20px; }
+
+/* Funnel: an ordinal ramp, darkening as candidates survive each stage. */
+.funnel-row { display: flex; align-items: center; gap: 12px; margin: 5px 0; }
+.funnel-bar { height: 22px; border-radius: 3px; min-width: 3px; }
+.funnel-label { width: 210px; font-size: 13px; flex: none; }
+.funnel-n { width: 74px; text-align: right; font-variant-numeric: tabular-nums;
+            font-weight: 600; flex: none; }
+.funnel-drop { color: var(--serious); font-size: 12px; }
+.blame { background: var(--crit-wash); border-left: 3px solid var(--critical);
+         padding: 9px 11px; font-size: 13px; margin: 9px 0;
+         border-radius: 0 6px 6px 0; }
+form.inline { display: inline-block; margin: 7px 0; }
+input, select, button { font: inherit; padding: 5px 8px; border-radius: 6px;
+                        border: 1px solid var(--baseline);
+                        background: var(--surface); color: var(--ink); }
+button { background: var(--series-1); color: #fff; border-color: transparent;
+         font-weight: 600; cursor: pointer; }
+.chart { display: block; margin: 10px 0; max-width: 100%; }
+.chart-wrap { overflow-x: auto; }
+.tag { display: inline-block; background: var(--surface-2);
+       border: 1px solid var(--hairline); border-radius: 5px; padding: 1px 7px;
+       font-size: 12px; margin-right: 4px; }
 """
 
 NAV = [
@@ -164,6 +273,23 @@ def caveat(text: str) -> str:
     return f'<div class="caveat">{esc(text)}</div>'
 
 
+def caveat_fold(cid: str, summary: str, texts: list) -> str:
+    """Several standing caveats behind ONE disclosure.
+
+    Owner feedback 2026-08-10: three long amber blocks sat between the
+    headline number and the chart, so the page opened with an
+    unreadable wall. They are permanent context, not news - they say
+    the same thing on every page load forever. The summary line still
+    names each one and stays visible, so nothing is hidden; only the
+    paragraphs fold. The sample-size alarm is deliberately NOT folded:
+    that one changes, and it is the one that stops a number being read
+    as a verdict.
+    """
+    inner = "".join(caveat(t) for t in texts)
+    return (f'<details class="caveat" id="{esc(cid)}">'
+            f"<summary>{esc(summary)}</summary>{inner}</details>")
+
+
 def alarm(text_html: str) -> str:
     return f'<div class="alarm">{text_html}</div>'
 
@@ -188,23 +314,40 @@ def empty_block(eid: str, result: QueryResult, upstream: str | None = None,
     """The only empty-state renderer. Prints the exact query, its
     parameters, the row count, any driver error, and the raw upstream
     response beside it — 'no data yet' and 'the query is broken' must
-    not look the same (ui-designer rule 2, CLAUDE.md house rule 3)."""
+    not look the same (ui-designer rule 2, CLAUDE.md house rule 3).
+
+    Layout note (owner feedback 2026-08-10: "not very user friendly"):
+    on a fresh install every funnel stage is empty, and six full SQL
+    dumps stacked down the page buried the one line that actually
+    matters. The VERDICT stays visible — was this an absence of data or
+    a broken query — and the query text folds into a disclosure beside
+    it. Nothing is removed: house rule 3 asks for the raw response
+    beside the zero, not for it to be the largest thing on screen. A
+    FAILED query does not fold: that one is opened by default.
+    """
     parts = [f'<div class="empty" id="{esc(eid)}">']
-    parts.append("<b>Empty result — here is exactly why it is empty.</b><br>")
+    parts.append("<b>Empty result — here is exactly why it is empty.</b> ")
     if meaning:
-        parts.append(f"{esc(meaning)}<br>")
-    parts.append(f"rows returned: <b>{result.row_count}</b><br>")
+        parts.append(f"{esc(meaning)} ")
+    parts.append(f"rows returned: <b>{result.row_count}</b>. ")
     if result.error:
         parts.append(
             f'<span class="funnel-drop">query FAILED: {esc(result.error)} '
             "— this is a broken query, not an absence of data.</span>"
         )
     else:
-        parts.append("query ran without error — this is an absence of data, not a fault.")
-    parts.append(f"<pre>{esc(result.sql)}\nparams: {esc(result.params)}</pre>")
+        parts.append("Query ran without error — this is an absence of data, not a fault.")
+    inner = f"<pre>{esc(result.sql)}\nparams: {esc(result.params)}</pre>"
     if upstream is not None:
-        parts.append("raw upstream response beside the zero:")
-        parts.append(pre(upstream))
+        inner += "raw upstream response beside the zero:" + pre(upstream)
+    label = ("the query that returned nothing, and its raw response"
+             if upstream is not None else "the exact query that returned nothing")
+    # A broken query is not a detail to go looking for.
+    open_attr = " open" if result.error else ""
+    parts.append(
+        f'<details id="{esc(eid)}-detail"{open_attr}>'
+        f"<summary>{label}</summary>{inner}</details>"
+    )
     parts.append("</div>")
     return "".join(parts)
 
@@ -226,6 +369,41 @@ def table(tid: str, headers: list, rows: list, numeric_cols: set | None = None) 
         f'<table id="{esc(tid)}"><thead><tr>{head}</tr></thead>'
         f"<tbody>{''.join(body)}</tbody></table>"
     )
+
+
+#: Status glyph + word. A status colour NEVER carries meaning alone -
+#: the glyph and the word do, and the colour only reinforces them (the
+#: page is read by people who may not distinguish the hues, and printed
+#: or forced-colours output drops colour entirely).
+_PILL_GLYPH = {"good": "●", "warn": "▲", "crit": "■",
+               "idle": "○"}
+
+
+def pill(state: str, label: str) -> str:
+    """A small status badge. `state` is one of good/warn/crit/idle."""
+    state = state if state in _PILL_GLYPH else "idle"
+    return (f'<span class="pill pill-{state}">'
+            f'<span aria-hidden="true">{_PILL_GLYPH[state]}</span>'
+            f"{esc(label)}</span>")
+
+
+def tiles(tid: str, items: list) -> str:
+    """The at-a-glance row.
+
+    `items` are (label, value_html, sub_html) triples. `sub` is NOT
+    optional decoration - it is where the number says where it came
+    from, which the brief requires of every figure on this dashboard.
+    A tile with nothing to say in `sub` does not belong here.
+    """
+    cells = []
+    for i, (label, value, sub) in enumerate(items):
+        cells.append(
+            f'<div class="tile" id="{esc(tid)}-{i}">'
+            f'<p class="tile-label">{esc(label)}</p>'
+            f'<p class="tile-value">{value}</p>'
+            f'<p class="tile-sub">{sub}</p></div>'
+        )
+    return f'<div class="tiles" id="{esc(tid)}">{"".join(cells)}</div>'
 
 
 def dollars(cents) -> str:
