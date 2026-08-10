@@ -80,5 +80,71 @@ def reconcile(broker: Broker, conn) -> list[Fill]:
     return fills
 
 
+def close_filled_positions(conn, account_mode: str = "paper",
+                           now: datetime | None = None) -> int:
+    """Transition open positions whose exit sell has fully filled into
+    closed_trades. Entry/exit prices are the broker's reported fill
+    prices. exit_reason comes from the sell order's type: 'stop' for a
+    stop fill, 'hard_exit' for the time-based market sell. Returns how
+    many positions were closed."""
+    now = now or _now()
+    closed = 0
+    for pos_id, ticker, entry_ids_json, opened_at, planned_exit in \
+            conn.execute("SELECT id, ticker, entry_order_ids, opened_at, "
+                         "planned_exit_date FROM positions "
+                         "WHERE status = 'open'").fetchall():
+        entry_ids = json.loads(entry_ids_json)
+        if not entry_ids:
+            continue
+        entry = conn.execute(
+            """SELECT f.price, f.qty, o.decision_id FROM fills f
+               JOIN orders o ON o.id = f.order_id
+               WHERE f.order_id = ?""", (entry_ids[0],)).fetchone()
+        if entry is None:
+            continue           # entry not filled yet; nothing to close
+        entry_price, entry_qty, decision_id = entry
+
+        sells = conn.execute(
+            """SELECT f.price, f.qty, o.order_type, f.filled_at
+               FROM fills f JOIN orders o ON o.id = f.order_id
+               WHERE o.decision_id = ? AND o.side = 'sell'
+               ORDER BY f.filled_at""", (decision_id,)).fetchall()
+        sold_qty = sum(Decimal(s[1]) for s in sells)
+        if sold_qty < Decimal(entry_qty):
+            continue           # partial or no exit yet; stays open
+
+        # qty-weighted exit price across sell fills
+        exit_price = sum(Decimal(s[0]) * Decimal(s[1]) for s in sells) / sold_qty
+        exit_reason = ("stop" if any(s[2] in ("stop", "stop_limit")
+                                     for s in sells) else "hard_exit")
+        pnl_cents = int(((exit_price - Decimal(entry_price))
+                         * Decimal(entry_qty) * 100).quantize(Decimal("1")))
+        opened_date = datetime.fromisoformat(opened_at).date()
+        last_fill = datetime.fromisoformat(
+            sells[-1][3].replace("Z", "+00:00"))
+        decision_row = conn.execute(
+            "SELECT planned_exit_date, decided_at FROM risk_decisions "
+            "WHERE candidate_id = ? AND action='trade'", (decision_id,)).fetchone()
+        expected_days = 0
+        if decision_row and decision_row[0]:
+            expected_days = (datetime.fromisoformat(decision_row[0]).date()
+                             - datetime.fromisoformat(decision_row[1]).date()).days
+        conn.execute(
+            """INSERT OR REPLACE INTO closed_trades
+               (position_id, account_mode, entry_price, exit_price,
+                exit_reason, realized_pnl_cents, expected_holding_days,
+                actual_holding_days, closed_at)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (pos_id, account_mode, str(entry_price),
+             str(exit_price.quantize(Decimal("0.0001"))), exit_reason,
+             pnl_cents, expected_days,
+             (last_fill.date() - opened_date).days, last_fill.isoformat()))
+        conn.execute("UPDATE positions SET status = 'closed' WHERE id = ?",
+                     (pos_id,))
+        closed += 1
+    conn.commit()
+    return closed
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)

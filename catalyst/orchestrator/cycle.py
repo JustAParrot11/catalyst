@@ -22,7 +22,7 @@ from catalyst.discovery import Candidate
 from catalyst.execution.broker import Broker, BrokerError
 from catalyst.execution.exits import manage_exits, reopen_stops
 from catalyst.execution.orders import confirm_stops_resting, place, place_stop
-from catalyst.execution.reconcile import reconcile
+from catalyst.execution.reconcile import close_filled_positions, reconcile
 from catalyst.research.boundary import CostContext, investigate
 from catalyst.risk import (
     KillSwitchState, MarketSnapshot, OpenPosition, PortfolioState,
@@ -160,6 +160,7 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
     except BrokerError as exc:
         report.errors.append(f"reconcile: {exc}")
         return report          # cannot trust local state; stop the cycle
+    close_filled_positions(conn, now=now)
 
     # score refusals whose counterfactual window has elapsed (the
     # feedback loop; failures leave rows unscored for the next cycle)

@@ -373,3 +373,74 @@ class TestExits:
         assert r.status == "accepted"
         assert (seen["type"], seen["time_in_force"],
                 seen["stop_price"]) == ("stop", "day", "45.00")
+
+
+# ---------------------------------------------------- position settlement
+
+from catalyst.execution.reconcile import close_filled_positions  # noqa: E402
+
+
+def _seed_trade(db, *, pos_id="pos-1", entry_price="50.00", qty="2",
+                sells=()):
+    """A filled entry plus optional sell fills. sells: (price, qty, type)."""
+    db.execute("INSERT INTO orders VALUES (?,?,?,?,?,?,?,?,?,?)",
+               ("ord-buy", "cand-1", "b1", "buy", qty, "market", "day",
+                "2026-08-01T14:00:00+00:00", "filled", "{}"))
+    db.execute("INSERT INTO fills VALUES (?,?,?,?,?,NULL)",
+               ("ord-buy", entry_price, qty, "2026-08-01T14:00:00+00:00",
+                entry_price))
+    db.execute(
+        "INSERT INTO risk_decisions VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        ("dec-1", "cand-1", "trade", "long", "100", qty, "45.00",
+         "2026-08-13", "[]", "{}", "2026-08-01T13:00:00+00:00"))
+    for i, (price, sqty, otype) in enumerate(sells):
+        db.execute("INSERT INTO orders VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   (f"ord-sell-{i}", "cand-1", f"s{i}", "sell", sqty, otype,
+                    "day", "2026-08-09T14:00:00+00:00", "filled", "{}"))
+        db.execute("INSERT INTO fills VALUES (?,?,?,?,?,NULL)",
+                   (f"ord-sell-{i}", price, sqty,
+                    "2026-08-09T14:30:00+00:00", price))
+    db.execute("INSERT INTO positions VALUES (?,?,?,?,?,?,?)",
+               (pos_id, "TEST", json.dumps(["ord-buy"]), None,
+                "2026-08-01T14:00:00+00:00", "2026-08-13", "open"))
+    db.commit()
+
+
+class TestClosePositions:
+    def test_full_exit_closes_with_pnl_and_reason(self, db):
+        _seed_trade(db, sells=[("55.00", "2", "market")])
+        assert close_filled_positions(db) == 1
+        row = db.execute(
+            "SELECT entry_price, exit_price, exit_reason, "
+            "realized_pnl_cents, actual_holding_days, account_mode "
+            "FROM closed_trades").fetchone()
+        assert row[0] == "50.00" and Decimal(row[1]) == Decimal("55")
+        assert row[2] == "hard_exit"
+        assert row[3] == 1000            # (55-50)*2 = $10 = 1000 cents
+        assert row[4] == 8
+        assert row[5] == "paper"
+        assert db.execute("SELECT status FROM positions").fetchone()[0] == "closed"
+
+    def test_stop_fill_labeled_stop(self, db):
+        _seed_trade(db, sells=[("45.00", "2", "stop")])
+        close_filled_positions(db)
+        assert db.execute("SELECT exit_reason FROM closed_trades"
+                          ).fetchone()[0] == "stop"
+        assert db.execute("SELECT realized_pnl_cents FROM closed_trades"
+                          ).fetchone()[0] == -1000
+
+    def test_partial_exit_stays_open(self, db):
+        _seed_trade(db, sells=[("55.00", "1", "market")])
+        assert close_filled_positions(db) == 0
+        assert db.execute("SELECT status FROM positions").fetchone()[0] == "open"
+        assert db.execute("SELECT COUNT(*) FROM closed_trades").fetchone()[0] == 0
+
+    def test_unfilled_entry_never_closes(self, db):
+        db.execute("INSERT INTO orders VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   ("ord-buy", "cand-1", "b1", "buy", "2", "market", "day",
+                    "2026-08-01T14:00:00+00:00", "accepted", "{}"))
+        db.execute("INSERT INTO positions VALUES (?,?,?,?,?,?,?)",
+                   ("pos-1", "TEST", json.dumps(["ord-buy"]), None,
+                    "2026-08-01T14:00:00+00:00", "2026-08-13", "open"))
+        db.commit()
+        assert close_filled_positions(db) == 0
