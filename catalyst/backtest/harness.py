@@ -340,8 +340,8 @@ def replay_detailed(
     benchmark = benchmark_comparison(bench_bars, strategy_return_net)
 
     split = cfg.split_date
-    in_trades = [t for t in trades if t.entry_day > split]
-    out_trades = [t for t in trades if t.entry_day <= split]
+    in_trades = [t for t in trades if t.entry_day <= split]
+    out_trades = [t for t in trades if t.entry_day > split]
     in_curve = [eq for d, eq in equity_curve if d <= split]
     out_curve = [eq for d, eq in equity_curve if d > split]
     in_end = min(split, calendar[-1])

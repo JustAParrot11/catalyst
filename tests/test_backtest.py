@@ -290,7 +290,16 @@ def test_in_out_of_sample_split_is_chronological(tmp_path):
     split = days[19]
     cache = BarCache(tmp_path)
     cache.write_bars("SPY", flat_bars(days, 100))
-    cache.write_bars("AAA", flat_bars(days, 10))
+    # A linear ramp, not a flat price and not a %-per-session compounding
+    # ramp: the % return realised over a fixed holding window depends on
+    # WHERE on the ramp a trade sits, so early-window and late-window
+    # trades are guaranteed distinguishable returns. With a flat price
+    # (or exponential drift) every trade nets the same %, and a swapped
+    # or reversed split would produce identical sample_size counts (2
+    # early, 2 late either way round) and slip straight past a
+    # count-only check.
+    bars = [make_bar(d, D("10") + D("0.5") * i) for i, d in enumerate(days)]
+    cache.write_bars("AAA", bars)
     universe = [
         mk_candidate("AAA", days[2], "early1"),
         mk_candidate("AAA", days[8], "early2"),
@@ -308,6 +317,30 @@ def test_in_out_of_sample_split_is_chronological(tmp_path):
     assert max(in_days) <= split < min(out_days), (
         "split must be chronological: every in-sample trade strictly precedes "
         "every out-of-sample trade"
+    )
+
+    # Counts alone (2 in, 2 out) cannot tell a correct chronological split
+    # from a swapped or reversed one on this fixture - verify the CONTENT
+    # of each sample matches the chronologically correct side, using the
+    # trade list (built independently of the in/out bucketing under test)
+    # as ground truth.
+    early_returns = [t.ret for t in detail.trades if t.candidate_id.startswith("early")]
+    late_returns = [t.ret for t in detail.trades if t.candidate_id.startswith("late")]
+    expected_in_mean = sum(early_returns) / len(early_returns)
+    expected_out_mean = sum(late_returns) / len(late_returns)
+    assert expected_in_mean != expected_out_mean, (
+        "fixture bug: early and late trades must realise different returns "
+        "or this test cannot distinguish a correct split from a swapped one"
+    )
+    assert r.in_sample.mean_return == expected_in_mean, (
+        "in_sample must be built from the chronologically EARLY trades, not "
+        f"got mean_return={r.in_sample.mean_return}, expected the early "
+        f"trades' mean {expected_in_mean}"
+    )
+    assert r.out_of_sample.mean_return == expected_out_mean, (
+        "out_of_sample must be built from the chronologically LATE trades, "
+        f"got mean_return={r.out_of_sample.mean_return}, expected the late "
+        f"trades' mean {expected_out_mean}"
     )
 
 
