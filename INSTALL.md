@@ -21,12 +21,46 @@ so you can check a key works before saving it.
 
 ## Step 1 — get the code onto the server
 
-Log in to your server and run:
+Your repository is **private**, so the server needs permission to
+download it. Pick whichever of these you prefer — then log in to your
+server and run the commands for that option.
+
+**Option A — make the repository public** (simplest)
+
+On github.com open your `catalyst` repository, go to Settings, scroll to
+the bottom, and choose "Change visibility" → Public.
+
+This is safe: **no keys or passwords are stored in the repository.** Your
+Alpaca and Anthropic keys live only on your own server, in a file only
+Catalyst can read. That is deliberate — it is why the setup page exists.
+Making it public means anyone can read the code, not your keys or your
+trading.
+
+Then on the server:
 
 ```
 git clone https://github.com/JustAParrot11/catalyst.git
 cd catalyst
 ```
+
+**Option B — keep it private** (use a one-time access token)
+
+On github.com click your profile picture (top right) → Settings →
+Developer settings → Personal access tokens → **Fine-grained tokens** →
+Generate new token. Give it any name, set "Repository access" to *Only
+select repositories* and pick `catalyst`, then under Permissions →
+Repository permissions set **Contents: Read-only**. Generate it and copy
+the token — it is shown only once.
+
+Then on the server, pasting your token where shown:
+
+```
+git clone https://YOUR-TOKEN@github.com/JustAParrot11/catalyst.git
+cd catalyst
+```
+
+That token is only for downloading the code. It is not one of the keys
+the setup page asks for later.
 
 ## Step 2 — run the installer
 
@@ -47,9 +81,17 @@ When the installer finishes it prints a link like:
 http://YOUR-SERVER-ADDRESS:8000/?code=...
 ```
 
-Open it in your browser. The page asks for the keys from the list
-above, explains each one, and has a Test button beside each. Takes
-about five minutes, and you never do it again.
+**This is where your keys are asked for.** The installer never asks for
+them in the terminal, and you never put them in a file. The page shows a
+box for each key, explains where to find it, and has a Test button
+beside it that tells you straight away whether the key works. You also
+choose practice or real money here, and your monthly research budget.
+
+When you press Save, the keys are written to a file on your own server
+that only Catalyst can read, and the bot picks them up from there every
+time it runs. They are never shown on screen again, never written to the
+logs, and never included in anything you might share. Takes about five
+minutes, and you never do it again.
 
 **Keep that link private** — the code at the end of it is what keeps
 other people out of your bot.
