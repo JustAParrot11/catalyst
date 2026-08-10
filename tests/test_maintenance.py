@@ -291,3 +291,138 @@ class TestDiagnosticExport:
         import json as _json
         assert planted not in _json.dumps(diagnostics_bundle(Db(db.path)),
                                           default=str)
+
+
+# ==========================================================================
+# "Saved OK" and "not found" at the same time.
+#
+# Owner-reported 2026-08-10: "I added the admin API key and it said ok.
+# But in maintenance it says not found, I need a definitive way and
+# evidence it has correctly accepted it after I enter it."
+#
+# A boolean cannot settle that - both screens can render a boolean from
+# different files or different moments, and neither is checkable. A
+# fingerprint can.
+# ==========================================================================
+
+
+class TestStoredCredentialEvidence:
+    def _configured(self, tmp_path, monkeypatch, admin="sk-ant-admin01-xyz"):
+        from catalyst.setup import credentials as creds
+        path = tmp_path / "creds.json"
+        monkeypatch.setenv("CATALYST_CREDENTIALS", str(path))
+        creds.save_credentials("PKAAAAAAAAAAAAAAAAAA", "sssssssssssssssssss",
+                               "sk-ant-aaaaaaaaaaaaaaaa", "tok",
+                               anthropic_admin_key=admin, path=str(path))
+        return path
+
+    def test_a_stored_key_reports_a_fingerprint_without_any_network(
+            self, tmp_path, monkeypatch):
+        from catalyst.dashboard.maintenance import stored_credentials_checks
+        from catalyst.setup.credentials import fingerprint
+
+        self._configured(tmp_path, monkeypatch)
+        checks = {c.name: c for c in stored_credentials_checks()}
+        admin = checks["Anthropic billing key (admin) - stored?"]
+        assert admin.state == "ok"
+        assert fingerprint("sk-ant-admin01-xyz") in admin.summary
+
+    def test_the_fingerprint_never_contains_the_key(self, tmp_path, monkeypatch):
+        from catalyst.dashboard.maintenance import stored_credentials_checks
+
+        from catalyst.setup.credentials import fingerprint
+
+        secret = "sk-ant-admin01-SUPERSECRETVALUE99"
+        self._configured(tmp_path, monkeypatch, admin=secret)
+        blob = " ".join(f"{c.summary} {c.detail} {c.raw}"
+                        for c in stored_credentials_checks())
+        assert secret not in blob
+
+        # THE INVARIANT, stated precisely: the fingerprint must not be a
+        # PIECE of the key. Checking fixed-length chunks missed a
+        # fingerprint defined as key[:8], because 8 < the chunk size -
+        # the first version of this test passed against that sabotage.
+        fp = fingerprint(secret)
+        assert fp, "a stored key must produce a fingerprint"
+        assert fp not in secret, (
+            f"the fingerprint {fp!r} is a substring of the key itself")
+        assert len(fp) == 8 and all(ch in "0123456789abcdef" for ch in fp), (
+            "a hex digest, not an excerpt")
+
+    def test_the_save_echoes_the_same_fingerprint_the_page_will_show(
+            self, tmp_path, monkeypatch):
+        """This is the whole point: two short strings the owner compares.
+        If they match, the key typed is the key the bot has."""
+        import json as _json
+
+        from catalyst.dashboard.maintenance import stored_credentials_checks
+        from catalyst.setup.first_run import SetupApp
+
+        path = tmp_path / "creds.json"
+        monkeypatch.setenv("CATALYST_CREDENTIALS", str(path))
+        app = SetupApp(credentials_path=str(path),
+                       alpaca_tester=lambda k, s, **kw: (True, "ok"),
+                       anthropic_tester=lambda k: (True, "ok"),
+                       admin_tester=lambda k: (True, "ok"),
+                       require_token=False)
+        admin = "sk-ant-admin01-" + "m" * 30
+        body = ("alpaca_key=PKAAAAAAAAAAAAAAAAAA&alpaca_secret=ssssssssssssssssss"
+                "&anthropic_key=sk-ant-aaaaaaaaaaaaaaaa"
+                f"&anthropic_admin_key={admin}&monthly_budget_usd=5").encode()
+        resp = _json.loads(app.handle(
+            "POST", "/save", body,
+            {"content-type": "application/x-www-form-urlencoded"}).body)
+        assert resp["ok"], resp
+        echoed = resp["fingerprints"]["anthropic_admin_key"]
+        assert echoed and echoed in resp["message"]
+
+        shown = {c.name: c for c in stored_credentials_checks()}
+        assert echoed in shown["Anthropic billing key (admin) - stored?"].summary
+
+    def test_a_missing_key_says_not_stored_rather_than_nothing(
+            self, tmp_path, monkeypatch):
+        from catalyst.dashboard.maintenance import stored_credentials_checks
+
+        self._configured(tmp_path, monkeypatch, admin="")
+        checks = {c.name: c for c in stored_credentials_checks()}
+        admin = checks["Anthropic billing key (admin) - stored?"]
+        assert admin.state == "unknown"
+        assert "not stored" in admin.summary
+
+    def test_an_unreadable_file_is_never_reported_as_nothing_entered(
+            self, tmp_path, monkeypatch):
+        """The defect that made the owner's two screens disagree without
+        either being obviously wrong."""
+        from catalyst.dashboard.maintenance import stored_credentials_checks
+
+        path = self._configured(tmp_path, monkeypatch)
+        path.write_text("{ this is not json")
+        checks = stored_credentials_checks()
+        assert checks[0].state == "fail"
+        assert "could not be read" in checks[0].summary
+        assert "NOT the same as having entered nothing" in checks[0].detail
+        assert not any("not stored" in c.summary for c in checks)
+
+    def test_a_fresh_machine_is_not_reported_as_broken(
+            self, tmp_path, monkeypatch):
+        from catalyst.dashboard.maintenance import stored_credentials_checks
+
+        monkeypatch.setenv("CATALYST_CREDENTIALS", str(tmp_path / "nope.json"))
+        checks = stored_credentials_checks()
+        assert checks[0].state == "unknown"
+        assert "not been completed" in checks[0].summary
+
+    def test_the_evidence_needs_no_probe_and_appears_on_a_plain_load(
+            self, tmp_path, monkeypatch):
+        """It used to appear only if you clicked "check now", which runs
+        live probes. "Did it save" must not require a network call."""
+        from catalyst.dashboard import maintenance
+        from catalyst.dashboard.db import Db
+        from catalyst.storage import init_db
+
+        self._configured(tmp_path, monkeypatch)
+        dbf = str(tmp_path / "m.db")
+        init_db(dbf).close()
+        report = maintenance.build_report(Db(dbf), None, run_active=False)
+        names = [c.name for c in report.checks]
+        assert "Anthropic billing key (admin) - stored?" in names

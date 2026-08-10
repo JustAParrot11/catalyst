@@ -950,27 +950,35 @@ class TestOwnerBudgetReconciliation:
             os.environ.pop("CATALYST_CREDENTIALS", None)
         return html
 
-    def test_a_higher_setting_is_enforced_and_prices_its_own_hurdle(
-            self, tmp_path, bare):
-        """CONTRACT CHANGED at the owner's request: a bigger figure is
-        now obeyed. The page must show what that choice costs - a fixed
-        bill is a return the strategy has to clear."""
+    def test_a_higher_setting_is_the_number_shown_everywhere(self, tmp_path, bare):
+        """THE BUG THIS PINS: the page printed the $5 base constant while
+        the governor spent against the owner's figure, so a budget raised
+        to $20 read "$0.00 of $5.00" forever and looked ignored. Both now
+        come from governor.scheduled_cap_cents()."""
         html = self._panel_with_budget(tmp_path, bare, 20)
-        assert "$20/month is the figure being enforced" in html
-        assert "above" in html
+        assert "$20 cap" in html, "the tile must show the cap in force"
+        assert "$5" not in html.split("cost-tiles")[1].split("</div></div>")[0]
+        assert "The cap above is <b>your</b> figure" in html
+        assert "$20.00 a month" in html
         assert "24.0% a year" in html, "the hurdle of the choice must be shown"
 
-    def test_a_tighter_setting_is_also_shown_with_its_hurdle(
-            self, tmp_path, bare):
+    def test_a_tighter_setting_is_also_the_number_shown(self, tmp_path, bare):
         html = self._panel_with_budget(tmp_path, bare, 2)
-        assert "$2/month is the figure being enforced" in html
-        assert "below" in html
+        assert "$2 cap" in html
+        assert "$2.00 a month" in html
         assert "2.4% a year" in html
 
-    def test_no_message_when_the_setting_matches_the_ceiling(self, tmp_path, bare):
-        html = self._panel_with_budget(tmp_path, bare, 5)
-        assert "has no effect" not in html
-        assert "tighter than" not in html
+    def test_with_no_budget_set_the_page_says_it_is_the_default(self, tmp_path, bare):
+        html = panels.cost_panel(Db(bare), p="cost")
+        assert "built-in default" in html
+        assert "The cap above is <b>your</b> figure" not in html
+
+    def test_the_meter_measures_against_the_cap_in_force(self, tmp_path, bare):
+        """The meter is the at-a-glance answer to "am I close to the
+        limit". Measured against the wrong cap it is worse than absent."""
+        html = self._panel_with_budget(tmp_path, bare, 20)
+        legend = html.split("meter-legend")[1][:200]
+        assert "$20/month" in legend
 
 
 class TestEnterpriseShell:

@@ -13,7 +13,7 @@ Sabotage log (house rule 4):
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import httpx
@@ -55,20 +55,43 @@ class TestOwnerBudget:
         d2 = authorize(est("8"), db, Decimal("0.10"),
                        owner_monthly_cap_cents=Decimal("100"))
         assert d2.authorized is False
-        assert "owner_capped" in d2.reason
+        assert "owner_set" in d2.reason
 
-    def test_owner_budget_is_bounded_by_the_human_ceiling(self, db):
-        """CONTRACT CHANGED 2026-08-10 at the owner's explicit request:
-        the field now sets the budget up as well as down. What it can
-        never do is escape OWNER_MAX_CAP_CENTS - an owner typing 100
-        dollars gets the ceiling, not 100 dollars. The old assertion
-        (that the field could only lower) was the previous design, not a
-        safety property, and it is replaced rather than deleted."""
-        from catalyst.cost.governor import OWNER_MAX_CAP_CENTS
+    def test_the_owners_figure_has_no_ceiling_of_its_own(self, db):
+        """CONTRACT CHANGED TWICE, both at the owner's explicit request.
+        First the field could only lower the cap; then it could raise it
+        up to a fixed $25; now there is no fixed ceiling at all, because
+        a hard-coded number cannot make "how much of my own money do I
+        spend" into a safety question - it can only go stale as the
+        account grows.
+
+        The guard against a slipped keyboard moved to where the number
+        is ENTERED (setup/first_run.py), which is the only place that
+        can tell a deliberate 100 from a mistyped one."""
         d = authorize(est("8"), db, Decimal("0.10"),
                       owner_monthly_cap_cents=Decimal("10000"))
-        assert d.cap_cents == OWNER_MAX_CAP_CENTS
-        assert d.cap_cents < Decimal("10000")
+        assert d.cap_cents == Decimal("10000"), (
+            "the owner's deliberate figure is the budget, whatever it is")
+
+    def test_a_negative_figure_reads_as_stop_never_as_no_limit(self, db):
+        """The one clamp that survives, and the only one that is a
+        safety property: below zero must not wrap into unlimited."""
+        d = authorize(est("8"), db, Decimal("0.10"),
+                      owner_monthly_cap_cents=Decimal("-500"))
+        assert d.cap_cents == Decimal("0")
+        assert d.authorized is False
+
+    def test_the_anti_ratchet_is_untouched_by_any_of_this(self, db):
+        """What the SYSTEM may hand itself out of its own profit still
+        stops dead at the hard bound. That one never moves."""
+        from catalyst.cost.governor import GOVERNOR_MAX_CAP_CENTS
+        db.execute("INSERT INTO closed_trades VALUES (?,?,?,?,?,?,?,?,?)",
+                   ("p9", "live", "10.00", "9000.00", "target_reached",
+                    100, 5, 3, (NOW - timedelta(days=40)).isoformat()))
+        db.commit()
+        d = authorize(est("8"), db, Decimal("0.10"),
+                      owner_monthly_cap_cents=None)
+        assert d.cap_cents <= GOVERNOR_MAX_CAP_CENTS
 
     def test_none_means_no_owner_constraint(self, db):
         d = authorize(est("8"), db, Decimal("0.10"),

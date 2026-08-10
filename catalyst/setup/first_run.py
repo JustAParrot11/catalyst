@@ -118,11 +118,14 @@ FIELDS: tuple[Field, ...] = (
         label="Monthly research budget",
         explanation=(
             "The most the bot may spend on Claude research in a month, "
-            "in US dollars. Five is the recommended figure. You can set "
-            "it higher or lower and the bot obeys you either way, up to "
-            "a maximum of $25 - above that the strategy would have to "
-            "beat about 30 percent a year just to cover the bill. Set 0 "
-            "to stop it researching, and therefore trading, entirely. "
+            "in US dollars. Five is the recommended figure to start. "
+            "You can set it to anything and the bot obeys you - there "
+            "is no ceiling, because how much of your own money to "
+            "spend is your decision. Above about $25 a month the "
+            "strategy has to beat roughly 30 percent a year just to "
+            "cover the bill, and the box tells you the figure for "
+            "whatever you type. Set 0 to stop it researching, and "
+            "therefore trading, entirely. "
             "Separately, the bot may add a little to its own budget out "
             "of profit it has actually banked, never out of profit it "
             "merely hopes for, and never past $8 on its own."
@@ -302,16 +305,18 @@ function post(path, payload){
       'The page could not reach the bot. It may still be starting up - '
       + 'wait ten seconds and try again. (' + e + ')'}; });
 }
-var OWNER_MAX_USD = 25;
+/* No ceiling: the owner sets their own budget. What replaces the wall
+   is the cost of the choice, priced at the moment of choosing. */
+var ADVICE_USD = 25;
 function budgetHint(){
   var el = q('monthly_budget_usd'); if(!el) return;
   var hint = q('monthly_budget_usd_hint'); if(!hint) return;
   var v = parseFloat(el.value);
   if (isNaN(v)) { hint.textContent = ''; return; }
-  if (v > OWNER_MAX_USD) {
-    hint.textContent = 'Above the $' + OWNER_MAX_USD + ' maximum, so the bot '
-      + 'will use $' + OWNER_MAX_USD + ' a month.';
-    v = OWNER_MAX_USD;
+  if (v > ADVICE_USD) {
+    hint.textContent = 'Above $' + ADVICE_USD + ' a month the bot has to beat '
+      + 'roughly 30% a year just to cover its own bill. It will obey you, but '
+      + 'that is the bar you are setting.';
   } else if (v === 0) {
     hint.textContent = 'This stops the bot researching anything at all, so '
       + 'it will never place a trade.';
@@ -387,12 +392,20 @@ function replaceKey(which){
 function saveSettings(ev){
   if (ev && ev.preventDefault) { ev.preventDefault(); }
   show('settings_result', true, 'Saving...');
+  var cb = q('confirm_big_budget');
   post(PREFIX + '/settings', {
     monthly_budget_usd: val('monthly_budget_usd'),
-    anthropic_admin_key: val('anthropic_admin_key')
+    anthropic_admin_key: val('anthropic_admin_key'),
+    confirm_big_budget: (cb && cb.checked) ? '1' : ''
   }).then(function(r){
     show('settings_result', r.ok, r.message);
-    if (r.ok) { q('anthropic_admin_key').value = ''; }
+    var wrap = q('confirm_big_wrap');
+    if (r.needs_confirmation && wrap) { wrap.style.display = 'block'; }
+    if (r.ok) {
+      q('anthropic_admin_key').value = '';
+      if (wrap) { wrap.style.display = 'none'; }
+      if (cb) { cb.checked = false; }
+    }
   });
   return false;
 }
@@ -498,6 +511,41 @@ def render_setup_page(prefix: str = "") -> str:
     return _shell("Catalyst setup", inner, prefix)
 
 
+def _budget_typo_guard(new_usd: float, current_usd: str,
+                       confirmed: bool) -> str:
+    """The guard that replaced the hard $25 ceiling.
+
+    A fixed ceiling answers the wrong question. "How much of my own
+    money do I spend" is the owner's call, and a hard-coded number can
+    only go stale as the account grows. What a ceiling was really
+    protecting against is a slipped keyboard - 200 typed as 2000 - and
+    that is a question about the KEYSTROKE, not about the policy, so it
+    belongs here at the point of entry where a confirmation can be
+    asked for.
+
+    Returns a message when the figure needs confirming, or "" to allow.
+    """
+    from catalyst.cost.governor import OWNER_TYPO_GUARD_FACTOR
+
+    if confirmed or new_usd <= 0:
+        return ""
+    try:
+        current = float(current_usd)
+    except (TypeError, ValueError):
+        current = 5.0
+    current = current if current > 0 else 5.0
+    if new_usd <= current * float(OWNER_TYPO_GUARD_FACTOR):
+        return ""
+    hurdle = new_usd * 12 / 1000 * 100
+    return (
+        f"That is ${new_usd:g} a month, more than "
+        f"{OWNER_TYPO_GUARD_FACTOR:g} times your current ${current:g}. "
+        f"On a $1,000 account it is {hurdle:.0f}% a year that the strategy "
+        "has to beat before a single trade counts as good. If you meant it, "
+        "tick the box to confirm and save again - the bot will obey you. "
+        "If a digit slipped, fix the number instead.")
+
+
 def render_configured_page(prefix: str = "", *, budget_usd: str = "5",
                            admin_key_present: bool = False) -> str:
     """The page after first run: settings changeable, keys not shown.
@@ -525,12 +573,18 @@ def render_configured_page(prefix: str = "", *, budget_usd: str = "5",
         '<form id="settings_form" onsubmit="return saveSettings(event)">'
         '<label for="monthly_budget_usd">The most the bot may spend on Claude '
         "research in a month, in US dollars. It obeys you either way, up to a "
-        "maximum of $25. Set 0 to stop it researching, and therefore trading, "
+        "It obeys whatever you set - there is no ceiling, because how much "
+        "of your own money to spend is your decision, not the bot's. Above "
+        "$25 a month it has to beat roughly 30% a year just to cover its own "
+        "bill. Set 0 to stop it researching, and therefore trading, "
         "entirely.</label>"
         '<input type="number" id="monthly_budget_usd" name="monthly_budget_usd" '
-        f'min="0" max="25" step="0.5" value="{html.escape(budget_usd)}" '
+        f'min="0" step="0.5" value="{html.escape(budget_usd)}" '
         'oninput="budgetHint()">'
         '<p class="hint" id="monthly_budget_usd_hint"></p>'
+        '<label class="prov" id="confirm_big_wrap" style="display:none">'
+        '<input type="checkbox" id="confirm_big_budget"> '
+        'Yes, I meant that figure</label>'
 
         "<h2>Anthropic billing key <span class=\"opt\">(optional)</span></h2>"
         f'<p class="hint">{admin_state}</p>'
@@ -870,6 +924,8 @@ class SetupApp:
 
         return _json(200, {
             "ok": True,
+            "fingerprints": creds.load_credentials(
+                self.credentials_path).fingerprints(),
             "message": (f"Saved: the {changed} are replaced and were tested "
                         "before anything was written. Nothing else changed - "
                         "your other keys, budget and account choice are as "
@@ -897,6 +953,12 @@ class SetupApp:
                             "must be a plain number of dollars - "
                             f"\"{html.escape(budget_raw)}\" is not one. Try 5."),
             }, cookie)
+
+        refused = _budget_typo_guard(budget, self._current_settings()[0],
+                                     bool(data.get("confirm_big_budget")))
+        if refused:
+            return _json(200, {"ok": False, "message": refused,
+                               "needs_confirmation": True}, cookie)
 
         admin_raw = (data.get("anthropic_admin_key") or "").strip()
         if admin_raw:
@@ -934,8 +996,16 @@ class SetupApp:
             }, cookie)
 
         hurdle = budget * 12 / 1000 * 100
-        note = (" A billing key is saved, so tonight's bill check will read "
-                "your real Anthropic costs." if admin_raw else "")
+        note = ""
+        if admin_raw:
+            # The fingerprint is the EVIDENCE. "Saved" was already being
+            # said when the key never left the page; a short hash the
+            # owner can match against the Maintenance page turns that
+            # claim into something checkable.
+            note = (" Billing key stored, fingerprint "
+                    f"{creds.fingerprint(admin_raw)} - the Maintenance page "
+                    "shows the same fingerprint for what the bot actually "
+                    "reads, so you can confirm it matches.")
         if budget == 0:
             spend = ("The bot will not spend anything on research, so it will "
                      "not trade.")
@@ -1048,11 +1118,19 @@ class SetupApp:
             except Exception:  # noqa: BLE001 - a callback must not break setup
                 _log.exception("post-setup callback failed")
 
+        stored = creds.load_credentials(self.credentials_path)
+        fp = stored.fingerprints().get("anthropic_admin_key") or ""
         return _json(200, {
             "ok": True,
+            "fingerprints": stored.fingerprints(),
             "message": ("All saved, and both connections worked. Catalyst is starting "
                         "now and will begin looking for trades on the next market "
-                        "session. You can close this page."),
+                        "session."
+                        + (f" Billing key stored, fingerprint {fp} - the "
+                           "Maintenance page shows the same fingerprint for "
+                           "what the bot reads, so you can confirm it matches."
+                           if fp else "")
+                        + " You can close this page."),
         }, cookie)
 
 

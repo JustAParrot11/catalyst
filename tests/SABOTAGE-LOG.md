@@ -695,3 +695,15 @@ change kept from this session is the strengthened assertion block in
   remote: a change on a feature branch reports NOTHING CHANGED with an
   unmoved commit, and the same change merged to main moves the commit
   and completes.
+- Owner cap and credential evidence (2026-08-10, owner-reported). Five
+  sabotages: the dashboard reading BASE_CAP_CENTS again (the reported
+  bug - a raised budget never appearing); the typo guard always
+  allowing; the guard measuring against a fixed 5 rather than the
+  current figure (which would block growth in steps); an unreadable
+  credentials file reported as "not entered"; and fingerprint() returning
+  a slice of the key.
+  THE LAST ONE WAS NOT CAUGHT FIRST TIME: the test compared 12-character
+  chunks of the key against the output, and the sabotage returned only 8
+  characters, so nothing matched. Rewritten to state the invariant
+  directly - the fingerprint must not be a substring of the key, and
+  must be 8 hex digits - after which the sabotage fails.

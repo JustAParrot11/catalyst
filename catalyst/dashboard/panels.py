@@ -399,22 +399,39 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
          f"{dollars(c.manual_mtd_cents)}, never pooled"),
     ]))
 
-    # Reconcile the owner's typed figure with the cap actually enforced.
-    # Owner report 2026-08-10: entered 20 on the setup page, saw $5
-    # everywhere afterwards, and nothing on this page explained why.
-    # The setting can only ever TIGHTEN the cap (governor.authorize).
-    if c.owner_budget_usd is not None:
-        owner_cents = c.owner_budget_usd * 100
-        hurdle = float(owner_cents) * 12 / 100 / 1000 * 100
-        if owner_cents != c.base_cap_cents:
-            out.append(prov(
-                f"Your budget of ${c.owner_budget_usd:g}/month is the figure "
-                f"being enforced, {'above' if owner_cents > c.base_cap_cents else 'below'} "
-                f"the {dollars(c.base_cap_cents)} default. That is "
-                f"{hurdle:.1f}% a year on a $1,000 account - the return the "
-                "strategy has to beat before a trade counts as good. Separately, "
-                "the bot may add to its own budget out of banked profit, never "
-                f"past {dollars(c.max_cap_cents)} on its own."))
+    # WHICH BOUND IS IN FORCE, named. Owner report 2026-08-10: entered
+    # 20 on the setup page and saw "$5" everywhere afterwards, because
+    # this page printed the base constant while the governor spent
+    # against the owner's figure. Both now come from
+    # governor.scheduled_cap_cents(), so they cannot disagree - and the
+    # page says which one set the number rather than leaving the reader
+    # to work out whether their setting took.
+    if c.creds_error:
+        out.append(alarm(
+            f'<b id="{p}-creds-unreadable">Your saved settings could not be '
+            "read, so the cap above is the built-in default and may not be "
+            "the one you chose.</b> This is NOT the same as having entered "
+            f"nothing. Raw error: <code>{esc(c.creds_error)}</code>"))
+    elif c.cap_source == "_owner_set":
+        hurdle = float(c.base_cap_cents) * 12 / 100 / 1000 * 100
+        out.append(ok(
+            f'<span id="{p}-cap-source">The cap above is <b>your</b> figure: '
+            f"{dollars(c.base_cap_cents)} a month, saved on the settings page "
+            f"and enforced by the governor. That is {hurdle:.1f}% a year on a "
+            "$1,000 account - the return the strategy has to beat before a "
+            "trade counts as good. Separately, the bot may add to its own "
+            f"budget out of banked profit, never past {dollars(c.max_cap_cents)} "
+            "on its own.</span>"))
+    elif c.cap_source == "_hard_capped":
+        out.append(prov(
+            f"The cap above is the hard ceiling of {dollars(c.max_cap_cents)}. "
+            "Banked profit would otherwise have raised it further; that bound "
+            "never moves without a human editing it."))
+    else:
+        out.append(prov(
+            f"The cap above is the built-in default of {dollars(c.base_cap_cents)} "
+            "a month. You have not set a budget of your own - the settings page "
+            "takes one, and the bot obeys it either way."))
 
     # Pace against the cap. days_elapsed is already on the panel; the
     # marker is where an evenly-spent month would sit today, so under

@@ -448,13 +448,15 @@ class TestOwnerSetsTheCap:
                                 of its own realised profit. Unchanged at
                                 $8. This is the anti-ratchet: a lucky
                                 month must not walk the cap upward.
-      OWNER_MAX_CAP_CENTS     - the most a HUMAN may deliberately set.
-                                BUILD-BRIEF's absolute ceiling, above
-                                which the bot must beat ~30%/yr just to
-                                match cash.
+      the owner's figure      - a person deciding how much of their own
+                                money to spend. NO fixed ceiling, by
+                                request: the typo guard lives at the
+                                point of entry, which is the only place
+                                that can tell a deliberate large figure
+                                from a slipped keyboard.
 
     A human choosing to spend more is a decision; a system paying itself
-    more is a ratchet. Only the first is now possible from the UI.
+    more is a ratchet. Only the second needs a wall here.
     """
 
     def _authorize(self, conn, estimate_cents, owner_cents=None, profit=None):
@@ -479,11 +481,18 @@ class TestOwnerSetsTheCap:
         assert d.cap_cents == Decimal("100")
         assert d.authorized is False
 
-    def test_owner_cannot_exceed_the_absolute_human_ceiling(self, tmp_db):
-        from catalyst.cost.governor import OWNER_MAX_CAP_CENTS
+    def test_a_large_deliberate_figure_is_honoured(self, tmp_db):
+        """No ceiling here by design. The guard that stops a mistyped
+        99999 becoming a budget is at the point of ENTRY, where a
+        confirmation can be demanded; the governor's job is to enforce
+        the number it was given, not to second-guess the owner."""
         d = self._authorize(tmp_db, 10, owner_cents=999999)
-        assert d.cap_cents == OWNER_MAX_CAP_CENTS, (
-            "a typo of 99999 must not become a 99999-cent budget")
+        assert d.cap_cents == Decimal("999999")
+
+    def test_a_negative_reads_as_stop_never_as_no_limit(self, tmp_db):
+        d = self._authorize(tmp_db, 1, owner_cents=-999)
+        assert d.cap_cents == Decimal("0")
+        assert d.authorized is False
 
     def test_zero_means_stop_spending_entirely(self, tmp_db):
         d = self._authorize(tmp_db, 1, owner_cents=0)

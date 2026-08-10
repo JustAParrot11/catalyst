@@ -1311,3 +1311,75 @@ class TestKeysAreReplacedOneAtATime:
         assert "replaceKey('alpaca')" in page
         assert "replaceKey('anthropic')" in page
         assert "does not mean re-typing anything else" in page
+
+
+class TestTheBudgetFieldGuardsAgainstATypo:
+    """The hard $25 ceiling was removed at the owner's request - how much
+    of your own money to spend is not a safety question, and a hard-coded
+    number can only go stale as the account grows.
+
+    What a ceiling was really protecting against is a slipped keyboard,
+    and that is a question about the KEYSTROKE, so the guard lives here
+    at the point of entry where a confirmation can be asked for."""
+
+    def _configured(self, tmp_path, budget="5"):
+        app = _app(tmp_path)
+        app.admin_tester = lambda k: (True, "ok")
+        _post_save(app, _body(monthly_budget_usd=budget))
+        return app
+
+    def _settings(self, app, **payload):
+        return json.loads(app.handle(
+            "POST", "/settings", json.dumps(payload).encode(),
+            {"content-type": "application/json"}).body)
+
+    def test_a_wild_jump_is_refused_until_confirmed(self, tmp_path):
+        app = self._configured(tmp_path, "5")
+        r = self._settings(app, monthly_budget_usd="2000")
+        assert not r["ok"]
+        assert r["needs_confirmation"] is True
+        assert "2400% a year" in r["message"]
+        loaded = creds.load_credentials(str(tmp_path / "creds.json"))
+        assert loaded.settings["monthly_budget_usd"] == 5, "nothing may change"
+
+    def test_the_same_figure_confirmed_is_obeyed(self, tmp_path):
+        """The point is a speed bump, not a wall. Confirmed, the owner's
+        number is the budget however large."""
+        app = self._configured(tmp_path, "5")
+        r = self._settings(app, monthly_budget_usd="2000",
+                           confirm_big_budget="1")
+        assert r["ok"], r
+        loaded = creds.load_credentials(str(tmp_path / "creds.json"))
+        assert loaded.settings["monthly_budget_usd"] == 2000
+
+    @pytest.mark.parametrize("new", ["10", "25", "50"])
+    def test_an_ordinary_increase_needs_no_confirmation(self, tmp_path, new):
+        """5 -> 50 is a tenfold rise and still plausible as a decision.
+        The guard must not turn into the ceiling it replaced."""
+        app = self._configured(tmp_path, "5")
+        assert self._settings(app, monthly_budget_usd=new)["ok"]
+
+    def test_growing_the_budget_in_steps_is_never_blocked(self, tmp_path):
+        """The owner's stated reason for removing the ceiling: "so i can
+        manually change it as we grow". Each step is measured against the
+        CURRENT figure, so repeated raises keep working."""
+        app = self._configured(tmp_path, "5")
+        for target in ("40", "300", "2500"):
+            assert self._settings(app, monthly_budget_usd=target)["ok"], target
+        loaded = creds.load_credentials(str(tmp_path / "creds.json"))
+        assert loaded.settings["monthly_budget_usd"] == 2500
+
+    def test_lowering_is_never_guarded(self, tmp_path):
+        app = self._configured(tmp_path, "100")
+        assert self._settings(app, monthly_budget_usd="1")["ok"]
+
+    def test_zero_is_never_guarded(self, tmp_path):
+        """0 means stop, and stopping must never need a confirmation."""
+        app = self._configured(tmp_path, "100")
+        assert self._settings(app, monthly_budget_usd="0")["ok"]
+
+    def test_the_form_carries_the_confirmation_box(self, tmp_path):
+        app = self._configured(tmp_path)
+        page = app.handle("GET", "/", b"", {}).body.decode()
+        assert 'id="confirm_big_budget"' in page
+        assert "confirm_big_budget" in page.split("function saveSettings")[1]

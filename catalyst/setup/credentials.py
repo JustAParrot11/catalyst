@@ -323,9 +323,37 @@ class Credentials:
             "anthropic_admin_key": bool(self.anthropic_admin_key),
         }
 
+    def fingerprints(self) -> dict[str, str]:
+        """A short, safe identifier per credential - see fingerprint()."""
+        return {name: fingerprint(getattr(self, name))
+                for name in _SECRET_FIELDS}
+
 
 _SECRET_FIELDS = ("alpaca_key", "alpaca_secret", "anthropic_key",
                   "dashboard_token", "anthropic_admin_key")
+
+
+def fingerprint(value: str | None) -> str:
+    """A short, non-reversible identifier for a secret.
+
+    The owner reported saving an admin key, being told it worked, and
+    then seeing the maintenance page say no key was present - with no
+    way to tell which of the two screens was lying. "Is it set" as a
+    boolean cannot answer that, because both screens can render a
+    boolean from different files or different moments.
+
+    A fingerprint can: the form echoes the fingerprint of what it just
+    wrote, the maintenance page shows the fingerprint of what it reads,
+    and the owner compares two short strings. It is a SHA-256 prefix, so
+    it is safe to display and to paste into a bug report - the key
+    cannot be recovered from it, and no part of the key appears in it.
+    """
+    text = (value or "").strip()
+    if not text:
+        return ""
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
 
 
 def _read_raw(path: Path) -> dict:

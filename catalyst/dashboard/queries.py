@@ -382,6 +382,12 @@ class CostPanel:
     reconcile_gap_days: int | None
     admin_key_present: bool
     owner_budget_usd: Decimal | None = None
+    #: Which bound set the cap above: "_owner_set", "_hard_capped", or
+    #: "" for the base. The page must name the bound, not just the number.
+    cap_source: str = ""
+    #: Non-None when the credentials file could not be READ. A read
+    #: failure must never be displayed as "nothing was entered".
+    creds_error: str | None = None
 
 
 def cost_panel(db: Db, as_of: date | None = None) -> CostPanel:
@@ -478,6 +484,7 @@ def cost_panel(db: Db, as_of: date | None = None) -> CostPanel:
         reconcile_gap_days = (yesterday - date.fromisoformat(last_reconciled_ok)).days
     admin_key_present = False
     owner_budget_usd = None
+    creds_error = None
     try:
         from catalyst.setup.credentials import load_credentials
         _creds = load_credentials()
@@ -485,8 +492,20 @@ def cost_panel(db: Db, as_of: date | None = None) -> CostPanel:
         raw_budget = (_creds.settings or {}).get("monthly_budget_usd")
         if raw_budget is not None:
             owner_budget_usd = Decimal(str(raw_budget))
-    except Exception:  # noqa: BLE001 - display only, never fatal
-        pass
+    except Exception as exc:  # noqa: BLE001 - display only, never fatal
+        creds_error = f"{type(exc).__name__}: {exc}"
+
+    # THE CAP THE GOVERNOR ACTUALLY USES, from the governor itself. This
+    # used to be gov.BASE_CAP_CENTS, so an owner who raised their budget
+    # to $20 still read "$0.00 of $5.00" everywhere and concluded the
+    # setting did nothing. It had in fact taken effect - only the screen
+    # was wrong, which is the worse of the two failures.
+    owner_cap_cents = (owner_budget_usd * 100) if owner_budget_usd is not None else None
+    try:
+        effective_cap, cap_source = gov.scheduled_cap_cents(
+            db.conn, gov.DEFAULT_GOVERNOR_PROFIT_SHARE, as_of, owner_cap_cents)
+    except Exception:  # noqa: BLE001 - fall back to the documented base
+        effective_cap, cap_source = gov.BASE_CAP_CENTS, "_unreadable"
 
     return CostPanel(
         as_of=as_of, month_prefix=month, days_elapsed=as_of.day,
@@ -501,12 +520,14 @@ def cost_panel(db: Db, as_of: date | None = None) -> CostPanel:
         governor_q=governor_q, billed_q=billed_q,
         billed_days=billed_q.row_count, billed_total_cents=billed_total,
         rates_stale=rates_stale(as_of), rates_verified_on=RATES_VERIFIED_ON,
-        base_cap_cents=gov.BASE_CAP_CENTS, max_cap_cents=gov.GOVERNOR_MAX_CAP_CENTS,
+        base_cap_cents=effective_cap, cap_source=cap_source,
+        max_cap_cents=gov.GOVERNOR_MAX_CAP_CENTS,
         manual_month_cap_cents=gov.MANUAL_SPEND_CAP_CENTS_PER_MONTH,
         check_failed_q=check_failed_q, last_reconciled_ok=last_reconciled_ok,
         reconcile_gap_days=reconcile_gap_days,
         admin_key_present=admin_key_present,
         owner_budget_usd=owner_budget_usd,
+        creds_error=creds_error,
     )
 
 
