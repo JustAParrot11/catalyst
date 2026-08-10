@@ -88,6 +88,56 @@ def _handle_signal(signum, _frame) -> None:
     _stop.set()
 
 
+def _anthropic_transport(api_key: str):
+    """The live Messages API transport for research.investigate(). Built
+    only here, only from the credential store - the boundary itself never
+    sees a key. Documented shapes; exercised offline via injected stubs
+    (no Anthropic key exists in the build environment)."""
+    import httpx
+
+    def transport(payload: dict) -> dict:
+        resp = httpx.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"x-api-key": api_key,
+                     "anthropic-version": "2023-06-01",
+                     "content-type": "application/json"},
+            json=payload, timeout=120.0)
+        resp.raise_for_status()
+        return resp.json()
+
+    return transport
+
+
+def _run_one_cycle(db_file: str):
+    """Wire the live dependencies and run exactly one cycle. Thin by
+    design: every piece here is constructed, none is decided."""
+    import sqlite3
+
+    from catalyst.data.form4_adapter import flatten_form4_events
+    from catalyst.data.sources.edgar_form4 import fetch_events
+    from catalyst.discovery.candidates import build_candidates
+    from catalyst.discovery.correlation import cluster
+    from catalyst.execution.broker import Broker
+    from catalyst.orchestrator.cycle import run_cycle
+    from catalyst.setup.credentials import load_credentials
+
+    creds = load_credentials()
+    broker = Broker(creds.alpaca_key, creds.alpaca_secret)
+    transport = (_anthropic_transport(creds.anthropic_key)
+                 if creds.anthropic_key else None)
+
+    def feed(since, until):
+        return flatten_form4_events(fetch_events(since, until))
+
+    conn = sqlite3.connect(db_file)
+    try:
+        return run_cycle(conn, broker, transport, feed,
+                         build_candidates, cluster)
+    finally:
+        conn.close()
+        broker.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     configure_logging()
@@ -139,17 +189,13 @@ def main(argv: list[str] | None = None) -> int:
             announced_ready = True
 
         try:
-            from catalyst.orchestrator.cycle import run_cycle
-
-            run_cycle()
-        except NotImplementedError:
-            # Stages 3-5 land the pipeline behind this call. Until then
-            # the service stays up, serves the dashboard and says plainly
-            # that it is not trading, rather than crash-looping.
-            _log.warning(
-                "The trading pipeline is not built in this version yet, so no cycle "
-                "ran. The bot is otherwise healthy and its setup page is working."
-            )
+            report = _run_one_cycle(path)
+            if report.kill_switch.tripped:
+                _log.warning("Kill switch tripped: %s. New entries are "
+                             "blocked; protective duties still ran.",
+                             report.kill_switch.reason)
+            for err in report.errors:
+                _log.error("cycle: %s", err)
         except Exception:  # noqa: BLE001 - an unattended service keeps trying
             _log.exception("A trading cycle failed. The next one will still run.")
 

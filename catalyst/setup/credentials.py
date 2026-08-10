@@ -113,15 +113,30 @@ class RedactingFilter(logging.Filter):
     """
 
     def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
-        record.msg = redact(record.msg)
-        if record.args:
-            if isinstance(record.args, dict):
-                record.args = {k: redact(v) for k, v in record.args.items()}
-            else:
-                record.args = tuple(redact(a) for a in record.args)
-        if record.exc_text:
-            record.exc_text = redact(record.exc_text)
-        return True
+        # Redact STRINGS only: a secret is a string, an int is not - and
+        # coercing numeric args to str breaks any %d/%f format elsewhere
+        # in the process (this filter sits on the ROOT logger; it broke
+        # unrelated trading code during the stage-5/7 merge dry-run).
+        # And a logging filter must never raise into trading code: on
+        # any internal error the record is DROPPED, not passed through
+        # unredacted - fail closed for secrecy, open for logging.
+        try:
+            if isinstance(record.msg, str):
+                record.msg = redact(record.msg)
+            if record.args:
+                if isinstance(record.args, dict):
+                    record.args = {
+                        k: (redact(v) if isinstance(v, str) else v)
+                        for k, v in record.args.items()}
+                else:
+                    record.args = tuple(
+                        (redact(a) if isinstance(a, str) else a)
+                        for a in record.args)
+            if record.exc_text:
+                record.exc_text = redact(record.exc_text)
+            return True
+        except Exception:
+            return False
 
 
 def install_redacting_filter(logger: logging.Logger | None = None) -> None:

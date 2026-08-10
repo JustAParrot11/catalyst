@@ -1090,20 +1090,27 @@ def test_scheduler_selftest_is_what_the_installer_can_call(tmp_path, monkeypatch
     assert scheduler.main(["--selftest"]) == 0
 
 
-def test_scheduler_survives_a_pipeline_that_is_not_built_yet(tmp_path, monkeypatch, capsys):
+def test_scheduler_survives_a_failing_cycle_and_says_so(tmp_path, monkeypatch, capsys):
+    """The scheduler is wired to the real pipeline now (stage 5). The
+    invariant is unchanged in spirit: a cycle that cannot run must be
+    LOGGED as a failure while the service stays up - never silent, never
+    crash-looping, never leaking a secret into the log."""
     from catalyst.orchestrator import scheduler
 
     monkeypatch.setenv("CATALYST_DB", str(tmp_path / "state" / "catalyst.db"))
     monkeypatch.setattr(scheduler, "start_setup_server", lambda: None)
+
+    def boom(db_file):
+        raise RuntimeError("wired pipeline exploded for the test")
+
+    monkeypatch.setattr(scheduler, "_run_one_cycle", boom)
     creds.save_credentials(FAKE_ALPACA_KEY, FAKE_ALPACA_SECRET,
                            FAKE_ANTHROPIC_KEY, FAKE_TOKEN)
 
     assert scheduler.main(["--once"]) == 0
     logged = capsys.readouterr().out
-    assert "not built" in logged, (
-        "a service that cannot trade yet must say so in its log rather than "
-        "look healthy and silent"
-    )
+    assert "A trading cycle failed" in logged
+    assert "wired pipeline exploded" in logged   # the traceback, kept
     for secret in ALL_FAKES:
         assert secret not in logged
 
