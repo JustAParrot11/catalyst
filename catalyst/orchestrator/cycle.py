@@ -140,6 +140,20 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
         report.funnel["kill_switch"] = 1
         return report
 
+    # daily equity mark from the confirmed broker read (dashboard's
+    # performance-vs-SPY panel needs real marks, not reconstructions)
+    conn.execute(
+        """INSERT OR REPLACE INTO equity_snapshots
+           (day, taken_at, equity_usd, settled_cash_usd,
+            positions_notional, source)
+           VALUES (?,?,?,?,?,?)""",
+        (now.date().isoformat(), now.isoformat(), str(portfolio.equity_usd),
+         str(portfolio.settled_cash_usd),
+         str(sum((p.notional_usd for p in portfolio.open_positions),
+                 Decimal("0"))),
+         "broker_read"))
+    conn.commit()
+
     # ---- 2. reconcile what already happened before deciding anything new
     try:
         reconcile(broker, conn)

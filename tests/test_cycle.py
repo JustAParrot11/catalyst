@@ -181,6 +181,10 @@ class TestHappyPath:
         assert db.execute("SELECT action FROM risk_decisions").fetchone()[0] == "trade"
         assert db.execute("SELECT COUNT(*) FROM raw_events").fetchone()[0] == 1
         assert db.execute("SELECT COUNT(*) FROM refusals").fetchone()[0] == 0
+        # daily equity mark from the confirmed broker read
+        snap = db.execute("SELECT day, equity_usd, source "
+                          "FROM equity_snapshots").fetchone()
+        assert snap == ("2026-08-10", "1000", "broker_read")
 
     def test_second_cycle_screens_out_researched_candidate(self, db):
         broker, _ = broker_for()

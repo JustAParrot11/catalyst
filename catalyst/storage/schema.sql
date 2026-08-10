@@ -257,3 +257,34 @@ CREATE TABLE IF NOT EXISTS backtest_sample_stats (
     max_drawdown                          TEXT NOT NULL,
     return_per_trade_needed_to_break_even TEXT NOT NULL
 );
+
+-- observability (requested by ui-designer, folded in by the
+-- coordinating session; DDL authored in catalyst/dashboard/schema_logs.sql)
+CREATE TABLE IF NOT EXISTS logs (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts             TEXT NOT NULL,          -- ISO-8601 UTC
+    level          TEXT NOT NULL CHECK (level IN ('DEBUG','INFO','WARNING','ERROR','CRITICAL')),
+    component      TEXT NOT NULL,          -- 'data.edgar', 'risk.evaluate', ...
+    message        TEXT NOT NULL,
+    cycle_id       TEXT,                   -- ties a line to one orchestrator cycle
+    candidate_id   TEXT,                   -- ties a line to one decision trace
+    traceback_text TEXT,                   -- full traceback on errors
+    context_json   TEXT                    -- state at the time, JSON object
+);
+CREATE INDEX IF NOT EXISTS idx_logs_ts        ON logs (ts);
+CREATE INDEX IF NOT EXISTS idx_logs_level_ts  ON logs (level, ts);
+CREATE INDEX IF NOT EXISTS idx_logs_component ON logs (component, ts);
+
+-- daily equity marks so performance-vs-SPY can be drawn from real state,
+-- not reconstructed from closed trades alone (ui-designer request #1:
+-- without this, unrealised P&L is invisible and exposure matching is
+-- impossible). Written once per cycle from the confirmed broker read.
+CREATE TABLE IF NOT EXISTS equity_snapshots (
+    day                  TEXT NOT NULL,    -- ISO date, UTC
+    taken_at             TEXT NOT NULL,
+    equity_usd           TEXT NOT NULL,
+    settled_cash_usd     TEXT NOT NULL,
+    positions_notional   TEXT NOT NULL,
+    source               TEXT NOT NULL,    -- 'broker_read'
+    PRIMARY KEY (day, source)
+);
