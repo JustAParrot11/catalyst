@@ -112,6 +112,9 @@ def _anthropic_transport(api_key: str):
     (no Anthropic key exists in the build environment)."""
     import httpx
 
+    class AnthropicHTTPError(RuntimeError):
+        """Carries the API's own explanation, not just a status code."""
+
     def transport(payload: dict) -> dict:
         resp = httpx.post(
             "https://api.anthropic.com/v1/messages",
@@ -119,7 +122,15 @@ def _anthropic_transport(api_key: str):
                      "anthropic-version": "2023-06-01",
                      "content-type": "application/json"},
             json=payload, timeout=120.0)
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            # raise_for_status() THREW THE BODY AWAY, so the owner's
+            # funnel showed "400 Bad Request" and a link to MDN - which
+            # says nothing about what this request got wrong. Anthropic
+            # states the exact objection in the response body; that is
+            # the only part worth reading (house rule 3).
+            detail = (resp.text or "")[:800]
+            raise AnthropicHTTPError(
+                f"HTTP {resp.status_code} from the Messages API: {detail}")
         return resp.json()
 
     return transport

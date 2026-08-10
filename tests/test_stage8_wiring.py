@@ -57,12 +57,18 @@ class TestOwnerBudget:
         assert d2.authorized is False
         assert "owner_capped" in d2.reason
 
-    def test_owner_budget_cannot_raise_the_cap(self, db):
-        """An owner typing 100 dollars still hits the $5 base / $8 hard
-        clamp - the field only ever lowers."""
+    def test_owner_budget_is_bounded_by_the_human_ceiling(self, db):
+        """CONTRACT CHANGED 2026-08-10 at the owner's explicit request:
+        the field now sets the budget up as well as down. What it can
+        never do is escape OWNER_MAX_CAP_CENTS - an owner typing 100
+        dollars gets the ceiling, not 100 dollars. The old assertion
+        (that the field could only lower) was the previous design, not a
+        safety property, and it is replaced rather than deleted."""
+        from catalyst.cost.governor import OWNER_MAX_CAP_CENTS
         d = authorize(est("8"), db, Decimal("0.10"),
                       owner_monthly_cap_cents=Decimal("10000"))
-        assert d.cap_cents == BASE_CAP_CENTS   # unchanged by a big number
+        assert d.cap_cents == OWNER_MAX_CAP_CENTS
+        assert d.cap_cents < Decimal("10000")
 
     def test_none_means_no_owner_constraint(self, db):
         d = authorize(est("8"), db, Decimal("0.10"),

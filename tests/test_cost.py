@@ -435,3 +435,76 @@ class TestLedger:
         insert_cost_row(tmp_db, kind="manual", cents="700")
         assert month_to_date_cents("scheduled", tmp_db, TODAY) == Decimal("100")
         assert month_to_date_cents("manual", tmp_db, TODAY) == Decimal("700")
+
+
+class TestOwnerSetsTheCap:
+    """The owner asked to set the bot's monthly budget from the browser,
+    upward as well as downward.
+
+    The two-tier design is PRESERVED, not abandoned, by splitting the
+    two ceilings that were previously one:
+
+      GOVERNOR_MAX_CAP_CENTS  - the most the SYSTEM may hand itself out
+                                of its own realised profit. Unchanged at
+                                $8. This is the anti-ratchet: a lucky
+                                month must not walk the cap upward.
+      OWNER_MAX_CAP_CENTS     - the most a HUMAN may deliberately set.
+                                BUILD-BRIEF's absolute ceiling, above
+                                which the bot must beat ~30%/yr just to
+                                match cash.
+
+    A human choosing to spend more is a decision; a system paying itself
+    more is a ratchet. Only the first is now possible from the UI.
+    """
+
+    def _authorize(self, conn, estimate_cents, owner_cents=None, profit=None):
+        from catalyst.cost import CostEstimate
+        from catalyst.cost import governor as gov
+        est = CostEstimate(estimated_cents=Decimal(str(estimate_cents)),
+                           basis="test", kind="scheduled", component="research")
+        return gov.authorize(est, conn, Decimal("0.10"),
+                             owner_monthly_cap_cents=(
+                                 Decimal(str(owner_cents))
+                                 if owner_cents is not None else None))
+
+    def test_owner_can_raise_the_cap_above_the_base(self, tmp_db):
+        from catalyst.cost.governor import BASE_CAP_CENTS
+        d = self._authorize(tmp_db, BASE_CAP_CENTS + 100, owner_cents=1200)
+        assert d.cap_cents == Decimal("1200")
+        assert d.authorized is True, (
+            "spend inside the owner's own, higher, cap must be allowed")
+
+    def test_owner_can_still_tighten_below_the_base(self, tmp_db):
+        d = self._authorize(tmp_db, 150, owner_cents=100)
+        assert d.cap_cents == Decimal("100")
+        assert d.authorized is False
+
+    def test_owner_cannot_exceed_the_absolute_human_ceiling(self, tmp_db):
+        from catalyst.cost.governor import OWNER_MAX_CAP_CENTS
+        d = self._authorize(tmp_db, 10, owner_cents=999999)
+        assert d.cap_cents == OWNER_MAX_CAP_CENTS, (
+            "a typo of 99999 must not become a 99999-cent budget")
+
+    def test_zero_means_stop_spending_entirely(self, tmp_db):
+        d = self._authorize(tmp_db, 1, owner_cents=0)
+        assert d.cap_cents == Decimal("0")
+        assert d.authorized is False
+
+    def test_the_system_still_cannot_pay_itself_past_its_own_clamp(
+            self, tmp_db):
+        """The anti-ratchet is untouched: with NO owner figure set, a
+        huge realised profit still cannot lift the cap past $8."""
+        from catalyst.cost import governor as gov
+        from catalyst.cost.governor import GOVERNOR_MAX_CAP_CENTS
+        from datetime import datetime, timezone
+
+        insert_closed_trade(tmp_db, 500_000,
+                            datetime(2026, 7, 15, 14, 30, tzinfo=timezone.utc),
+                            mode="live")
+        d = self._authorize(tmp_db, 10, owner_cents=None)
+        assert d.cap_cents <= GOVERNOR_MAX_CAP_CENTS
+
+    def test_a_negative_figure_is_treated_as_zero_not_as_infinity(
+            self, tmp_db):
+        d = self._authorize(tmp_db, 1, owner_cents=-500)
+        assert d.cap_cents == Decimal("0")

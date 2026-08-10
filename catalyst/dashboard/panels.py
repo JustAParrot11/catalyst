@@ -363,20 +363,16 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
     # The setting can only ever TIGHTEN the cap (governor.authorize).
     if c.owner_budget_usd is not None:
         owner_cents = c.owner_budget_usd * 100
-        if owner_cents > c.base_cap_cents:
-            out.append(caveat(
-                f"You set a spending limit of ${c.owner_budget_usd:g} a month on "
-                f"the setup page, but the figure enforced is "
-                f"{dollars(c.base_cap_cents)}. Your setting can only ever "
-                "LOWER the ceiling the bot sets for itself, never raise it, so "
-                f"anything above ${c.base_cap_cents / 100:g} has no effect. "
-                "That ceiling moves only out of profit actually banked from "
-                f"closed trades, and never past {dollars(c.max_cap_cents)}."))
-        elif owner_cents < c.base_cap_cents:
+        hurdle = float(owner_cents) * 12 / 100 / 1000 * 100
+        if owner_cents != c.base_cap_cents:
             out.append(prov(
-                f"Your setup-page limit of ${c.owner_budget_usd:g}/month is "
-                f"tighter than the bot's own {dollars(c.base_cap_cents)} "
-                "ceiling, so yours is the one being enforced."))
+                f"Your budget of ${c.owner_budget_usd:g}/month is the figure "
+                f"being enforced, {'above' if owner_cents > c.base_cap_cents else 'below'} "
+                f"the {dollars(c.base_cap_cents)} default. That is "
+                f"{hurdle:.1f}% a year on a $1,000 account - the return the "
+                "strategy has to beat before a trade counts as good. Separately, "
+                "the bot may add to its own budget out of banked profit, never "
+                f"past {dollars(c.max_cap_cents)} on its own."))
 
     # Pace against the cap. days_elapsed is already on the panel; the
     # marker is where an evenly-spent month would sit today, so under

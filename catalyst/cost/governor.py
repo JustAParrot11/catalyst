@@ -37,6 +37,23 @@ BASE_CAP_CENTS = Decimal("500")                     # $5/month, hard (BUILD-BRIE
 # month walks the cap toward that line (audit F5).
 GOVERNOR_MAX_CAP_CENTS = Decimal("800")
 
+# HARD BOUND, and a DIFFERENT one: the most a HUMAN may deliberately
+# set from the dashboard. The two ceilings above and below were one
+# number until the owner asked to set the budget themselves, and they
+# do different jobs:
+#
+#   GOVERNOR_MAX_CAP_CENTS  bounds what the SYSTEM hands itself out of
+#                           its own realised profit - the anti-ratchet,
+#                           so a lucky month cannot walk the cap upward.
+#   OWNER_MAX_CAP_CENTS     bounds what a PERSON can choose on purpose.
+#
+# A human deciding to spend more is a decision; a system paying itself
+# more is a ratchet, and only the first is safe to allow. $25/month is
+# BUILD-BRIEF's absolute ceiling (~GBP 20), at which the strategy must
+# beat roughly 30%/year merely to match holding cash - which is why the
+# dashboard prints that hurdle beside the field rather than burying it.
+OWNER_MAX_CAP_CENTS = Decimal("2500")
+
 MANUAL_SPEND_CAP_CENTS_PER_MONTH = Decimal("2000")  # $20/month, human-set, never adaptive
 MANUAL_LIFETIME_BUDGET_CENTS = Decimal("20000")     # the $200 one-off build budget
                                                      # (BUILD-BRIEF: "not a monthly
@@ -86,9 +103,15 @@ def authorize(
         )
         cap = min(uncapped, GOVERNOR_MAX_CAP_CENTS)
         reason_suffix = "_hard_capped" if uncapped > GOVERNOR_MAX_CAP_CENTS else ""
-        if owner_monthly_cap_cents is not None \
-                and owner_monthly_cap_cents < cap:
-            cap = max(owner_monthly_cap_cents, Decimal("0"))
+        if owner_monthly_cap_cents is not None:
+            # The owner's figure REPLACES the base, up or down - it is a
+            # deliberate human decision, not the system rewarding itself
+            # - and is bounded by the human ceiling. A mistyped 99999
+            # must not become a 99999-cent budget, and a negative must
+            # read as "stop", never as "no limit".
+            owner = min(max(owner_monthly_cap_cents, Decimal("0")),
+                        OWNER_MAX_CAP_CENTS)
+            cap = owner
             reason_suffix = "_owner_capped"
         would_be = spent + estimate.estimated_cents
         if would_be > cap:
