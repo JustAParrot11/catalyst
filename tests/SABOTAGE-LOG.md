@@ -618,3 +618,25 @@ change kept from this session is the strengthened assertion block in
 - cost_api adapter: bucket-flattening removed (records=buckets) and
   missing-amount refusal removed (unreadable record priced as zero):
   both caught by test_cost_api_adapter. Restored, green.
+- Owner-editable token prices (2026-08-10). Six sabotages, all caught,
+  all restored:
+  1. Live-rate table reads the newest override regardless of its
+     effective date -> test_the_page_shows_the_rate_actually_in_force.
+  2. Price form leaked onto the compact summary card ->
+     test_the_compact_cost_summary_does_not_carry_the_price_form.
+  3. set_token_price swallows refusals and reports success -> four
+     test_set_token_price_refuses_bad_input cases.
+  4. Magnitude guard removed (3 accepted where 300 was meant) ->
+     test_typing_dollars_where_cents_are_wanted_is_refused.
+  5. Magnitude factor tightened to 1.1x (blocks a real rate change) ->
+     test_an_ordinary_rate_change_needs_no_confirmation.
+  6. Magnitude baseline taken from today instead of the effective date
+     -> test_the_guard_measures_against_the_rate_in_force_on_the_
+     effective_date. FIRST ATTEMPT AT THIS TEST DID NOT CATCH IT: both
+     dates fell inside Sonnet 5's intro window so the two baselines were
+     identical. Rewritten to assert which rate the refusal names, and
+     parametrised across 2026-08-31, after which it fails on sabotage.
+- Owner budget read from credentials (2026-08-10). Two sabotages:
+  finite/negative check removed (nan and -3 became spending limits), and
+  the parse failure re-raised instead of falling back to the base cap.
+  Both caught by TestOwnerBudgetIsReadSafely. Restored, green.

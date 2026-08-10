@@ -76,6 +76,29 @@ class TestOwnerBudget:
         assert d.cap_cents == BASE_CAP_CENTS
 
 
+class TestOwnerBudgetIsReadSafely:
+    """The setup page validates the budget on the way in, but the
+    credentials file outlives any one version of that page. An
+    unparseable value must fall back to the base cap, not take the
+    trading cycle down and not read as 'no limit'."""
+
+    def test_a_plain_number_becomes_cents(self):
+        from catalyst.orchestrator.scheduler import _owner_cap_cents
+        assert _owner_cap_cents("5") == Decimal("500")
+        assert _owner_cap_cents(12.5) == Decimal("1250")
+
+    def test_absent_means_the_base_cap(self):
+        from catalyst.orchestrator.scheduler import _owner_cap_cents
+        assert _owner_cap_cents(None) is None
+
+    @pytest.mark.parametrize("junk", ["", "five dollars", "nan", "inf",
+                                      "-3", [], {"a": 1}])
+    def test_junk_falls_back_to_the_base_cap_rather_than_raising(self, junk):
+        from catalyst.orchestrator.scheduler import _owner_cap_cents
+        assert _owner_cap_cents(junk) is None, (
+            f"{junk!r} must not become a spending limit")
+
+
 class TestDashboardServesSetup:
     def _server_bits(self, tmp_path):
         from catalyst.dashboard.server import make_server

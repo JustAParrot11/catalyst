@@ -13,7 +13,7 @@ catch what they claim to catch.
 import json
 import re
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -402,6 +402,154 @@ def test_acknowledge_records_who_and_when(seeded):
 def test_acknowledge_rejects_an_unknown_event(seeded):
     okay, message = server.acknowledge(seeded, "no-such-id", "a-human")
     assert not okay and "no unacknowledged reconciliation event" in message
+
+
+# ------------------------------------------------- owner-edited token prices
+
+
+def test_cost_page_offers_the_token_price_form_with_every_field_required(seeded):
+    html_out = panels.cost_panel(Db(seeded))
+    assert 'action="/set-token-price"' in html_out
+    for field in ("model", "effective_from", "input_cents_per_mtok",
+                  "output_cents_per_mtok", "set_by"):
+        assert f'name="{field}"' in html_out, field
+    # The unit is the whole trap here: cents per million, not dollars.
+    assert "CENTS per million tokens" in html_out
+    assert "from its date FORWARD" in html_out
+
+
+def test_the_compact_cost_summary_does_not_carry_the_price_form(seeded):
+    """The form is a write path; it belongs on the cost page, not on the
+    overview card where it would be clicked by accident."""
+    assert 'action="/set-token-price"' not in panels.cost_panel(Db(seeded), compact=True)
+
+
+def test_the_page_shows_the_rate_actually_in_force_not_the_newest_row(seeded):
+    """A rate dated in the future must NOT be shown as today's rate -
+    that would silently misstate what the ledger is pricing at."""
+    from catalyst.cost.overrides import set_override
+    conn = sqlite3.connect(seeded)
+    set_override(conn, "claude-sonnet-5", date.today() + timedelta(days=30),
+                 "300", "1500", set_by="a-human")
+    conn.close()
+    html_out = panels.cost_panel(Db(seeded))
+    live = html_out.split('id="cost-price-live"')[1].split("</table>")[0]
+    row = [r for r in live.split("<tr>") if "claude-sonnet-5<" in r]
+    assert len(row) == 1, live
+    assert ">200<" in row[0] and ">1000<" in row[0]   # intro rate still in force
+    assert ">300<" not in row[0] and "built-in table" in row[0]
+    # ...but the future change is visible in the history table.
+    hist = html_out.split('id="cost-price-history"')[1].split("</table>")[0]
+    assert ">300<" in hist and "a-human" in hist
+
+
+def test_a_rate_in_force_names_who_set_it(seeded):
+    from catalyst.cost.overrides import set_override
+    conn = sqlite3.connect(seeded)
+    set_override(conn, "claude-opus-5", date.today() - timedelta(days=1),
+                 "450", "2200", set_by="Billy")
+    conn.close()
+    live = panels.cost_panel(Db(seeded)).split('id="cost-price-live"')[1]
+    assert "set by Billy" in live
+    assert "$4.50" in live          # cents rendered as dollars alongside
+
+
+def test_never_overridden_says_so_rather_than_showing_an_unexplained_blank(seeded):
+    html_out = panels.cost_panel(Db(seeded))
+    assert "no rate has ever been overridden by hand" in html_out
+    assert "FROM pricing_overrides" in html_out       # the query, printed
+
+
+def test_set_token_price_endpoint_records_the_rate(seeded):
+    okay, message = server.set_token_price(seeded, {
+        "model": "claude-sonnet-5", "effective_from": "2026-09-01",
+        "input_cents_per_mtok": "300", "output_cents_per_mtok": "1500",
+        "set_by": "Billy"})
+    assert okay, message
+    conn = sqlite3.connect(seeded)
+    row = conn.execute(
+        "SELECT model, effective_from, input_cents_per_mtok, "
+        "output_cents_per_mtok, set_by FROM pricing_overrides").fetchone()
+    conn.close()
+    assert row == ("claude-sonnet-5", "2026-09-01", "300", "1500", "Billy")
+
+
+@pytest.mark.parametrize("bad, expect", [
+    ({"input_cents_per_mtok": "0"}, "greater than zero"),
+    ({"output_cents_per_mtok": "-5"}, "greater than zero"),
+    ({"set_by": "  "}, "who made it"),
+    ({"model": "gpt-9"}, "No such model"),
+    ({"effective_from": "next tuesday"}, "YYYY-MM-DD"),
+    ({"input_cents_per_mtok": "three hundred"}, "not a number"),
+])
+def test_set_token_price_refuses_bad_input_as_a_sentence(seeded, bad, expect):
+    form = {"model": "claude-sonnet-5", "effective_from": "2026-09-01",
+            "input_cents_per_mtok": "300", "output_cents_per_mtok": "1500",
+            "set_by": "Billy"}
+    form.update(bad)
+    okay, message = server.set_token_price(seeded, form)
+    assert not okay
+    assert expect in message, message
+    assert "Traceback" not in message
+    conn = sqlite3.connect(seeded)
+    count = conn.execute("SELECT COUNT(*) FROM pricing_overrides").fetchone()[0]
+    conn.close()
+    assert count == 0, "a refused rate must not reach the table"
+
+
+def test_typing_dollars_where_cents_are_wanted_is_refused(seeded):
+    """3 instead of 300 prices every later call at 1/100th and nothing on
+    the dashboard would look wrong. It has to be caught at entry."""
+    okay, message = server.set_token_price(seeded, {
+        "model": "claude-sonnet-5", "effective_from": "2026-09-01",
+        "input_cents_per_mtok": "3", "output_cents_per_mtok": "15",
+        "set_by": "Billy"})
+    assert not okay
+    assert "CENTS per MILLION tokens" in message
+    conn = sqlite3.connect(seeded)
+    assert conn.execute("SELECT COUNT(*) FROM pricing_overrides").fetchone()[0] == 0
+    conn.close()
+
+
+def test_a_genuinely_large_change_goes_through_when_confirmed(seeded):
+    okay, message = server.set_token_price(seeded, {
+        "model": "claude-sonnet-5", "effective_from": "2026-09-01",
+        "input_cents_per_mtok": "3", "output_cents_per_mtok": "15",
+        "set_by": "Billy", "allow_large_change": "1"})
+    assert okay, message
+    conn = sqlite3.connect(seeded)
+    assert conn.execute("SELECT COUNT(*) FROM pricing_overrides").fetchone()[0] == 1
+    conn.close()
+
+
+def test_an_ordinary_rate_change_needs_no_confirmation(seeded):
+    """The guard must not obstruct the change it exists to allow. On
+    2026-09-01 the built-in rate is 300/1500 (Sonnet 5's intro pricing
+    ended the day before), so this is a 20% rise on top of that - the
+    shape of every real published rate change."""
+    okay, message = server.set_token_price(seeded, {
+        "model": "claude-sonnet-5", "effective_from": "2026-09-01",
+        "input_cents_per_mtok": "360", "output_cents_per_mtok": "1800",
+        "set_by": "Billy"})
+    assert okay, message
+
+
+@pytest.mark.parametrize("effective, baseline", [
+    (date(2026, 8, 15), "200"),      # inside Sonnet 5's intro window
+    (date(2026, 9, 15), "300"),      # after it ends
+])
+def test_the_guard_measures_against_the_rate_in_force_on_the_effective_date(
+        seeded, effective, baseline):
+    """Not against today's rate. The two differ across 2026-08-31, and
+    measuring a backdated change against the wrong one would fire the
+    guard on a rate that was never in force."""
+    from catalyst.cost.overrides import set_override
+    conn = sqlite3.connect(seeded)
+    with pytest.raises(ValueError) as exc:
+        set_override(conn, "claude-sonnet-5", effective, "1", "5",
+                     set_by="Billy")
+    conn.close()
+    assert f"the {baseline} in force" in str(exc.value), str(exc.value)
 
 
 # ------------------------------------------------------------ decision trace

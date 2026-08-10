@@ -622,7 +622,113 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
             f"{p}-empty-governor", c.governor_q,
             meaning="the governor has never been asked to authorize anything",
         ))
+
+    out.append(_token_price_editor(db, p, c.as_of))
     return section(f"{p}-section", "Cost, with provenance on every number", "".join(out))
+
+
+def _token_price_editor(db: Db, p: str, as_of) -> str:
+    """Owner-entered token rates, date-effective and append-only.
+
+    Published rates change - Sonnet 5's introductory pricing ends
+    2026-08-31 - and the alternative to this form is editing pricing.py
+    and redeploying, which the owner should never be asked to do. The
+    three properties that matter are enforced in cost/overrides.py, not
+    here: effective-from rather than retroactive, append-only, and a
+    refusal of any zero or negative rate.
+    """
+    from catalyst.cost import overrides as _ovr
+    from catalyst.cost.pricing import MODEL_RATES_CENTS_PER_MTOK
+
+    out: list[str] = ["<h3>Token prices &mdash; what the ledger prices at</h3>"]
+
+    # What is in force today, per model, so the form has a baseline to
+    # correct rather than a blank box.
+    live_rows = []
+    for m in sorted(MODEL_RATES_CENTS_PER_MTOK):
+        try:
+            if db.conn is not None:
+                inp, outp = _ovr.rates_for_on(db.conn, m, as_of)
+            else:
+                from catalyst.cost.pricing import rates_for
+                inp, outp = rates_for(m, as_of)
+            source = "built-in table"
+            if db.conn is not None:
+                hit = db.q(
+                    "SELECT effective_from, set_by FROM pricing_overrides "
+                    "WHERE model = ? AND effective_from <= ? "
+                    "ORDER BY effective_from DESC, set_at DESC LIMIT 1",
+                    (m, as_of.isoformat()))
+                if hit.rows:
+                    source = (f"set by {hit.rows[0]['set_by']}, effective "
+                              f"{hit.rows[0]['effective_from']}")
+            live_rows.append([esc(m), f"{inp}", f"{outp}",
+                              f"${Decimal(inp) / 100:.2f}",
+                              f"${Decimal(outp) / 100:.2f}", esc(source)])
+        except Exception as exc:      # a pricing failure must be visible
+            live_rows.append([esc(m), "-", "-", "-", "-",
+                              esc(f"{type(exc).__name__}: {exc}")])
+    out.append(table(
+        f"{p}-price-live",
+        ["model", "input c/MTok", "output c/MTok", "input $/M", "output $/M",
+         "where this rate came from"],
+        live_rows, numeric_cols={1, 2, 3, 4}))
+
+    today = as_of.isoformat()
+    model_opts = "".join(
+        f'<option value="{esc(m)}"'
+        + (" selected" if m == "claude-sonnet-5" else "")
+        + f">{esc(m)}</option>"
+        for m in sorted(MODEL_RATES_CENTS_PER_MTOK))
+    out.append(
+        f'<form class="inline" id="{p}-price-form" method="post" '
+        'action="/set-token-price">'
+        f'<label class="prov">model <select name="model">{model_opts}</select>'
+        "</label> "
+        '<label class="prov">in force from <input type="date" '
+        f'name="effective_from" value="{esc(today)}" required></label> '
+        '<label class="prov">input cents per million tokens '
+        '<input type="number" step="0.01" min="0.01" '
+        'name="input_cents_per_mtok" required></label> '
+        '<label class="prov">output cents per million tokens '
+        '<input type="number" step="0.01" min="0.01" '
+        'name="output_cents_per_mtok" required></label> '
+        '<label class="prov">your name <input type="text" name="set_by" '
+        'required placeholder="who is making this change"></label> '
+        '<label class="prov"><input type="checkbox" name="allow_large_change" '
+        'value="1"> yes, the rate really did move more than 20x</label> '
+        '<button type="submit">Record new rate</button></form>')
+    out.append(prov(
+        "Rates are in CENTS per million tokens, so $3.00 per million is "
+        "300. A new rate applies from its date FORWARD only: spend already "
+        "recorded keeps the rate it was priced at, which is what keeps the "
+        "nightly comparison against the real Anthropic bill reconstructable. "
+        "A correction is a new row, never an edit, so the record of what was "
+        "believed when survives. A zero is refused at entry. Sonnet 5 is on "
+        "introductory pricing until 2026-08-31 and the built-in table "
+        "already knows that, so this form is only needed when published "
+        "rates change again."))
+
+    hist = db.q("SELECT model, effective_from, input_cents_per_mtok, "
+                "output_cents_per_mtok, set_by, set_at, note "
+                "FROM pricing_overrides ORDER BY set_at DESC LIMIT 50")
+    if hist.rows:
+        out.append(table(
+            f"{p}-price-history",
+            ["model", "in force from", "input c/MTok", "output c/MTok",
+             "set by", "recorded at", "note"],
+            [[esc(r["model"]), esc(r["effective_from"]),
+              esc(r["input_cents_per_mtok"]), esc(r["output_cents_per_mtok"]),
+              esc(r["set_by"]), esc(r["set_at"]), esc(r["note"] or "-")]
+             for r in hist.rows], numeric_cols={2, 3}))
+    else:
+        out.append(empty_block(
+            f"{p}-empty-price-history", hist,
+            meaning="no rate has ever been overridden by hand; every figure "
+                    "above is priced from the built-in table in "
+                    "catalyst/cost/pricing.py",
+        ))
+    return "".join(out)
 
 
 # --------------------------------------------------------------------------
