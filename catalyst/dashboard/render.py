@@ -272,6 +272,7 @@ NAV = [
     ("/decisions", "Decisions"),
     ("/refusals", "Refusals"),
     ("/logs", "Logs"),
+    ("/maintenance", "Maintenance"),
     ("/setup", "Setup"),
 ]
 

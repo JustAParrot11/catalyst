@@ -1,0 +1,387 @@
+"""Is everything actually talking to everything? The maintenance page.
+
+Owner request: one place that says whether each moving part is online -
+the bot itself, and each outside service it depends on.
+
+Two kinds of check, deliberately kept apart on the page, because they
+fail for different reasons and one of them is free:
+
+PASSIVE checks read the database only. They answer "has this part done
+its job recently", which is the question that catches a component that
+is quietly not running. They cost nothing and cannot fail.
+
+ACTIVE checks make one request to an outside service. They answer "can
+we reach it right now", which is what you want when something looks
+stuck. Every one of them is FREE:
+
+  - Alpaca trading + market data: included in the subscription.
+  - EDGAR: public, keyless. One request, well inside the 10 req/s limit.
+  - Anthropic ADMIN cost report: an admin read, no tokens, no charge.
+
+There is deliberately NO active check of the ordinary Anthropic key,
+because the only way to prove that key works is to send a message, and
+that costs money against a £20/month ceiling. Its health is inferred
+from the ledger instead - the last real research call the bot made.
+
+Every probe is injected, so the offline test suite drives all of this
+without a socket. Every failure carries the raw upstream text beside it
+(house rule 3), and no probe may raise: a maintenance page that dies
+when a service is down is the opposite of useful.
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+
+#: Short, because this runs while somebody waits for a page.
+PROBE_TIMEOUT_SECONDS = 6.0
+
+OK, WARN, FAIL, UNKNOWN = "ok", "warn", "fail", "unknown"
+
+
+@dataclass
+class Check:
+    name: str
+    group: str                       # "The bot itself" | "Outside services"
+    state: str                       # ok | warn | fail | unknown
+    summary: str                     # one line, plain English
+    detail: str = ""                 # what it means / what to do
+    raw: str = ""                    # verbatim upstream text on failure
+    latency_ms: int | None = None
+    free: bool = True
+
+
+def _age(iso: str | None):
+    if not iso:
+        return None
+    try:
+        when = datetime.fromisoformat(str(iso))
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) - when
+    except Exception:
+        return None
+
+
+def _fmt_age(delta: timedelta | None) -> str:
+    if delta is None:
+        return "never"
+    secs = int(delta.total_seconds())
+    if secs < 90:
+        return f"{secs}s ago"
+    if secs < 5400:
+        return f"{secs // 60} min ago"
+    if secs < 172800:
+        return f"{secs // 3600} hours ago"
+    return f"{secs // 86400} days ago"
+
+
+# --------------------------------------------------------------------------
+# Passive: what the database already knows
+# --------------------------------------------------------------------------
+
+
+def passive_checks(db) -> list[Check]:
+    out: list[Check] = []
+
+    def one(sql, params=()):
+        try:
+            res = db.q(sql, params)
+            return (res.rows[0] if res.rows else None), res.error
+        except Exception as exc:  # noqa: BLE001
+            return None, repr(exc)
+
+    # 1. The database itself.
+    out.append(Check(
+        "Database", "The bot itself",
+        FAIL if db.open_error else OK,
+        db.open_error or f"open, {len(db.tables())} tables",
+        "Everything the bot records lives here. If this fails, nothing "
+        "else on any page can be trusted.",
+        raw=db.open_error or ""))
+
+    # 2. Has a cycle run? cost/governor rows are written every cycle that
+    #    considered spending; raw_events every cycle that fetched.
+    row, err = one("SELECT MAX(fetched_at) t, COUNT(*) n FROM raw_events")
+    age = _age(row["t"] if row else None)
+    out.append(Check(
+        "Filing feed (EDGAR) last delivered", "The bot itself",
+        OK if age and age < timedelta(hours=6) else
+        (WARN if age else UNKNOWN),
+        f"{_fmt_age(age)}" + (f", {row['n']} events stored" if row else ""),
+        "The bot fetches filings every cycle, roughly every 15 minutes, "
+        "day and night. Hours without one means the feed or the "
+        "scheduler is stuck.", raw=err or ""))
+
+    # 3. Research calls - the only path that spends money.
+    row, err = one("SELECT MAX(called_at) t, COUNT(*) n FROM research_calls")
+    age = _age(row["t"] if row else None)
+    out.append(Check(
+        "Claude research calls", "The bot itself",
+        OK if row and row["n"] else UNKNOWN,
+        (f"{row['n']} call(s), last {_fmt_age(age)}" if row and row["n"]
+         else "none yet"),
+        "Research only runs while the US market is open and a candidate "
+        "has survived screening, so 'none yet' is normal on a new "
+        "install. This is also the only live proof that the ordinary "
+        "Anthropic key works - testing it directly would cost money.",
+        raw=err or ""))
+
+    # 4. Unpriced cost rows block ALL spending.
+    row, err = one("SELECT COUNT(*) n FROM cost_events WHERE priced_cents IS NULL")
+    n = (row["n"] if row else 0) or 0
+    out.append(Check(
+        "Cost ledger complete", "The bot itself",
+        OK if not n else FAIL,
+        "every recorded call is priced" if not n
+        else f"{n} row(s) recorded but not priced",
+        "An unpriced row means a billing field the bot did not "
+        "recognise. It refuses to spend anything more until a human "
+        "looks - deliberately. See the Cost page.", raw=err or ""))
+
+    # 5. Reconciliation against the real bill.
+    row, err = one("SELECT MAX(target_date) d FROM cost_reconciliation_events "
+                   "WHERE action_taken != 'check_failed'")
+    last = row["d"] if row else None
+    out.append(Check(
+        "Nightly bill check", "The bot itself",
+        OK if last else UNKNOWN,
+        f"last reconciled day: {last}" if last else "has not run yet",
+        "Compares the bot's own spending record against the real "
+        "Anthropic bill. Needs the optional ADMIN key; without it this "
+        "stays 'not run'.", raw=err or ""))
+
+    # 6. Unacknowledged discrepancy pauses spending.
+    row, err = one("SELECT COUNT(*) n FROM cost_reconciliation_events "
+                   "WHERE action_taken = 'scheduled_paused' "
+                   "AND acknowledged_at IS NULL")
+    n = (row["n"] if row else 0) or 0
+    out.append(Check(
+        "Spending not paused", "The bot itself",
+        OK if not n else FAIL,
+        "no unacknowledged discrepancy" if not n
+        else f"{n} discrepancy(ies) awaiting your acknowledgement",
+        "While one is outstanding the bot will not spend at all. "
+        "Acknowledge it on the Cost page to resume.", raw=err or ""))
+
+    # 7. Kill switch.
+    row, err = one("SELECT MAX(triggered_at) t, COUNT(*) n FROM "
+                   "kill_switch_events WHERE cleared_at IS NULL")
+    n = (row["n"] if row else 0) or 0
+    out.append(Check(
+        "Kill switches", "The bot itself",
+        OK if not n else FAIL,
+        "none tripped" if not n else f"{n} active",
+        "A tripped kill switch blocks new positions while still "
+        "protecting the ones already open.", raw=err or ""))
+
+    # 8. Benchmark freshness - the comparison rots silently otherwise.
+    try:
+        from catalyst.backtest.data import BarCache
+        from catalyst.dashboard.db import bars_path
+        cache = BarCache(bars_path())
+        bars = cache.load_bars("SPY")
+        last_day = bars[-1].day if bars else None
+        gap = ((datetime.now(timezone.utc).date() - last_day).days
+               if last_day else None)
+        out.append(Check(
+            "S&P benchmark data", "The bot itself",
+            OK if gap is not None and gap <= 4 else WARN,
+            (f"{len(bars)} daily bars, latest {last_day}" if last_day
+             else "no bars cached"),
+            "Refreshed once a day. Weekends and holidays make a gap of "
+            "up to four days normal; longer means the refresh is "
+            "failing and the comparison against the S&P will stall."))
+    except Exception as exc:  # noqa: BLE001
+        out.append(Check(
+            "S&P benchmark data", "The bot itself", WARN,
+            "no benchmark data cached yet",
+            "It is fetched on the first cycle after start-up. If this "
+            "persists, the performance chart has nothing to compare "
+            "against.", raw=repr(exc)))
+    return out
+
+
+# --------------------------------------------------------------------------
+# Active: one request each, all free
+# --------------------------------------------------------------------------
+
+
+def _timed(fn):
+    start = time.monotonic()
+    try:
+        ok, message = fn()
+        raw = ""
+    except Exception as exc:  # noqa: BLE001 - a probe must never raise
+        ok, message, raw = False, f"{type(exc).__name__}: {exc}", repr(exc)
+    return ok, message, raw, int((time.monotonic() - start) * 1000)
+
+
+def active_checks(
+    creds,
+    *,
+    alpaca_probe=None,
+    market_data_probe=None,
+    edgar_probe=None,
+    admin_probe=None,
+) -> list[Check]:
+    """Live reachability. `creds` may be None (nothing configured yet).
+
+    Each probe is a zero-argument callable returning (ok, message); they
+    are injected so the test suite never opens a socket.
+    """
+    out: list[Check] = []
+    key = getattr(creds, "alpaca_key", "") if creds else ""
+    secret = getattr(creds, "alpaca_secret", "") if creds else ""
+    admin = getattr(creds, "anthropic_admin_key", "") if creds else ""
+    anth = getattr(creds, "anthropic_key", "") if creds else ""
+
+    # --- Alpaca trading API
+    if not (key and secret):
+        out.append(Check("Alpaca (your broker)", "Outside services", UNKNOWN,
+                         "no keys entered yet",
+                         "Enter them on the Setup page; nothing can trade "
+                         "until then."))
+    else:
+        probe = alpaca_probe or _default_alpaca_probe(creds)
+        ok, message, raw, ms = _timed(probe)
+        out.append(Check(
+            "Alpaca (your broker)", "Outside services",
+            OK if ok else FAIL, message,
+            "Placing orders, reading positions and the market clock all "
+            "go through here. Free - it is part of your Alpaca account.",
+            raw=raw, latency_ms=ms))
+
+        probe = market_data_probe or _default_market_data_probe(creds)
+        ok, message, raw, ms = _timed(probe)
+        out.append(Check(
+            "Alpaca market data", "Outside services",
+            OK if ok else FAIL, message,
+            "Live prices for sizing and stops, and the daily S&P bars "
+            "behind the comparison chart. Also included in your "
+            "subscription.", raw=raw, latency_ms=ms))
+
+    # --- EDGAR: public, keyless
+    probe = edgar_probe or _default_edgar_probe()
+    ok, message, raw, ms = _timed(probe)
+    out.append(Check(
+        "SEC EDGAR (insider filings)", "Outside services",
+        OK if ok else FAIL, message,
+        "Where every candidate comes from. Public and free; the bot "
+        "stays well inside the SEC's 10-requests-per-second limit.",
+        raw=raw, latency_ms=ms))
+
+    # --- Anthropic admin (free); ordinary key is NOT probed (costs money)
+    if admin:
+        probe = admin_probe or _default_admin_probe(admin)
+        ok, message, raw, ms = _timed(probe)
+        out.append(Check(
+            "Anthropic billing (admin key)", "Outside services",
+            OK if ok else FAIL, message,
+            "Read-only access to your bill, used for the nightly check. "
+            "Free: it reads spending totals, it does not use the model.",
+            raw=raw, latency_ms=ms))
+    else:
+        out.append(Check(
+            "Anthropic billing (admin key)", "Outside services", UNKNOWN,
+            "no admin key entered (optional)",
+            "Without it the bot cannot cross-check its own spending "
+            "record against the real Anthropic bill."))
+
+    out.append(Check(
+        "Anthropic research key", "Outside services",
+        OK if anth else UNKNOWN,
+        "saved" if anth else "not entered yet",
+        "Deliberately NOT tested live: the only way to prove this key "
+        "works is to send Claude a message, and that costs real money "
+        "against your monthly ceiling. Its true health shows up under "
+        "'Claude research calls' above, from work the bot actually did.",
+        free=False))
+    return out
+
+
+# --- default probes (only these touch the network) -------------------------
+
+
+def _default_alpaca_probe(creds):
+    def probe():
+        from catalyst.setup.credentials import test_alpaca
+        from catalyst.execution.broker import base_url_for_mode
+        mode = str((getattr(creds, "settings", None) or {}).get(
+            "account_mode", "paper"))
+        return test_alpaca(creds.alpaca_key, creds.alpaca_secret,
+                           base_url=base_url_for_mode(mode))
+    return probe
+
+
+def _default_market_data_probe(creds):
+    def probe():
+        import httpx
+        resp = httpx.get(
+            "https://data.alpaca.markets/v2/stocks/bars",
+            params={"symbols": "SPY", "timeframe": "1Day", "limit": 1,
+                    "feed": "sip", "adjustment": "all"},
+            headers={"APCA-API-KEY-ID": creds.alpaca_key,
+                     "APCA-API-SECRET-KEY": creds.alpaca_secret},
+            timeout=PROBE_TIMEOUT_SECONDS)
+        if resp.status_code != 200:
+            return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
+        bars = (resp.json() or {}).get("bars") or {}
+        if not bars.get("SPY"):
+            return False, ("reachable, but returned no SPY bar - usually "
+                           "means this account has no SIP data "
+                           "entitlement")
+        return True, "reachable, SPY daily bar returned"
+    return probe
+
+
+def _default_edgar_probe():
+    def probe():
+        import httpx
+        from catalyst.data.sources.edgar_form4 import ARCHIVES_BASE, user_agent
+        resp = httpx.get(f"{ARCHIVES_BASE}edgar/daily-index/",
+                         headers={"User-Agent": user_agent()},
+                         timeout=PROBE_TIMEOUT_SECONDS)
+        if resp.status_code != 200:
+            return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
+        return True, "reachable"
+    return probe
+
+
+def _default_admin_probe(admin_key: str):
+    def probe():
+        from catalyst.setup.credentials import test_admin_key
+        return test_admin_key(admin_key)
+    return probe
+
+
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class MaintenanceReport:
+    checks: list = field(default_factory=list)
+    ran_active: bool = False
+    generated_at: str = ""
+
+    @property
+    def worst(self) -> str:
+        for state in (FAIL, WARN, UNKNOWN):
+            if any(c.state == state for c in self.checks):
+                return state
+        return OK
+
+    def by_group(self, group: str) -> list:
+        return [c for c in self.checks if c.group == group]
+
+
+def build_report(db, creds=None, *, run_active: bool = False, **probes
+                 ) -> MaintenanceReport:
+    checks = passive_checks(db)
+    if run_active:
+        checks += active_checks(creds, **probes)
+    return MaintenanceReport(
+        checks=checks, ran_active=run_active,
+        generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))

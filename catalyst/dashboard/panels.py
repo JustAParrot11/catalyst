@@ -1169,3 +1169,94 @@ def setup_stub(p: str = "setup") -> str:
         f"<li>Code hook: <code>{esc(SETUP_MOUNT_POINT)}</code></li></ul>"
     )
     return section(f"{p}-section", "Setup and credentials (stage 7 mount point)", body)
+
+
+# --------------------------------------------------------------------------
+# Maintenance — is everything talking to everything?
+# --------------------------------------------------------------------------
+
+
+def _slug(text: str) -> str:
+    """Stable per-check id. Row INDEX is not enough: the two tables both
+    start at zero, which duplicated element ids across the page - the
+    exact failure duplicate_ids() exists to catch."""
+    return "".join(ch.lower() if ch.isalnum() else "-" for ch in text).strip("-")
+
+
+_STATE_PILL = {"ok": ("good", "online"), "warn": ("warn", "attention"),
+               "fail": ("crit", "problem"), "unknown": ("idle", "not set up")}
+
+
+def maintenance_panel(report, p: str = "maint") -> str:
+    """Render a MaintenanceReport. Pure: it does no I/O of its own, so
+    the route decides whether outside services get contacted."""
+    out = []
+    counts = {k: sum(1 for c in report.checks if c.state == k)
+              for k in ("ok", "warn", "fail", "unknown")}
+    worst_state, worst_word = _STATE_PILL[report.worst]
+    headline = {"ok": "Everything is talking",
+                "warn": "Working, with something to look at",
+                "fail": "Something is broken",
+                "unknown": "Not fully set up yet"}[report.worst]
+    out.append(tiles(f"{p}-tiles", [
+        ("Overall", esc(headline),
+         f"{pill(worst_state, worst_word)} {len(report.checks)} checks run"),
+        ("Online", str(counts["ok"]),
+         "parts that answered normally"),
+        ("Need attention", str(counts["fail"] + counts["warn"]),
+         f"{counts['fail']} problem(s), {counts['warn']} warning(s), "
+         f"{counts['unknown']} not set up"),
+    ]))
+
+    if not report.ran_active:
+        out.append(prov(
+            "Showing what the bot has recorded. Outside services were NOT "
+            "contacted for this view - press the button below to check them "
+            "live. Every one of those checks is free: Alpaca and EDGAR cost "
+            "nothing, and the Anthropic check reads your bill rather than "
+            "using the model."))
+    out.append(
+        f'<form class="inline" id="{p}-run" method="get" action="/maintenance">'
+        '<input type="hidden" name="check" value="now">'
+        "<button type=\"submit\">Check outside services now</button></form>")
+
+    # Sending the evidence somewhere. The bundle existed from stage 6 but
+    # had no way in from the UI, so in practice it did not exist (owner
+    # asked where to export logs). `download` makes the browser save it
+    # as a file rather than render a wall of JSON.
+    out.append(
+        f'<p id="{p}-bundle"><a href="/diagnostics.json" download='
+        '"catalyst-diagnostics.json"><b>Download diagnostic bundle</b></a> '
+        "&mdash; one file with the recent logs, every error, the funnel, "
+        "the cost ledger and this page's checks. Safe to send on: keys and "
+        "secrets are stripped out of it twice, once where each value is "
+        "captured and again over the whole file before it is written.</p>")
+    out.append(prov(
+        "If the page itself will not load, the same file can be produced "
+        "on the server with:  sudo -u catalyst /opt/catalyst/venv/bin/python "
+        "-m catalyst.dashboard --diagnostics > catalyst-diagnostics.json"))
+
+    for group in ("The bot itself", "Outside services"):
+        checks = report.by_group(group)
+        if not checks:
+            continue
+        out.append(f"<h3>{esc(group)}</h3>")
+        rows = []
+        for c in checks:
+            state, word = _STATE_PILL[c.state]
+            latency = f"{c.latency_ms} ms" if c.latency_ms is not None else "-"
+            rows.append([
+                esc(c.name), pill(state, word), esc(c.summary), latency,
+                f'<span class="prov">{esc(c.detail)}</span>'
+                + (details(f"{p}-raw-{_slug(c.name)}", "raw response",
+                            pre(c.raw)) if c.raw else ""),
+            ])
+        out.append(table(f"{p}-table-{group.split()[-1]}",
+                         ["part", "state", "what it says", "took",
+                          "what it means"], rows))
+
+    out.append(prov(
+        f"Generated {esc(report.generated_at)}. Nothing on this page changes "
+        "any setting or places any order; it only looks."))
+    return section(f"{p}-section",
+                   "Maintenance: is everything communicating?", "".join(out))
