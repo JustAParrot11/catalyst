@@ -20,6 +20,14 @@ dev = [
 [tool.setuptools.packages.find]
 include = ["catalyst*"]
 
+# schema.sql is not a .py file, so it is NOT installed by default - an
+# installed copy then imports fine and dies the first time it opens the
+# database. Found by running install.sh on a clean machine, which is the
+# only place the difference between "the repo" and "the installed
+# package" shows up.
+[tool.setuptools.package-data]
+catalyst = ["storage/*.sql", "storage/migrations/*.sql"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 timeout = 60
