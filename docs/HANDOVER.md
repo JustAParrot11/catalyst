@@ -180,9 +180,13 @@ endpoint), ClinicalTrials.gov v2, Federal Register, openFDA
 ## Cost expectation
 
 Scheduled spend is governed to $5/month base (≈6%/year hurdle on
-$1,000). The first live researched candidate cost a **measured 18.7¢**
-(24k input tokens, 2.3k output, two web searches at 1¢ each) against
-the 13¢ pessimistic estimate — the difference is web search volume.
+$1,000). The first live researched candidate cost a **measured 18.7¢
+at standard rates, 13.2¢ at the Sonnet 5 intro rates Anthropic is
+actually billing through 2026-08-31** (24k input tokens, 2.3k output,
+two web searches at 1¢ each). The pricing table is date-effective
+(pricing.py: intro window found empirically against the owner's
+console figure) and the first closed-day reconciliation is the hard
+check on it.
 At that measured cost, ~26 researched candidates/month fit the cap;
 the realistic cadence (a few a week) lands well under it. The governor's
 pre-call estimates were raised to the measured reality plus margin
