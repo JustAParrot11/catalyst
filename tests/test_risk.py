@@ -271,6 +271,16 @@ def db(tmp_path):
     conn = sqlite3.connect(tmp_path / "t.db")
     conn.executescript(
         open("catalyst/storage/schema.sql").read())
+    # apply() enforces closed-scored-outcome provenance (risk review F2):
+    # the synthetic evidence ids t0..t59 must exist as SCORED refusals
+    for i in range(60):
+        conn.execute(
+            "INSERT INTO refusals (decision_id, candidate_id, "
+            "price_at_refusal, refused_at, scored_at, outcome_price, "
+            "outcome_return) VALUES (?,?,?,?,?,?,?)",
+            (f"d{i}", f"t{i}", "50", NOW.isoformat(), NOW.isoformat(),
+             "55", "0.1"))
+    conn.commit()
     yield conn
     conn.close()
 
@@ -407,3 +417,71 @@ class TestAdaptiveParams:
         out = ap.maybe_auto_revert("conviction_floor", post, db)
         assert not out.reverted
         assert out.reason.startswith("insufficient_post_sample")
+
+
+class TestAdaptiveHardening:
+    """Risk review F1-F3: apply() must not trust its caller."""
+
+    def test_hand_built_proposal_with_tiny_sample_refused(self, db):
+        p = ap.AdjustmentProposal(
+            parameter="conviction_floor", direction="tighten",
+            old_value=Decimal("0.60"), proposed_value=Decimal("0.61"),
+            evidence=evidence(n=1), applicable=True, reason=None)
+        out = ap.apply(p, HARD_BOUNDS, ap.current_values(db), db)
+        assert not out.applied
+        assert out.refusal_reason.startswith("insufficient_sample")
+
+    def test_hand_built_low_significance_refused(self, db):
+        p = ap.AdjustmentProposal(
+            parameter="conviction_floor", direction="tighten",
+            old_value=Decimal("0.60"), proposed_value=Decimal("0.61"),
+            evidence=evidence(sig="0.50"), applicable=True, reason=None)
+        out = ap.apply(p, HARD_BOUNDS, ap.current_values(db), db)
+        assert not out.applied
+        assert out.refusal_reason.startswith("insufficient_significance")
+
+    def test_unknown_evidence_ids_refused(self, db):
+        ev = ap.EvidenceSample(
+            parameter="conviction_floor",
+            trade_ids=tuple(f"ghost{i}" for i in range(30)),
+            window_start=NOW - timedelta(days=60),
+            window_end=NOW - timedelta(days=1),
+            effect_size=Decimal("1"), significance=Decimal("0.95"),
+            evidence_strength=Decimal("1"))
+        p = ap.propose_adjustment("conviction_floor", Decimal("0.60"), ev)
+        out = ap.apply(p, HARD_BOUNDS, ap.current_values(db), db)
+        assert not out.applied
+        assert "evidence_not_closed_scored_outcome" in out.refusal_reason
+
+    def test_unscored_refusal_id_refused(self, db):
+        db.execute(
+            "INSERT INTO refusals (decision_id, candidate_id, "
+            "price_at_refusal, refused_at) VALUES (?,?,?,?)",
+            ("dx", "unscored-1", "50", NOW.isoformat()))
+        db.commit()
+        ids = tuple(f"t{i}" for i in range(29)) + ("unscored-1",)
+        ev = ap.EvidenceSample(
+            parameter="conviction_floor", trade_ids=ids,
+            window_start=NOW - timedelta(days=60),
+            window_end=NOW - timedelta(days=1),
+            effect_size=Decimal("1"), significance=Decimal("0.95"),
+            evidence_strength=Decimal("1"))
+        p = ap.propose_adjustment("conviction_floor", Decimal("0.60"), ev)
+        out = ap.apply(p, HARD_BOUNDS, ap.current_values(db), db)
+        assert not out.applied
+
+    def test_reverted_adjustments_window_still_blocks_reuse(self, db):
+        """F3: revert-then-reapply with the same evidence window must be
+        refused - the window was spent, reverted or not."""
+        p = ap.propose_adjustment("conviction_floor", Decimal("0.60"),
+                                  evidence(effect="-1"))  # loosen
+        assert ap.apply(p, HARD_BOUNDS, ap.current_values(db), db).applied
+        post = evidence(n=10, effect="1", start=NOW + timedelta(days=1),
+                        end=NOW + timedelta(days=40))
+        assert ap.maybe_auto_revert("conviction_floor", post, db).reverted
+        # same original window again, value is back at 0.60
+        p2 = ap.propose_adjustment("conviction_floor", Decimal("0.60"),
+                                   evidence(effect="-1"))
+        out = ap.apply(p2, HARD_BOUNDS, ap.current_values(db), db)
+        assert not out.applied
+        assert out.refusal_reason.startswith("evidence_window_overlaps_previous")

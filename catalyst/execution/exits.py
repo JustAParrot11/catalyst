@@ -15,8 +15,46 @@ from datetime import datetime
 from decimal import Decimal
 
 from catalyst.execution import OrderResult
-from catalyst.execution.broker import Broker
+from catalyst.execution.broker import Broker, BrokerError
 from catalyst.execution.orders import _TERMINAL_CANCEL, _submit, place_stop
+
+
+def _neutralize_stop(broker: Broker, stop_id: str, *, poll_attempts: int,
+                     poll_interval_s: float) -> str:
+    """Cancel a stop and CONFIRM it can no longer fire. Returns one of:
+    'gone'   - terminal (canceled/expired/rejected) or unknown to the
+               broker (404: a stale local id; DAY stops expire nightly
+               per TRAPS.md, and an expired-then-purged id must not
+               brick the exit path forever - risk review B1);
+    'filled' - the stop already did the exit; nothing left to sell;
+    'live'   - could not confirm; caller must NOT sell."""
+    try:
+        broker.cancel_order(stop_id)
+    except BrokerError as exc:
+        # 422 "order not cancelable" = already terminal; 404 = unknown.
+        # Either way the truth comes from the status read below.
+        if exc.status_code == 404:
+            return "gone"
+        if exc.status_code is None or exc.status_code >= 500:
+            return "live"      # broker unreachable: fail closed
+    state: dict = {}
+    for attempt in range(poll_attempts):
+        try:
+            state = broker.get_order(stop_id)
+        except BrokerError as exc:
+            if exc.status_code == 404:
+                return "gone"
+            return "live"
+        if state.get("status") in _TERMINAL_CANCEL:
+            break
+        if attempt < poll_attempts - 1:
+            time.sleep(poll_interval_s)
+    status = state.get("status")
+    if status == "filled":
+        return "filled"
+    if status in _TERMINAL_CANCEL:
+        return "gone"
+    return "live"
 
 
 def manage_exits(due_positions: list[dict], as_of: datetime, broker: Broker,
@@ -34,20 +72,12 @@ def manage_exits(due_positions: list[dict], as_of: datetime, broker: Broker,
     for pos in due_positions:
         stop_id = pos.get("stop_order_id")
         if stop_id is not None:
-            broker.cancel_order(stop_id)
-            confirmed = False
-            state: dict = {}
-            for attempt in range(poll_attempts):
-                state = broker.get_order(stop_id)
-                if state.get("status") in _TERMINAL_CANCEL:
-                    confirmed = True
-                    break
-                if attempt < poll_attempts - 1:
-                    time.sleep(poll_interval_s)
-            if not confirmed or state.get("status") == "filled":
-                # Stop either still live (unsafe to sell) or already did
-                # the exit for us (nothing left to sell). Reconcile will
-                # pick up the fill; skip.
+            outcome = _neutralize_stop(broker, stop_id,
+                                       poll_attempts=poll_attempts,
+                                       poll_interval_s=poll_interval_s)
+            if outcome != "gone":
+                # 'live': unsafe to sell. 'filled': the stop already did
+                # the exit; reconcile will close the position. Skip.
                 continue
         results.append(_submit(
             broker, conn, decision_id=pos["decision_id"],

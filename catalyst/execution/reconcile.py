@@ -56,17 +56,17 @@ def reconcile(broker: Broker, conn) -> list[Fill]:
         filled_qty = Decimal(str(remote.get("filled_qty") or "0"))
         avg_price = remote.get("filled_avg_price")
         if filled_qty > 0 and avg_price is not None:
-            already = conn.execute(
-                "SELECT 1 FROM fills WHERE order_id = ?",
+            filled_at = datetime.fromisoformat(
+                remote.get("filled_at").replace("Z", "+00:00")
+            ) if remote.get("filled_at") else _now()
+            fill = Fill(order_id=order_id,
+                        price=Decimal(str(avg_price)),
+                        qty=filled_qty, filled_at=filled_at,
+                        broker_reported_price=Decimal(str(avg_price)))
+            prev = conn.execute(
+                "SELECT qty FROM fills WHERE order_id = ?",
                 (order_id,)).fetchone()
-            if not already:
-                filled_at = datetime.fromisoformat(
-                    remote.get("filled_at").replace("Z", "+00:00")
-                ) if remote.get("filled_at") else _now()
-                fill = Fill(order_id=order_id,
-                            price=Decimal(str(avg_price)),
-                            qty=filled_qty, filled_at=filled_at,
-                            broker_reported_price=Decimal(str(avg_price)))
+            if prev is None:
                 conn.execute(
                     """INSERT INTO fills (order_id, price, qty, filled_at,
                                           broker_reported_price,
@@ -75,6 +75,18 @@ def reconcile(broker: Broker, conn) -> list[Fill]:
                     (order_id, str(fill.price), str(fill.qty),
                      fill.filled_at.isoformat(),
                      str(fill.broker_reported_price)))
+                fills.append(fill)
+            elif Decimal(prev[0]) < filled_qty:
+                # a partial fill grew: the broker's cumulative avg price
+                # and qty replace the earlier observation (risk review B4
+                # - a fill frozen at first sight understates the position)
+                conn.execute(
+                    """UPDATE fills SET price = ?, qty = ?,
+                       broker_reported_price = ?, filled_at = ?
+                       WHERE order_id = ?""",
+                    (str(fill.price), str(fill.qty),
+                     str(fill.broker_reported_price),
+                     fill.filled_at.isoformat(), order_id))
                 fills.append(fill)
     conn.commit()
     return fills

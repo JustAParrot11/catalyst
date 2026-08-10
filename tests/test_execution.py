@@ -444,3 +444,89 @@ class TestClosePositions:
                     "2026-08-01T14:00:00+00:00", "2026-08-13", "open"))
         db.commit()
         assert close_filled_positions(db) == 0
+
+
+class TestExitsStaleStop:
+    def test_expired_stop_cancel_422_still_exits(self, db):
+        """Risk review B1: a DAY stop expired overnight; cancelling it
+        422s and the status reads 'expired' - the hard exit must still
+        go out instead of crashing the cycle forever."""
+        order_log = []
+
+        def handler(request):
+            if request.method == "DELETE":
+                return httpx.Response(422, json={"message": "order is not cancelable"})
+            if request.method == "POST":
+                order_log.append(json.loads(request.content))
+                return httpx.Response(200, json={"id": "exit-1",
+                                                 "status": "accepted"})
+            return httpx.Response(200, json={"id": "old-stop",
+                                             "status": "expired"})
+
+        [r] = manage_exits([position()], datetime.now(timezone.utc),
+                           make_broker(handler), db, poll_interval_s=0)
+        assert r.status == "accepted"
+        assert order_log[0]["type"] == "market"
+
+    def test_broker_unknown_stop_404_still_exits(self, db):
+        def handler(request):
+            if request.method == "DELETE":
+                return httpx.Response(404, json={"message": "order not found"})
+            if request.method == "POST":
+                return httpx.Response(200, json={"id": "exit-1",
+                                                 "status": "accepted"})
+            return httpx.Response(404, json={"message": "order not found"})
+
+        [r] = manage_exits([position()], datetime.now(timezone.utc),
+                           make_broker(handler), db, poll_interval_s=0)
+        assert r.status == "accepted"
+
+    def test_broker_5xx_on_cancel_fails_closed(self, db):
+        posts = {"n": 0}
+
+        def handler(request):
+            if request.method == "DELETE":
+                return httpx.Response(500, json={})
+            if request.method == "POST":
+                posts["n"] += 1
+                return httpx.Response(200, json={})
+            return httpx.Response(200, json={"status": "new"})
+
+        out = manage_exits([position()], datetime.now(timezone.utc),
+                           make_broker(handler), db, poll_interval_s=0)
+        assert out == [] and posts["n"] == 0
+
+    def test_replace_stop_tolerates_expired_old_stop(self, db):
+        def handler(request):
+            if request.method == "DELETE":
+                return httpx.Response(422, json={"message": "not cancelable"})
+            if request.method == "POST":
+                return httpx.Response(200, json={"id": "new-stop",
+                                                 "status": "accepted"})
+            return httpx.Response(200, json={"id": "old-stop",
+                                             "status": "expired"})
+
+        r = replace_stop(position(), Decimal("46.00"), make_broker(handler),
+                         db, poll_interval_s=0)
+        assert r.status == "replaced" and r.new_stop_order_id == "new-stop"
+
+
+class TestReconcilePartialGrowth:
+    def test_partial_fill_growth_updates_row(self, db):
+        _seed_order(db)
+        stage = {"qty": "1.0"}
+
+        def handler(request):
+            return httpx.Response(200, json={
+                "id": "brok-1", "status": "partially_filled",
+                "filled_qty": stage["qty"], "filled_avg_price": "49.90",
+                "filled_at": "2026-08-10T14:31:00Z"})
+
+        b = make_broker(handler)
+        reconcile(b, db)
+        assert db.execute("SELECT qty FROM fills").fetchone()[0] == "1.0"
+        stage["qty"] = "2.5"
+        reconcile(b, db)
+        row = db.execute("SELECT qty FROM fills").fetchone()
+        assert row[0] == "2.5"     # grew, not frozen at first observation
+        assert db.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 1

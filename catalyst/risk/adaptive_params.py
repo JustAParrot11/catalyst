@@ -312,6 +312,29 @@ def apply(
 
     base = _base(proposal.parameter)
 
+    # Re-verify sample size and significance independently of
+    # propose_adjustment (risk review F1): a hand-built proposal with
+    # applicable=True must not move a parameter on n=1.
+    n = len(proposal.evidence.trade_ids)
+    if n < MIN_SAMPLE_SIZE[base]:
+        return refuse(f"insufficient_sample: {n} of {MIN_SAMPLE_SIZE[base]} required")
+    if proposal.evidence.significance < SIGNIFICANCE_FLOOR:
+        return refuse(f"insufficient_significance: "
+                      f"{proposal.evidence.significance} < {SIGNIFICANCE_FLOOR}")
+
+    # Closed, scored outcomes ONLY - enforced, not assumed (risk review
+    # F2): every evidence id must be a scored refusal's candidate or a
+    # closed trade's position. Unknown ids refuse the whole proposal.
+    for tid in proposal.evidence.trade_ids:
+        known = conn.execute(
+            """SELECT 1 FROM refusals
+               WHERE candidate_id = ? AND scored_at IS NOT NULL
+               UNION SELECT 1 FROM closed_trades WHERE position_id = ?""",
+            (tid, tid)).fetchone()
+        if known is None:
+            return refuse(f"evidence_not_closed_scored_outcome: {tid!r} is "
+                          "neither a scored refusal nor a closed trade")
+
     # Staleness: the proposal must have been computed against the value
     # that is still live.
     live = _read_snapshot_value(current_snapshot, proposal.parameter)
@@ -328,13 +351,14 @@ def apply(
                       f"({proposal.direction})")
 
     # Disjoint evidence windows: this evidence must start strictly after
-    # the window behind this parameter's previous applied adjustment.
+    # the LATEST window ever used for this parameter - reverted rows
+    # included (risk review F3: if a revert hid its window, the same
+    # stale evidence batch could re-fire the same adjustment forever).
     prev = conn.execute(
-        """SELECT evidence_window_end FROM adaptive_param_log
-           WHERE parameter = ? AND reverted_at IS NULL
-           ORDER BY changed_at DESC LIMIT 1""",
+        """SELECT MAX(evidence_window_end) FROM adaptive_param_log
+           WHERE parameter = ?""",
         (proposal.parameter,)).fetchone()
-    if prev is not None:
+    if prev is not None and prev[0] is not None:
         prev_end = datetime.fromisoformat(prev[0])
         if proposal.evidence.window_start <= prev_end:
             return refuse(

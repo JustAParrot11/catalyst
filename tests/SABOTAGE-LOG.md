@@ -586,3 +586,8 @@ change kept from this session is the strengthened assertion block in
 - refusal_tracker.py evidence sign flipped (profitable refusals would
   RAISE the conviction floor): caught by
   test_profitable_refusals_push_floor_down. Restored, green.
+- adaptive_params.py F3 fix undone (reverted rows hidden from the
+  window check): caught by
+  test_reverted_adjustments_window_still_blocks_reuse. Restored, green.
+- cycle.py kill-trip protective duties removed (B2 fix undone): caught
+  by test_loss_trip_still_runs_exits_but_blocks_entries. Restored, green.

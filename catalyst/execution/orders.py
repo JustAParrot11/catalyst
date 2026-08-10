@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from catalyst.execution import OrderResult, StopConfirmation, StopReplacementResult
-from catalyst.execution.broker import Broker, OrderRejected
+from catalyst.execution.broker import Broker, BrokerError, OrderRejected
 from catalyst.risk import RiskDecision
 
 _TERMINAL_CANCEL = {"canceled", "filled", "expired", "rejected", "done_for_day"}
@@ -107,11 +107,36 @@ def replace_stop(position: dict, new_stop_price: Decimal, broker: Broker,
     replaced_at = _now()
 
     if old_id is not None:
-        broker.cancel_order(old_id)
+        # Tolerate an already-terminal or broker-unknown old stop (DAY
+        # stops expire nightly - TRAPS.md; risk review B1): the goal is
+        # confirming it can no longer fire, not that the cancel verb
+        # succeeded.
+        try:
+            broker.cancel_order(old_id)
+        except BrokerError as exc:
+            if exc.status_code is None or exc.status_code >= 500:
+                result = StopReplacementResult(
+                    position_id=position["id"], old_stop_order_id=old_id,
+                    new_stop_order_id=None,
+                    status="failed_cancel_unconfirmed",
+                    raw_response={"cancel_error": str(exc),
+                                  "status_code": exc.status_code})
+                _record_replacement(conn, result, replaced_at)
+                return result
+            # 4xx: already terminal or unknown; the status read decides.
         confirmed = False
         last_state: dict = {}
         for attempt in range(poll_attempts):
-            last_state = broker.get_order(old_id)
+            try:
+                last_state = broker.get_order(old_id)
+            except BrokerError as exc:
+                if exc.status_code == 404:
+                    last_state = {"status": "canceled",
+                                  "_note": "unknown_to_broker_404"}
+                    confirmed = True
+                    break
+                last_state = {"cancel_error": str(exc)}
+                break
             if last_state.get("status") in _TERMINAL_CANCEL:
                 confirmed = True
                 break
