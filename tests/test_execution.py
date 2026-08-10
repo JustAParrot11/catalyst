@@ -1,0 +1,375 @@
+"""Execution layer tests - fully offline via httpx.MockTransport.
+
+The transport seam is the same one the live Broker uses; nothing here
+opens a socket (conftest enforces that regardless).
+"""
+
+import json
+import sqlite3
+from datetime import date, datetime, timezone
+from decimal import Decimal
+
+import httpx
+import pytest
+
+from catalyst.execution import broker as broker_mod
+from catalyst.execution.broker import Broker, BrokerError, OrderRejected
+from catalyst.execution.exits import manage_exits, reopen_stops
+from catalyst.execution.orders import (
+    confirm_stops_resting, place, place_stop, replace_stop,
+)
+from catalyst.execution.reconcile import reconcile
+from catalyst.risk import RiskDecision
+
+
+def make_broker(handler) -> Broker:
+    return Broker("test-key", "test-secret",
+                  transport=httpx.MockTransport(handler), backoff_s=0)
+
+
+@pytest.fixture
+def db(tmp_path):
+    conn = sqlite3.connect(tmp_path / "t.db")
+    conn.executescript(open("catalyst/storage/schema.sql").read())
+    yield conn
+    conn.close()
+
+
+def decision(qty="2.5", action="trade", side="long"):
+    return RiskDecision(
+        candidate_id="cand-1", action=action, side=side,
+        notional_usd=Decimal("125.00"), qty=Decimal(qty),
+        stop_price=Decimal("45.00"),
+        planned_exit_date=date(2026, 8, 22),
+        limits_applied=(), skip_reasons=(), adaptive_params_snapshot={})
+
+
+# ---------------------------------------------------------------- broker
+
+class TestBroker:
+    def test_5xx_retries_then_succeeds(self):
+        calls = {"n": 0}
+
+        def handler(request):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                return httpx.Response(500, json={"boom": True})
+            return httpx.Response(200, json={"status": "ACTIVE"})
+
+        b = make_broker(handler)
+        assert b.get_account() == {"status": "ACTIVE"}
+        assert calls["n"] == 3
+
+    def test_4xx_never_retries(self):
+        calls = {"n": 0}
+
+        def handler(request):
+            calls["n"] += 1
+            return httpx.Response(403, json={"message": "forbidden"})
+
+        b = make_broker(handler)
+        with pytest.raises(BrokerError) as e:
+            b.get_account()
+        assert calls["n"] == 1
+        assert e.value.status_code == 403
+        assert e.value.body == {"message": "forbidden"}
+
+    def test_order_rejection_carries_verbatim_body(self):
+        def handler(request):
+            return httpx.Response(422, json={"message": "insufficient qty"})
+
+        b = make_broker(handler)
+        with pytest.raises(OrderRejected) as e:
+            b.submit_order(symbol="TEST", qty="1", side="buy",
+                           order_type="market", time_in_force="day",
+                           client_order_id="x")
+        assert e.value.body == {"message": "insufficient qty"}
+
+    def test_repr_and_errors_never_contain_credentials(self):
+        def handler(request):
+            return httpx.Response(500, json={})
+
+        b = make_broker(handler)
+        assert "test-key" not in repr(b) and "test-secret" not in repr(b)
+        with pytest.raises(BrokerError) as e:
+            b.get_account()
+        assert "test-key" not in str(e.value)
+        assert "test-secret" not in str(e.value)
+
+    def test_from_env_refuses_when_absent(self):
+        # conftest strips ALPACA*/APCA* from the environment for every test
+        with pytest.raises(BrokerError):
+            Broker.from_env()
+
+    def test_submit_sends_client_order_id(self):
+        seen = {}
+
+        def handler(request):
+            seen.update(json.loads(request.content))
+            return httpx.Response(200, json={"id": "b1", "status": "accepted"})
+
+        b = make_broker(handler)
+        b.submit_order(symbol="TEST", qty="1", side="buy",
+                       order_type="market", time_in_force="day",
+                       client_order_id="local-42")
+        assert seen["client_order_id"] == "local-42"
+
+
+# ----------------------------------------------------------------- place
+
+class TestPlace:
+    def test_accepted_order_recorded_with_raw_response(self, db):
+        def handler(request):
+            return httpx.Response(
+                200, json={"id": "brok-1", "status": "accepted"})
+
+        r = place(decision(), "TEST", make_broker(handler), db)
+        assert r.status == "accepted" and r.broker_order_id == "brok-1"
+        row = db.execute(
+            "SELECT side, qty, order_type, time_in_force, status, raw_response "
+            "FROM orders").fetchone()
+        assert row[:5] == ("buy", "2.5", "market", "day", "accepted")
+        assert json.loads(row[5])["id"] == "brok-1"
+
+    def test_rejection_still_recorded_verbatim(self, db):
+        def handler(request):
+            return httpx.Response(403, json={"message": "account blocked"})
+
+        r = place(decision(), "TEST", make_broker(handler), db)
+        assert r.status == "rejected" and r.broker_order_id is None
+        raw = json.loads(db.execute(
+            "SELECT raw_response FROM orders").fetchone()[0])
+        assert raw["message"] == "account blocked"
+        assert raw["_http_status"] == 403
+
+    def test_refuses_skip_decisions_and_missing_qty(self, db):
+        b = make_broker(lambda r: httpx.Response(200, json={}))
+        with pytest.raises(ValueError):
+            place(decision(action="skip", side=None), "TEST", b, db)
+        with pytest.raises(ValueError):
+            bad = RiskDecision(
+                candidate_id="c", action="trade", side="long",
+                notional_usd=Decimal("10"), qty=None, stop_price=None,
+                planned_exit_date=None, limits_applied=(), skip_reasons=(),
+                adaptive_params_snapshot={})
+            place(bad, "TEST", b, db)
+
+
+# ---------------------------------------------------------- replace_stop
+
+def position(stop="old-stop"):
+    return {"id": "pos-1", "ticker": "TEST", "qty": "2.5",
+            "decision_id": "cand-1", "stop_order_id": stop}
+
+
+class TestReplaceStop:
+    def test_confirmed_cancel_then_new_stop(self, db):
+        def handler(request):
+            if request.method == "DELETE":
+                return httpx.Response(204)
+            if "orders/old-stop" in str(request.url):
+                return httpx.Response(200, json={"id": "old-stop",
+                                                 "status": "canceled"})
+            return httpx.Response(200, json={"id": "new-stop",
+                                             "status": "accepted"})
+
+        r = replace_stop(position(), Decimal("46.00"), make_broker(handler),
+                         db, poll_interval_s=0)
+        assert r.status == "replaced"
+        assert r.new_stop_order_id == "new-stop"
+        assert db.execute("SELECT status FROM stop_replacements").fetchone()[0] == "replaced"
+
+    def test_unconfirmed_cancel_places_nothing(self, db):
+        posts = {"n": 0}
+
+        def handler(request):
+            if request.method == "DELETE":
+                return httpx.Response(204)
+            if request.method == "POST":
+                posts["n"] += 1
+                return httpx.Response(200, json={"id": "new"})
+            return httpx.Response(200, json={"id": "old-stop",
+                                             "status": "pending_cancel"})
+
+        r = replace_stop(position(), Decimal("46.00"), make_broker(handler),
+                         db, poll_attempts=2, poll_interval_s=0)
+        assert r.status == "failed_cancel_unconfirmed"
+        assert r.new_stop_order_id is None
+        assert posts["n"] == 0  # THE invariant: no second live stop
+
+    def test_stop_filled_during_cancel_places_nothing(self, db):
+        posts = {"n": 0}
+
+        def handler(request):
+            if request.method == "DELETE":
+                return httpx.Response(204)
+            if request.method == "POST":
+                posts["n"] += 1
+                return httpx.Response(200, json={"id": "new"})
+            return httpx.Response(200, json={"id": "old-stop",
+                                             "status": "filled"})
+
+        r = replace_stop(position(), Decimal("46.00"), make_broker(handler),
+                         db, poll_interval_s=0)
+        assert r.status == "failed_cancel_unconfirmed"
+        assert posts["n"] == 0  # selling again would open a short
+
+
+# ------------------------------------------------- confirm_stops_resting
+
+class TestConfirmStops:
+    def _run(self, db, open_orders):
+        def handler(request):
+            return httpx.Response(200, json=open_orders)
+
+        return confirm_stops_resting(
+            [{"id": "pos-1", "ticker": "TEST"}], make_broker(handler), db)
+
+    def test_single_stop_ok(self, db):
+        [c] = self._run(db, [{"id": "s1", "symbol": "TEST", "side": "sell",
+                              "type": "stop"}])
+        assert c.status == "ok" and c.live_stop_order_ids == ("s1",)
+
+    def test_no_stop_unprotected(self, db):
+        [c] = self._run(db, [])
+        assert c.status == "unprotected"
+        assert db.execute(
+            "SELECT status FROM stop_confirmations").fetchone()[0] == "unprotected"
+
+    def test_two_stops_duplicate(self, db):
+        [c] = self._run(db, [
+            {"id": "s1", "symbol": "TEST", "side": "sell", "type": "stop"},
+            {"id": "s2", "symbol": "TEST", "side": "sell", "type": "stop"}])
+        assert c.status == "duplicate_stops"
+
+    def test_buy_orders_and_other_symbols_ignored(self, db):
+        [c] = self._run(db, [
+            {"id": "s1", "symbol": "OTHER", "side": "sell", "type": "stop"},
+            {"id": "s2", "symbol": "TEST", "side": "buy", "type": "stop"},
+            {"id": "s3", "symbol": "TEST", "side": "sell", "type": "market"}])
+        assert c.status == "unprotected"
+
+
+# ------------------------------------------------------------- reconcile
+
+def _seed_order(db, order_id="ord-1", status="accepted"):
+    db.execute(
+        """INSERT INTO orders VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (order_id, "cand-1", "brok-1", "buy", "2.5", "market", "day",
+         datetime.now(timezone.utc).isoformat(), status, "{}"))
+    db.commit()
+
+
+class TestReconcile:
+    def test_fill_recorded_at_broker_price_once(self, db):
+        _seed_order(db)
+
+        def handler(request):
+            return httpx.Response(200, json={
+                "id": "brok-1", "status": "filled", "filled_qty": "2.5",
+                "filled_avg_price": "49.87",
+                "filled_at": "2026-08-10T14:31:00Z"})
+
+        b = make_broker(handler)
+        fills = reconcile(b, db)
+        assert len(fills) == 1
+        assert fills[0].broker_reported_price == Decimal("49.87")
+        assert reconcile(b, db) == []  # idempotent second pass
+        assert db.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 1
+        assert db.execute("SELECT status FROM orders").fetchone()[0] == "filled"
+        # modeled slippage column exists BESIDE the broker price, not
+        # instead of it (TRAPS.md)
+        assert db.execute(
+            "SELECT broker_reported_price, modeled_slippage FROM fills"
+        ).fetchone() == ("49.87", None)
+
+    def test_unknown_order_404_recorded_verbatim(self, db):
+        _seed_order(db)
+
+        def handler(request):
+            return httpx.Response(404, json={"message": "order not found"})
+
+        assert reconcile(make_broker(handler), db) == []
+        status, raw = db.execute(
+            "SELECT status, raw_response FROM orders").fetchone()
+        assert status == "rejected"
+        raw = json.loads(raw)
+        assert raw["reconcile_404"] is True
+        assert raw["body"] == {"message": "order not found"}
+
+    def test_terminal_orders_not_requeried(self, db):
+        _seed_order(db, status="filled")
+        calls = {"n": 0}
+
+        def handler(request):
+            calls["n"] += 1
+            return httpx.Response(200, json={})
+
+        reconcile(make_broker(handler), db)
+        assert calls["n"] == 0
+
+
+# ----------------------------------------------------------------- exits
+
+class TestExits:
+    def test_due_position_cancels_stop_then_sells(self, db):
+        order_log = []
+
+        def handler(request):
+            if request.method == "DELETE":
+                order_log.append("cancel")
+                return httpx.Response(204)
+            if request.method == "POST":
+                order_log.append(json.loads(request.content))
+                return httpx.Response(200, json={"id": "exit-1",
+                                                 "status": "accepted"})
+            return httpx.Response(200, json={"id": "old-stop",
+                                             "status": "canceled"})
+
+        [r] = manage_exits([position()], datetime.now(timezone.utc),
+                           make_broker(handler), db, poll_interval_s=0)
+        assert r.status == "accepted"
+        assert order_log[0] == "cancel"          # stop cancelled FIRST
+        sell = order_log[1]
+        assert (sell["side"], sell["type"], sell["qty"]) == ("sell", "market", "2.5")
+
+    def test_unconfirmed_stop_cancel_skips_the_sell(self, db):
+        posts = {"n": 0}
+
+        def handler(request):
+            if request.method == "DELETE":
+                return httpx.Response(204)
+            if request.method == "POST":
+                posts["n"] += 1
+                return httpx.Response(200, json={})
+            return httpx.Response(200, json={"status": "pending_cancel"})
+
+        out = manage_exits([position()], datetime.now(timezone.utc),
+                           make_broker(handler), db, poll_attempts=2,
+                           poll_interval_s=0)
+        assert out == [] and posts["n"] == 0
+
+    def test_position_without_stop_sells_directly(self, db):
+        def handler(request):
+            assert request.method == "POST"
+            return httpx.Response(200, json={"id": "exit-1",
+                                             "status": "accepted"})
+
+        [r] = manage_exits([position(stop=None)], datetime.now(timezone.utc),
+                           make_broker(handler), db)
+        assert r.status == "accepted"
+
+    def test_reopen_stops_places_day_stop(self, db):
+        seen = {}
+
+        def handler(request):
+            seen.update(json.loads(request.content))
+            return httpx.Response(200, json={"id": "s-new",
+                                             "status": "accepted"})
+
+        [r] = reopen_stops([{"ticker": "TEST", "qty": "2.5",
+                             "decision_id": "cand-1", "stop_price": "45.00"}],
+                           make_broker(handler), db)
+        assert r.status == "accepted"
+        assert (seen["type"], seen["time_in_force"],
+                seen["stop_price"]) == ("stop", "day", "45.00")
