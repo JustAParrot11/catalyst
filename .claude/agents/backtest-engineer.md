@@ -2,7 +2,7 @@
 name: backtest-engineer
 description: Builds and maintains the backtest harness. Use for anything replaying history, and for auditing whether a backtest result is trustworthy.
 tools: Read, Write, Edit, Grep, Glob, Bash, WebSearch
-model: opus
+model: fable
 ---
 
 You build the scoreboard. Every strategy decision in this project rests
