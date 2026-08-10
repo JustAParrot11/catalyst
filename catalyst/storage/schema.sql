@@ -169,6 +169,7 @@ CREATE TABLE IF NOT EXISTS positions (
 
 CREATE TABLE IF NOT EXISTS closed_trades (
     position_id           TEXT PRIMARY KEY REFERENCES positions(id),
+    account_mode          TEXT NOT NULL DEFAULT 'paper' CHECK (account_mode IN ('paper','live')),
     entry_price           TEXT NOT NULL,
     exit_price            TEXT NOT NULL,
     exit_reason           TEXT NOT NULL,
@@ -182,12 +183,18 @@ CREATE TABLE IF NOT EXISTS closed_trades (
 CREATE TABLE IF NOT EXISTS cost_events (
     id             TEXT PRIMARY KEY,
     raw_usage_json TEXT NOT NULL,          -- verbatim (TRAPS.md)
+    model          TEXT NOT NULL,          -- required for repricing (audit F3)
     kind           TEXT NOT NULL CHECK (kind IN ('scheduled','manual')),
     component      TEXT NOT NULL,
-    priced_cents   TEXT NOT NULL,
+    priced_cents   TEXT,                   -- NULL = recorded but NOT priced
+                                           -- (unknown model; audit F2) -
+                                           -- governor blocks while any
+                                           -- unpriced row exists
     priced_at      TEXT NOT NULL,
     api_call_id    TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_cost_events_kind_day
+    ON cost_events (kind, component, priced_at);
 
 CREATE TABLE IF NOT EXISTS cost_governor_events (
     cycle_id       TEXT,
@@ -208,6 +215,8 @@ CREATE TABLE IF NOT EXISTS cost_reconciliation_events (
     cost_api_total_cents TEXT NOT NULL,
     discrepancy_cents    TEXT NOT NULL,
     threshold_cents      TEXT NOT NULL,
+    api_raw_response     TEXT NOT NULL,    -- verbatim payload beside the zero (house rule 3)
+    api_record_count     INTEGER NOT NULL,
     action_taken         TEXT NOT NULL,
     acknowledged_by      TEXT,
     acknowledged_at      TEXT,
