@@ -92,6 +92,23 @@ SUBMIT_RESEARCH_VIEW_TOOL = {
             "expected_holding_days": {"type": "integer", "minimum": 1},
             "priced_in": {"type": "boolean"},
             "priced_in_reasoning": {"type": "string"},
+            # EVIDENCE, never a sizing input. Optional by design: a view
+            # without findings is perfectly valid, and the trade decision
+            # never depends on this field. It rides along in a pass
+            # already paid for, which is why the evidence graph costs no
+            # extra model call.
+            "findings": {
+                "type": "array",
+                "description": (
+                    "Optional. Concrete links you established while "
+                    "researching - who bought, which filing said so, what "
+                    "date it resolves. Each item: subject {kind, "
+                    "canonical_key, display_name}, predicate, optional "
+                    "object of the same shape, optional object_date, "
+                    "source_class, reliability. Omit rather than guess."
+                ),
+                "items": {"type": "object"},
+            },
         },
         "required": [
             "direction", "conviction", "thesis", "invalidation",
@@ -102,6 +119,11 @@ SUBMIT_RESEARCH_VIEW_TOOL = {
 }
 
 _VIEW_FIELDS = set(SUBMIT_RESEARCH_VIEW_TOOL["input_schema"]["required"])
+
+#: Accepted on the tool input but deliberately NOT part of the view the
+#: risk engine reads. Evidence informs judgement; it must never reach
+#: the object sizing sees (CLAUDE.md: the model never sizes a position).
+_NON_VIEW_FIELDS = {"findings"}
 
 
 def make_view_from_tool_input(candidate_id: str, tool_input: dict) -> ResearchView:
@@ -115,7 +137,7 @@ def make_view_from_tool_input(candidate_id: str, tool_input: dict) -> ResearchVi
     the schema."""
     if not isinstance(tool_input, dict):
         raise TypeError(f"tool input is {type(tool_input).__name__}, not object")
-    unknown = set(tool_input) - _VIEW_FIELDS
+    unknown = set(tool_input) - _VIEW_FIELDS - _NON_VIEW_FIELDS
     if unknown:
         raise ValueError(f"unknown fields in research view: {sorted(unknown)}")
     missing = _VIEW_FIELDS - set(tool_input)
