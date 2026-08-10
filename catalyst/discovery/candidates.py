@@ -124,9 +124,19 @@ def build_candidates(raw_events: list[RawEvent], as_of: datetime) -> list[Candid
     """
     cutoff = as_of.date()
     by_issuer: dict[str, list[dict]] = {}
+    seen_ids: set[str] = set()
     for event in raw_events:
         if event.source != FORM4_SOURCE:
             continue
+        # (source, source_id) is the raw_events primary key: the same
+        # purchase row delivered twice - a feed retry, or overlapping
+        # pagination windows - is the SAME evidence, not new evidence.
+        # Counted twice it inflated the cluster's total value and could
+        # push a below-threshold cluster over the floor and buy stock
+        # (stress-tester defect 15).
+        if event.source_id in seen_ids:
+            continue
+        seen_ids.add(event.source_id)
         row = _parse_purchase(event)
         if row is None:
             continue

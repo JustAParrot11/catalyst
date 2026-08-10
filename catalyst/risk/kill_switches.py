@@ -17,11 +17,15 @@ MAX_SNAPSHOT_AGE = timedelta(minutes=10)
 MAX_CONSECUTIVE_LOSSES = 5   # human-set circuit breaker, never adaptive
 
 
-def check(portfolio: PortfolioState | None, hard_bounds: HardBounds) -> KillSwitchState:
+def check(portfolio: PortfolioState | None, hard_bounds: HardBounds,
+          now: datetime | None = None) -> KillSwitchState:
+    """`now` is injectable so staleness is judged against the caller's
+    clock (the orchestrator passes its cycle time); the wall-clock
+    default remains the fail-closed path for direct callers."""
     if portfolio is None or not portfolio.reliable:
         return KillSwitchState(tripped=True, reason="portfolio_state_unreliable")
 
-    age = datetime.now(timezone.utc) - portfolio.as_of
+    age = (now or datetime.now(timezone.utc)) - portfolio.as_of
     if age > MAX_SNAPSHOT_AGE:
         return KillSwitchState(tripped=True, reason="portfolio_state_stale")
 

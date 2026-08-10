@@ -120,30 +120,67 @@ class Broker:
                                   status_code=resp.status_code, body=body)
             if resp.status_code == 204:
                 return None
-            return resp.json()
+            try:
+                return resp.json()
+            except ValueError:
+                # A 200 whose body is empty, truncated or HTML (a proxy
+                # or gateway page). Raised as BrokerError so every
+                # caller's fail-closed path applies instead of a
+                # JSONDecodeError escaping the layer (stress-tester
+                # defect 2). The raw text goes with it, capped - house
+                # rule 3, every zero keeps its upstream response.
+                raise BrokerError(
+                    f"unparseable body on {method} {url}",
+                    status_code=resp.status_code,
+                    body=resp.text[:2000]) from None
         raise BrokerError(f"unreachable retry state on {method} {url}")
+
+    def _request_object(self, *args, **kwargs) -> dict:
+        """A response this endpoint documents as a JSON object. Anything
+        else (null, a list, a bare string) is a broker error, never a
+        value the caller has to type-check (stress-tester defect 2)."""
+        value = self._request(*args, **kwargs)
+        if not isinstance(value, dict):
+            raise BrokerError(
+                f"expected a JSON object, got {type(value).__name__}",
+                body=value)
+        return value
+
+    def _request_object_list(self, *args, **kwargs) -> list[dict]:
+        """A response documented as a JSON array of objects. An element
+        that is not an object is refused rather than dropped: a resting
+        stop we cannot parse must never read as 'no stop resting'."""
+        value = self._request(*args, **kwargs)
+        if not isinstance(value, list) or any(
+                not isinstance(item, dict) for item in value):
+            raise BrokerError(
+                f"expected a JSON array of objects, got {type(value).__name__}",
+                body=value)
+        return value
 
     # ------------------------------------------------------------- trading
 
     def get_account(self) -> dict:
-        return self._request("GET", f"{self._base_url}/v2/account")
+        return self._request_object("GET", f"{self._base_url}/v2/account")
 
     def get_clock(self) -> dict:
-        return self._request("GET", f"{self._base_url}/v2/clock")
+        return self._request_object("GET", f"{self._base_url}/v2/clock")
 
     def get_positions(self) -> list[dict]:
-        return self._request("GET", f"{self._base_url}/v2/positions")
+        return self._request_object_list("GET",
+                                         f"{self._base_url}/v2/positions")
 
     def get_open_orders(self) -> list[dict]:
-        return self._request("GET", f"{self._base_url}/v2/orders",
-                             params={"status": "open", "limit": 500})
+        return self._request_object_list(
+            "GET", f"{self._base_url}/v2/orders",
+            params={"status": "open", "limit": 500})
 
     def get_order(self, broker_order_id: str) -> dict:
-        return self._request(
+        return self._request_object(
             "GET", f"{self._base_url}/v2/orders/{broker_order_id}")
 
     def get_order_by_client_id(self, client_order_id: str) -> dict:
-        return self._request(
+        return self._request_object(
             "GET", f"{self._base_url}/v2/orders:by_client_order_id",
             params={"client_order_id": client_order_id})
 
@@ -161,8 +198,8 @@ class Broker:
             body["stop_price"] = stop_price
         if limit_price is not None:
             body["limit_price"] = limit_price
-        return self._request("POST", f"{self._base_url}/v2/orders",
-                             json_body=body, reject_as_order=True)
+        return self._request_object("POST", f"{self._base_url}/v2/orders",
+                                    json_body=body, reject_as_order=True)
 
     def cancel_order(self, broker_order_id: str) -> None:
         self._request("DELETE", f"{self._base_url}/v2/orders/{broker_order_id}")
@@ -170,7 +207,7 @@ class Broker:
     # ---------------------------------------------------------------- data
 
     def get_latest_quote(self, symbol: str) -> dict:
-        return self._request(
+        return self._request_object(
             "GET", f"{self._data_url}/v2/stocks/{symbol}/quotes/latest")
 
 

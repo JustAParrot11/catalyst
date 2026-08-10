@@ -64,6 +64,15 @@ class UnrecognizedUsageFieldError(ValueError):
     pass
 
 
+# A usage payload that is not a JSON object at all is wrapped under this
+# key so the row can still be RECORDED verbatim, and is then treated as
+# an unknown field so it can never price itself at zero (stress-tester
+# defect 14: a non-dict usage raised inside make_usage_components, so
+# the row was never written and money was spent with nothing in the
+# ledger - the exact failure record-first exists to prevent).
+UNPARSEABLE_USAGE_KEY = "unparseable_usage_object"
+
+
 def _find_unknown_fields(raw_usage: dict) -> list[str]:
     """Token/billing-shaped keys the parser does not understand, at the
     top level AND inside known nested billing objects (audit N2)."""
@@ -71,6 +80,8 @@ def _find_unknown_fields(raw_usage: dict) -> list[str]:
         k for k in raw_usage
         if k not in _KNOWN_TOP_KEYS and ("token" in k or "cache" in k or "search" in k)
     ]
+    if UNPARSEABLE_USAGE_KEY in raw_usage:
+        unknown.append(UNPARSEABLE_USAGE_KEY)
     nested = raw_usage.get("server_tool_use") or {}
     unknown += [f"server_tool_use.{k}" for k in nested
                 if k not in _KNOWN_SERVER_TOOL_KEYS]
@@ -84,14 +95,28 @@ def make_usage_components(raw_usage: dict) -> UsageComponents:
     """Parse a raw Anthropic usage object LENIENTLY, keeping it verbatim
     in .raw. Never raises: unknown fields are detected by callers via
     _find_unknown_fields so the row can be RECORDED before anything is
-    loud (audit N1 - the guard must never prevent the record)."""
-    server_tool_use = raw_usage.get("server_tool_use") or {}
+    loud (audit N1 - the guard must never prevent the record). That
+    includes a usage payload that is not an object at all, and field
+    values that are not numbers: both are kept verbatim and left
+    unpriceable rather than lost."""
+    if not isinstance(raw_usage, dict):
+        raw_usage = {UNPARSEABLE_USAGE_KEY: raw_usage}
+    server_tool_use = raw_usage.get("server_tool_use")
+    if not isinstance(server_tool_use, dict):
+        server_tool_use = {}
+
+    def _int(value) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
     return UsageComponents(
-        input_tokens=int(raw_usage.get("input_tokens", 0)),
-        output_tokens=int(raw_usage.get("output_tokens", 0)),
-        cache_creation_input_tokens=int(raw_usage.get("cache_creation_input_tokens", 0)),
-        cache_read_input_tokens=int(raw_usage.get("cache_read_input_tokens", 0)),
-        web_search_requests=int(server_tool_use.get("web_search_requests", 0)),
+        input_tokens=_int(raw_usage.get("input_tokens", 0)),
+        output_tokens=_int(raw_usage.get("output_tokens", 0)),
+        cache_creation_input_tokens=_int(raw_usage.get("cache_creation_input_tokens", 0)),
+        cache_read_input_tokens=_int(raw_usage.get("cache_read_input_tokens", 0)),
+        web_search_requests=_int(server_tool_use.get("web_search_requests", 0)),
         raw=raw_usage,
     )
 
@@ -148,7 +173,7 @@ def record(event: CostEvent, model: str, conn: sqlite3.Connection) -> None:
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (
             event.id,
-            json.dumps(event.usage.raw, sort_keys=True),
+            json.dumps(event.usage.raw, sort_keys=True, default=repr),
             model,
             event.kind,
             event.component,

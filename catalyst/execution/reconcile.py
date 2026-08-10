@@ -19,6 +19,20 @@ from catalyst.execution.broker import Broker, BrokerError
 _TERMINAL = {"filled", "canceled", "expired", "rejected", "done_for_day"}
 
 
+def _number(value) -> Decimal | None:
+    """A broker number, or None if it is unreadable or not finite.
+    Decimal('NaN') and Decimal('Infinity') both construct successfully
+    and then raise on the first comparison, so is_finite is part of
+    parsing, not a separate check (stress-tester defect 5)."""
+    if value is None:
+        return None
+    try:
+        dec = Decimal(str(value))
+    except (ArithmeticError, TypeError, ValueError):
+        return None
+    return dec if dec.is_finite() else None
+
+
 def reconcile(broker: Broker, conn) -> list[Fill]:
     """Walk every locally-recorded order not yet terminal, ask the broker
     what actually happened, update local status, and record any fill at
@@ -53,16 +67,37 @@ def reconcile(broker: Broker, conn) -> list[Fill]:
             "UPDATE orders SET status = ?, broker_order_id = ? WHERE id = ?",
             (remote_status, remote.get("id", broker_order_id), order_id))
 
-        filled_qty = Decimal(str(remote.get("filled_qty") or "0"))
-        avg_price = remote.get("filled_avg_price")
+        filled_qty = _number(remote.get("filled_qty") or "0")
+        avg_price = _number(remote.get("filled_avg_price"))
+        if filled_qty is None or (remote.get("filled_avg_price") is not None
+                                  and avg_price is None):
+            # A quantity or price we cannot read is not a fill and is not
+            # a zero either: record the broker's verbatim answer beside
+            # the order and leave the order non-terminal so the next pass
+            # asks again (house rule 3; stress-tester defects 5 and 6).
+            conn.execute(
+                "UPDATE orders SET raw_response = ? WHERE id = ?",
+                (json.dumps({"unreadable_fill_fields": True,
+                             "remote": remote,
+                             "checked_at": _now().isoformat()}), order_id))
+            continue
+        if avg_price is not None and avg_price <= 0:
+            # A non-positive fill price is impossible. Recorded as a fill
+            # it would flow into realized P&L, which feeds the drawdown
+            # kill switch's high-water mark AND the cost governor's cap.
+            conn.execute(
+                "UPDATE orders SET raw_response = ? WHERE id = ?",
+                (json.dumps({"nonpositive_fill_price": str(
+                    remote.get("filled_avg_price")),
+                    "remote": remote,
+                    "checked_at": _now().isoformat()}), order_id))
+            continue
         if filled_qty > 0 and avg_price is not None:
-            filled_at = datetime.fromisoformat(
-                remote.get("filled_at").replace("Z", "+00:00")
-            ) if remote.get("filled_at") else _now()
+            filled_at = _timestamp(remote.get("filled_at"))
             fill = Fill(order_id=order_id,
-                        price=Decimal(str(avg_price)),
+                        price=avg_price,
                         qty=filled_qty, filled_at=filled_at,
-                        broker_reported_price=Decimal(str(avg_price)))
+                        broker_reported_price=avg_price)
             prev = conn.execute(
                 "SELECT qty FROM fills WHERE order_id = ?",
                 (order_id,)).fetchone()
@@ -105,7 +140,10 @@ def close_filled_positions(conn, account_mode: str = "paper",
             conn.execute("SELECT id, ticker, entry_order_ids, opened_at, "
                          "planned_exit_date FROM positions "
                          "WHERE status = 'open'").fetchall():
-        entry_ids = json.loads(entry_ids_json)
+        try:
+            entry_ids = json.loads(entry_ids_json)
+        except (TypeError, ValueError):
+            continue      # corrupt row: it needs a human, not a guess
         if not entry_ids:
             continue
         entry = conn.execute(
@@ -122,8 +160,10 @@ def close_filled_positions(conn, account_mode: str = "paper",
                WHERE o.decision_id = ? AND o.side = 'sell'
                ORDER BY f.filled_at""", (decision_id,)).fetchall()
         sold_qty = sum(Decimal(s[1]) for s in sells)
-        if sold_qty < Decimal(entry_qty):
+        if sold_qty <= 0 or sold_qty < Decimal(entry_qty):
             continue           # partial or no exit yet; stays open
+                               # (sold_qty 0 also guards the division
+                               # below - stress-tester defect 27)
 
         # qty-weighted exit price across sell fills
         exit_price = sum(Decimal(s[0]) * Decimal(s[1]) for s in sells) / sold_qty
@@ -160,3 +200,16 @@ def close_filled_positions(conn, account_mode: str = "paper",
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _timestamp(value) -> datetime:
+    """A broker timestamp, falling back to observation time. A malformed
+    or absent filled_at must not lose the fill itself - a fill we cannot
+    date is still a position we hold (stress-tester)."""
+    if not isinstance(value, str) or not value:
+        return _now()
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return _now()
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)

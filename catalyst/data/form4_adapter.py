@@ -30,12 +30,23 @@ def flatten_form4_events(feed_events: list[RawEvent]) -> list[RawEvent]:
     flat: list[RawEvent] = []
     for ev in feed_events:
         parsed = (ev.payload_raw or {}).get("parsed") or {}
-        owners = parsed.get("owners") or []
+        if not isinstance(parsed, dict):
+            continue
+        # A malformed entry drops ITSELF, never the rest of the batch: a
+        # single non-object owner or transaction used to raise
+        # AttributeError and lose every filing in the fetch
+        # (stress-tester defect 16). Dropping an owner can only reduce
+        # the distinct-insider count, so the cluster floor fails closed.
+        owners = [o for o in (parsed.get("owners") or [])
+                  if isinstance(o, dict)]
         owner_ciks = [str(o.get("cik", "")).strip() for o in owners] or ["?"]
-        ten = parsed.get("ten_b5_1") or {}
+        ten = parsed.get("ten_b5_1")
+        ten = ten if isinstance(ten, dict) else {}
         aff = "" if ten.get("element") is None else str(ten.get("element"))
         row_n = 0
         for tx in parsed.get("transactions") or []:
+            if not isinstance(tx, dict):
+                continue
             if tx.get("table") != "non_derivative":
                 continue
             if str(tx.get("code", "")).strip().upper() != "P":

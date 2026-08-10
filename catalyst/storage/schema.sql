@@ -121,7 +121,13 @@ CREATE TABLE IF NOT EXISTS adaptive_param_log (
 -- execution/ layer
 CREATE TABLE IF NOT EXISTS orders (
     id              TEXT PRIMARY KEY,
-    decision_id     TEXT NOT NULL REFERENCES risk_decisions(id),
+    -- Holds the CANDIDATE id, which is what execution/ writes and what
+    -- reconcile joins on (risk_decisions.candidate_id). It referenced
+    -- risk_decisions(id) - a uuid nothing ever puts here - so under
+    -- production's PRAGMA foreign_keys=ON every entry order INSERT
+    -- failed AFTER the order had already been sent to the broker
+    -- (stress-tester defect 1; tests/test_stress_stage5.py).
+    decision_id     TEXT NOT NULL REFERENCES candidates(id),
     broker_order_id TEXT,
     side            TEXT NOT NULL,
     qty             TEXT NOT NULL,

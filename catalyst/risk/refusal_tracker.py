@@ -51,10 +51,16 @@ def score_due_refusals(broker: Broker, conn,
         except BrokerError:
             continue
         quote = q.get("quote") or {}
+        if not isinstance(quote, dict):
+            continue
         try:
             bid = Decimal(str(quote.get("bp")))
             ask = Decimal(str(quote.get("ap")))
         except (ArithmeticError, TypeError, ValueError):
+            continue
+        # NaN/Infinity survive Decimal() and raise on the FIRST
+        # comparison instead (stress-tester defect 3).
+        if not (bid.is_finite() and ask.is_finite()):
             continue
         if bid <= 0 or ask <= 0 or ask < bid:
             continue

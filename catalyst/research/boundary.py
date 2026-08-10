@@ -28,7 +28,12 @@ from typing import Callable, Literal
 
 from catalyst.cost import CostEstimate
 from catalyst.cost.governor import authorize
-from catalyst.cost.tracker import record_usage
+from catalyst.cost.pricing import UnknownModelError
+from catalyst.cost.tracker import (
+    UNPARSEABLE_USAGE_KEY,
+    UnrecognizedUsageFieldError,
+    record_usage,
+)
 from catalyst.discovery import Candidate
 from catalyst.research import prompts
 from catalyst.research.schema import (
@@ -85,6 +90,8 @@ def investigate(
 
     turns: list[APITurn] = []
     cost_cents = Decimal("0")
+    unpriced: list[str] = []
+    transport_errors: list[str] = []
     messages: list[dict] = [{"role": "user", "content": prompt}]
 
     def finish(view: ResearchView | None, skipped: str | None) -> ResearchCallLog:
@@ -112,15 +119,45 @@ def investigate(
                              cycle_id=cost_context.cycle_id)
         if not decision.authorized:
             return None
-        response = transport(payload)
-        event = record_usage(response.get("usage", {}), model,
-                             cost_context.kind, "research", conn,
-                             api_call_id=call_id)
-        if event.priced_cents is not None:
-            cost_cents += event.priced_cents
+        try:
+            response = transport(payload)
+        except Exception as exc:
+            # The live transport raises on a network error or an API 5xx.
+            # That used to escape investigate() and kill the whole cycle
+            # mid-loop, leaving no research_calls row for a call that may
+            # have been billed (stress-tester defect 23).
+            transport_errors.append(
+                f"transport_error: {type(exc).__name__}: {exc}")
+            return None
+        if not isinstance(response, dict):
+            response = {"unparseable_response": repr(response)[:2000]}
+        # An ABSENT usage object is not a free call. TRAPS.md's
+        # renamed-field trap is exactly this: the unknown-field guard
+        # inspects the usage object's contents, so it cannot see the
+        # object itself going missing, and the turn priced at $0.00
+        # (stress-tester defect 24).
+        raw_usage = response["usage"] if "usage" in response else {
+            UNPARSEABLE_USAGE_KEY: "response carried no usage object"}
+        try:
+            event = record_usage(raw_usage, model,
+                                 cost_context.kind, "research", conn,
+                                 api_call_id=call_id)
+            usage = event.usage if isinstance(event.usage, UsageComponents) else None
+            if event.priced_cents is not None:
+                cost_cents += event.priced_cents
+        except (UnknownModelError, UnrecognizedUsageFieldError) as exc:
+            # record_usage has ALREADY written the row with priced_cents
+            # NULL (record-first, TRAPS.md), and has_unpriced_rows now
+            # blocks every further authorization. The exception used to
+            # escape investigate() and kill the whole cycle mid-loop -
+            # after an earlier candidate may already have been traded -
+            # and the research_calls row for this paid call was never
+            # written (stress-tester defect 13).
+            unpriced.append(f"{type(exc).__name__}: {exc}")
+            usage = None
         turn = APITurn(
             turn_index=len(turns), raw_response=response,
-            usage=event.usage if isinstance(event.usage, UsageComponents) else None,
+            usage=usage,
             stop_reason=response.get("stop_reason") or "")
         turns.append(turn)
         return turn
@@ -133,7 +170,10 @@ def investigate(
         "tool_choice": {"type": "auto"},
     })
     if turn is None:
-        return finish(None, "budget_denied")
+        return finish(None, transport_errors[0] if transport_errors
+                      else "budget_denied")
+    if unpriced:
+        return finish(None, f"usage_unpriced_governor_blocked: {unpriced[0]}")
 
     exploration_rounds = 1
     while (turn.stop_reason == "pause_turn"
@@ -146,7 +186,11 @@ def investigate(
             "tool_choice": {"type": "auto"},
         })
         if turn is None:
-            return finish(None, "budget_denied")
+            return finish(None, transport_errors[0] if transport_errors
+                          else "budget_denied")
+        if unpriced:
+            return finish(
+                None, f"usage_unpriced_governor_blocked: {unpriced[0]}")
         exploration_rounds += 1
 
     messages.append({"role": "assistant",
@@ -163,9 +207,15 @@ def investigate(
         "tool_choice": {"type": "tool", "name": "submit_research_view"},
     })
     if turn is None:
-        return finish(None, "budget_denied")
+        return finish(None, transport_errors[0] if transport_errors
+                      else "budget_denied")
+    if unpriced:
+        return finish(None, f"usage_unpriced_governor_blocked: {unpriced[0]}")
 
-    tool_input = _extract_tool_input(turn.raw_response)
+    try:
+        tool_input = _extract_tool_input(turn.raw_response)
+    except AmbiguousExtraction as exc:
+        return finish(None, f"multiple_tool_calls_in_extraction_turn: {exc}")
     if tool_input is None:
         return finish(None, "no_tool_call_in_extraction_turn")
     try:
@@ -175,12 +225,33 @@ def investigate(
     return finish(view, None)
 
 
+class AmbiguousExtraction(ValueError):
+    """More than one submit_research_view block in one response."""
+
+
 def _extract_tool_input(response: dict) -> dict | None:
-    for block in response.get("content", []):
-        if (block.get("type") == "tool_use"
-                and block.get("name") == "submit_research_view"):
-            return block.get("input")
-    return None
+    """The forced extraction turn's single tool call, or None.
+
+    Defensive about shape: a content field that is not a list of block
+    objects used to raise AttributeError from inside investigate(),
+    after the call was billed and before the research_calls row was
+    written - a paid call that vanished from the audit trail
+    (stress-tester defect 11).
+
+    Two submit_research_view blocks are AMBIGUOUS, not first-wins: a
+    model that retracts its view in the second block would otherwise be
+    traded on the first (defect 12)."""
+    content = response.get("content")
+    if not isinstance(content, list):
+        return None
+    found = [block.get("input") for block in content
+             if isinstance(block, dict)
+             and block.get("type") == "tool_use"
+             and block.get("name") == "submit_research_view"]
+    if len(found) > 1:
+        raise AmbiguousExtraction(
+            f"{len(found)} submit_research_view blocks in one response")
+    return found[0] if found else None
 
 
 def _persist(log: ResearchCallLog, conn) -> None:

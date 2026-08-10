@@ -49,6 +49,16 @@ def _record_order(conn, *, order_id: str, decision_id: str, side: str,
     conn.commit()
 
 
+def _resolve_submitted(broker: Broker, order_id: str) -> dict | None:
+    """Ask the broker whether it knows our client_order_id. Returns the
+    order as the broker sees it, or None if it genuinely does not exist
+    (or cannot be asked)."""
+    try:
+        return broker.get_order_by_client_id(order_id)
+    except (BrokerError, OrderRejected):
+        return None
+
+
 def _submit(broker: Broker, conn, *, decision_id: str, symbol: str, qty: str,
             side: str, order_type: str, tif: str,
             stop_price: str | None = None) -> OrderResult:
@@ -66,6 +76,34 @@ def _submit(broker: Broker, conn, *, decision_id: str, symbol: str, qty: str,
         raw = {**raw, "_http_status": exc.status_code}
         status = "rejected"
         broker_order_id = raw.get("id")
+        # _request retries a POST after a network error, so a rejection
+        # can mean "the FIRST attempt landed" (duplicate client_order_id)
+        # rather than "no order exists". Recording a live order as
+        # rejected is the most expensive lie the database can tell, so
+        # the broker is asked before the word is written (stress-tester
+        # defect 9).
+        confirmed = _resolve_submitted(broker, order_id)
+        if confirmed is not None:
+            raw = {"rejection": raw, "resolved_by_client_order_id": confirmed}
+            status = confirmed.get("status", "accepted")
+            broker_order_id = confirmed.get("id")
+    except BrokerError as exc:
+        # 5xx or network failure after retries: the order may or may not
+        # exist at the broker. The local id IS the client_order_id, so
+        # recording the row is the only handle that can ever resolve it -
+        # dropping it left a possibly-live order that nothing local could
+        # find (stress-tester defect 8).
+        confirmed = _resolve_submitted(broker, order_id)
+        if confirmed is not None:
+            raw = {"submit_error": str(exc),
+                   "resolved_by_client_order_id": confirmed}
+            status = confirmed.get("status", "accepted")
+            broker_order_id = confirmed.get("id")
+        else:
+            raw = {"submit_error": str(exc), "status_code": exc.status_code,
+                   "body": exc.body}
+            status = "submit_unconfirmed"
+            broker_order_id = None
     _record_order(conn, order_id=order_id, decision_id=decision_id,
                   side=side, qty=qty, order_type=order_type, tif=tif,
                   submitted_at=submitted_at, status=status,
@@ -197,7 +235,11 @@ def confirm_stops_resting(positions: list[dict], broker: Broker,
     out: list[StopConfirmation] = []
     for pos in positions:
         stops = tuple(
-            o["id"] for o in open_orders
+            # An order with no id still COUNTS as a resting stop. Losing
+            # it would read as "unprotected" and place a second stop on
+            # the same position (stress-tester defect 7).
+            o.get("id") or "<no id in broker response>"
+            for o in open_orders
             if o.get("symbol") == pos["ticker"]
             and o.get("side") == "sell"
             and o.get("type") in _STOP_TYPES)

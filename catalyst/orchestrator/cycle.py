@@ -35,6 +35,11 @@ from catalyst.risk.kill_switches import check as kill_check
 MAX_RESEARCH_PER_CYCLE = 3     # bounds worst-case spend per cycle; the
                                # governor is the real cap, this is belt
 
+# Broker statuses that mean "this order will never fill". An entry in
+# one of these with nothing filled bought nothing, so it opens nothing.
+_TERMINAL_UNFILLED = {"canceled", "expired", "done_for_day", "rejected",
+                      "suspended", "stopped"}
+
 
 @dataclass
 class CycleReport:
@@ -44,6 +49,19 @@ class CycleReport:
     funnel: dict = field(default_factory=dict)        # stage -> count
     drop_reasons: dict = field(default_factory=dict)  # stage -> [reasons]
     errors: list = field(default_factory=list)
+
+
+def _finite(value) -> Decimal:
+    """Decimal(value) that refuses NaN/Infinity. Python's json parses the
+    non-standard NaN/Infinity literals, and Decimal builds happily from
+    them - the failure only surfaces at the FIRST comparison, which for
+    account equity is inside the kill switch. The one code path that
+    exists to fail closed must not be the one that raises (stress-tester
+    defects 3 and 4)."""
+    dec = Decimal(str(value))
+    if not dec.is_finite():
+        raise ValueError(f"non-finite number from upstream: {value!r}")
+    return dec
 
 
 def build_portfolio_state(broker: Broker, conn,
@@ -56,7 +74,7 @@ def build_portfolio_state(broker: Broker, conn,
     except BrokerError:
         return None
     try:
-        equity = Decimal(str(acct["equity"]))
+        equity = _finite(acct["equity"])
         # cash account settled funds: neither `cash` nor
         # `non_marginable_buying_power` is documented as exactly
         # "settled" (risk review F4), and `cash` can include unsettled
@@ -64,29 +82,37 @@ def build_portfolio_state(broker: Broker, conn,
         # same-day-sale verification pins the semantics - sizing too
         # small is an opportunity cost, sizing on unsettled funds is a
         # good-faith violation.
-        cash = Decimal(str(acct["cash"]))
+        cash = _finite(acct["cash"])
         nmbp = acct.get("non_marginable_buying_power")
-        settled = min(cash, Decimal(str(nmbp))) if nmbp else cash
-        day_pnl = equity - Decimal(str(acct.get("last_equity", equity)))
-    except (KeyError, ArithmeticError, TypeError):
+        settled = min(cash, _finite(nmbp)) if nmbp else cash
+        day_pnl = equity - _finite(acct.get("last_equity", equity))
+    except (KeyError, ArithmeticError, TypeError, ValueError):
         return None
 
     rows = conn.execute(
         """SELECT p.id, p.ticker, p.opened_at, p.planned_exit_date,
                   d.notional_usd, d.adaptive_params_snapshot
            FROM positions p
-           LEFT JOIN orders o ON o.id = json_extract(p.entry_order_ids, '$[0]')
+           LEFT JOIN orders o ON o.id = json_extract(
+                CASE WHEN json_valid(p.entry_order_ids)
+                     THEN p.entry_order_ids ELSE '[]' END, '$[0]')
            LEFT JOIN risk_decisions d ON d.candidate_id = o.decision_id
            WHERE p.status = 'open'""").fetchall()
-    open_positions = tuple(
-        OpenPosition(
-            position_id=r[0], ticker=r[1],
-            notional_usd=Decimal(r[4]) if r[4] else Decimal("0"),
-            cluster_key=(json.loads(r[5]).get("_cluster_key", "")
-                         if r[5] else ""),
-            opened_at_date=datetime.fromisoformat(r[2]).date(),
-            planned_exit_date=datetime.fromisoformat(r[3]).date())
-        for r in rows)
+    try:
+        open_positions = tuple(
+            OpenPosition(
+                position_id=r[0], ticker=r[1],
+                notional_usd=Decimal(r[4]) if r[4] else Decimal("0"),
+                cluster_key=_cluster_key_of(r[5]),
+                opened_at_date=datetime.fromisoformat(r[2]).date(),
+                planned_exit_date=datetime.fromisoformat(r[3]).date())
+            for r in rows)
+    except (ArithmeticError, TypeError, ValueError):
+        # A position row we cannot parse means exposure we cannot count.
+        # Dropping it would understate exposure and let sizing
+        # over-allocate, so the whole read is declared unreliable and the
+        # kill switch stands the cycle down (stress-tester defect 22).
+        return None
 
     return PortfolioState(
         equity_usd=equity, settled_cash_usd=settled,
@@ -94,6 +120,19 @@ def build_portfolio_state(broker: Broker, conn,
         peak_equity_usd=_peak_equity(conn, equity),
         consecutive_losses=_consecutive_losses(conn),
         as_of=now, reliable=True)
+
+
+def _cluster_key_of(snapshot_json) -> str:
+    """The stored cluster key, or '' if the snapshot is unreadable. An
+    empty key is safe: cycle._fallback_cluster_key re-derives one, and an
+    unkeyed position never silently bypasses the cluster bound."""
+    if not snapshot_json:
+        return ""
+    try:
+        loaded = json.loads(snapshot_json)
+    except (TypeError, ValueError):
+        return ""
+    return loaded.get("_cluster_key", "") if isinstance(loaded, dict) else ""
 
 
 def _peak_equity(conn, current_equity: Decimal) -> Decimal:
@@ -171,6 +210,17 @@ def _protective_duties(conn, broker: Broker, report: "CycleReport",
         conn.commit()
 
     due = [p for p in open_rows if p["due"]]
+    # A due position whose entry order or quantity cannot be resolved
+    # used to send a market sell with qty "None" and then die on a NOT
+    # NULL constraint - a garbage order at the broker and an unfinished
+    # cycle. It needs a human, not an order (stress-tester defect 17).
+    unsellable = [p for p in due if not p["qty"] or not p["decision_id"]]
+    for p in unsellable:
+        report.errors.append(
+            f"position {p['id']} ({p['ticker']}) is due but has no "
+            f"resolvable entry order (qty={p['qty']!r}, "
+            f"decision_id={p['decision_id']!r}) - not exited, needs review")
+    due = [p for p in due if p not in unsellable]
     if due:
         try:
             manage_exits(due, now, broker, conn)
@@ -194,7 +244,16 @@ def _poll_entry_fill(broker: Broker, broker_order_id: str | None, *,
             state = broker.get_order(broker_order_id)
         except BrokerError:
             return Decimal("0")
-        qty = Decimal(str(state.get("filled_qty") or "0"))
+        try:
+            qty = _finite(state.get("filled_qty") or "0")
+        except (ArithmeticError, TypeError, ValueError):
+            # An unreadable filled_qty used to raise here - after the
+            # entry was live at the broker and before the positions row
+            # was written, leaving a real position with no local record,
+            # no stop and no exit date. Treat it as "not yet filled":
+            # the position is recorded unprotected and the next cycle's
+            # confirm_stops_resting arms it (stress-tester defect 10).
+            return Decimal("0")
         if qty > 0:
             return qty
         if attempt < attempts - 1:
@@ -224,7 +283,7 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
 
     # ---- 1. kill switches, before anything else
     portfolio = build_portfolio_state(broker, conn, now)
-    ks = kill_check(portfolio, HARD_BOUNDS)
+    ks = kill_check(portfolio, HARD_BOUNDS, now)
     report.kill_switch = ks
     if ks.tripped:
         conn.execute(
@@ -282,7 +341,10 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
     else:
         try:
             clock = broker.get_clock()
-            if not clock.get("is_open"):
+            # Only a real boolean True counts. The STRING "false" is
+            # truthy, and a truthiness test on it traded with the market
+            # shut (stress-tester defect 20).
+            if clock.get("is_open") is not True:
                 block_entries = "market_closed"
         except BrokerError:
             block_entries = "market_clock_unavailable"
@@ -310,7 +372,10 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
         conn.execute(
             "INSERT OR IGNORE INTO raw_events VALUES (?,?,?,?)",
             (ev.source, ev.source_id, ev.fetched_at.isoformat(),
-             json.dumps(ev.payload_raw)))
+             # default=str: a Decimal or datetime left in a payload by a
+             # parser used to raise TypeError here, AFTER a successful
+             # fetch (stress-tester defect 25)
+             json.dumps(ev.payload_raw, default=str)))
     conn.commit()
 
     candidates = build_candidates_fn(events, now)
@@ -320,11 +385,25 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
     screen_reasons: list[str] = []
     open_tickers = {p["ticker"] for p in open_rows}
     for c in candidates:
+        existing = conn.execute(
+            "SELECT ticker, catalyst_date FROM candidates WHERE id=?",
+            (c.id,)).fetchone()
         if conn.execute("SELECT 1 FROM research_views WHERE candidate_id=?",
                         (c.id,)).fetchone():
             screen_reasons.append(f"{c.id}: already_researched")
         elif c.ticker in open_tickers:
             screen_reasons.append(f"{c.id}: position_already_open")
+        elif existing and (existing[0] != c.ticker
+                           or existing[1] != c.catalyst_date.isoformat()):
+            # Candidate ids are content hashes: a collision means two
+            # different clusters share an id. INSERT OR IGNORE kept the
+            # first row while the second candidate was traded, so the
+            # audit trail described the wrong company (stress-tester
+            # defect 19). Every trade must be explainable after the fact.
+            screen_reasons.append(
+                f"{c.id}: id_collision_with_different_candidate "
+                f"(stored {existing[0]} {existing[1]}, "
+                f"got {c.ticker} {c.catalyst_date.isoformat()})")
         else:
             fresh.append(c)
             conn.execute(
@@ -385,9 +464,21 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
         proposed += 1
 
         entry = place(decision, c.ticker, broker, conn)
-        if entry.status == "rejected":
+        if entry.status in ("rejected", "submit_unconfirmed"):
+            # submit_unconfirmed: the order row exists (it carries the
+            # client_order_id) and reconcile will resolve it, but no
+            # position is invented from an order we cannot confirm - a
+            # phantom position would have a stop placed against shares
+            # the account may not hold (stress-tester defect 8).
             report.drop_reasons.setdefault("orders_placed", []).append(
-                f"{c.id}: entry_rejected")
+                f"{c.id}: entry_{entry.status}")
+            if entry.status == "submit_unconfirmed":
+                report.errors.append(
+                    f"entry submit unconfirmed for {c.id}: reconcile must "
+                    f"resolve order {entry.raw_response.get('submit_error')}")
+                # we may be holding shares with no stop and no position
+                # row: take no further entries until that is resolved
+                block_entries = "unconfirmed_submit_blocks_entries"
             continue
 
         # The protective stop covers what actually FILLED, never the
@@ -400,6 +491,15 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
         filled_qty = _poll_entry_fill(broker, entry.broker_order_id,
                                       attempts=entry_poll_attempts,
                                       interval_s=entry_poll_interval_s)
+        if filled_qty == 0 and entry.status in _TERMINAL_UNFILLED:
+            # The broker answered 200 but the order is already dead
+            # (Alpaca cancels unfilled orders at the close). Nothing was
+            # bought, so a positions row here would be a phantom that
+            # every later cycle tries to protect with a sell stop for
+            # shares the account does not hold (stress-tester defect 26).
+            report.drop_reasons.setdefault("orders_placed", []).append(
+                f"{c.id}: entry_{entry.status}_unfilled")
+            continue
         stop_broker_id = None
         if filled_qty > 0:
             stop = place_stop(decision_id=c.id, ticker=c.ticker,
@@ -449,17 +549,27 @@ def build_market_snapshot(broker: Broker, ticker: str,
     except BrokerError:
         return None
     quote = q.get("quote") or {}
+    if not isinstance(quote, dict):
+        return None
     ts = quote.get("t")
     if ts:
         try:
             quote_at = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+            if quote_at.tzinfo is None:
+                # A feed that drops the trailing Z used to raise TypeError
+                # here ("can't subtract offset-naive and offset-aware") -
+                # only ValueError was caught (stress-tester defect 21).
+                # Alpaca timestamps are UTC; if a feed ever sent local
+                # time instead it would read as HOURS old and be refused,
+                # which is the safe direction.
+                quote_at = quote_at.replace(tzinfo=timezone.utc)
             if now - quote_at > MAX_QUOTE_AGE:
                 return None
-        except ValueError:
+        except (TypeError, ValueError):
             return None
     bid, ask = quote.get("bp"), quote.get("ap")
     try:
-        bid, ask = Decimal(str(bid)), Decimal(str(ask))
+        bid, ask = _finite(bid), _finite(ask)
     except (ArithmeticError, TypeError, ValueError):
         return None
     if bid <= 0 or ask <= 0 or ask < bid:
@@ -523,7 +633,9 @@ def _open_position_dicts(conn, now: datetime) -> list[dict]:
         """SELECT p.id, p.ticker, p.stop_order_id, p.planned_exit_date,
                   o.decision_id, o.qty, d.stop_price, f.qty
            FROM positions p
-           LEFT JOIN orders o ON o.id = json_extract(p.entry_order_ids, '$[0]')
+           LEFT JOIN orders o ON o.id = json_extract(
+                CASE WHEN json_valid(p.entry_order_ids)
+                     THEN p.entry_order_ids ELSE '[]' END, '$[0]')
            LEFT JOIN risk_decisions d ON d.candidate_id = o.decision_id
            LEFT JOIN fills f ON f.order_id = o.id
            WHERE p.status = 'open'""").fetchall()
