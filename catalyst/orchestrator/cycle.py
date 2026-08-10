@@ -171,7 +171,8 @@ def _consecutive_losses(conn) -> int:
 
 
 def _protective_duties(conn, broker: Broker, report: "CycleReport",
-                       now: datetime) -> tuple[bool, list[dict]]:
+                       now: datetime,
+                       account_mode: str = "paper") -> tuple[bool, list[dict]]:
     """Reconcile fills, close finished positions, re-arm expired DAY
     stops, run hard-date exits. Runs on EVERY cycle including loss-rule
     kill trips - these duties only ever reduce risk. A reconcile failure
@@ -185,7 +186,7 @@ def _protective_duties(conn, broker: Broker, report: "CycleReport",
     except BrokerError as exc:
         report.errors.append(f"reconcile: {exc}")
     _adopt_orphan_entries(conn, report, now)
-    close_filled_positions(conn, now=now)
+    close_filled_positions(conn, account_mode=account_mode, now=now)
     _void_dead_entries(conn, report)
 
     open_rows = _open_position_dicts(conn, now)
@@ -322,13 +323,31 @@ def _broker_positions_agree(broker: Broker, conn,
         return False
     local = {r[0] for r in conn.execute(
         "SELECT ticker FROM positions WHERE status = 'open'")}
-    unaccounted = [p.get("symbol") for p in held
-                   if p.get("symbol") and p.get("symbol") not in local]
+    held_syms = {p.get("symbol") for p in held if p.get("symbol")}
+    unaccounted = sorted(held_syms - local)
     for sym in unaccounted:
         report.errors.append(
             f"broker holds {sym} with no local open position - "
             "unaccounted exposure, entries blocked pending review")
-    return not unaccounted
+    # The reverse direction (stress stage-8 E3): a local open position
+    # with a RECORDED ENTRY FILL that the broker does not hold means the
+    # book is counting exposure that does not exist and will re-arm
+    # stops for shares it does not own. Only fill-confirmed positions
+    # count - a freshly placed, not-yet-filled entry is legitimately
+    # local-open/broker-flat and must not false-trip this.
+    ghosts = [r[0] for r in conn.execute(
+        """SELECT DISTINCT p.ticker FROM positions p
+           JOIN orders o ON o.id = json_extract(
+                CASE WHEN json_valid(p.entry_order_ids)
+                     THEN p.entry_order_ids ELSE '[]' END, '$[0]')
+           JOIN fills f ON f.order_id = o.id
+           WHERE p.status = 'open'""") if r[0] not in held_syms]
+    for sym in ghosts:
+        report.errors.append(
+            f"local open position in {sym} has a recorded entry fill but "
+            "the broker holds none - phantom exposure, entries blocked "
+            "pending review")
+    return not unaccounted and not ghosts
 
 
 def _adopt_orphan_entries(conn, report: "CycleReport", now: datetime) -> None:
@@ -432,7 +451,9 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
               kind: str = "scheduled",
               max_research: int = MAX_RESEARCH_PER_CYCLE,
               entry_poll_attempts: int = 5,
-              entry_poll_interval_s: float = 1.0) -> CycleReport:
+              entry_poll_interval_s: float = 1.0,
+              account_mode: str = "paper",
+              owner_monthly_cap_cents=None) -> CycleReport:
     now = now or datetime.now(timezone.utc)
     cycle_id = str(uuid.uuid4())
     params = current_values(conn)
@@ -460,7 +481,7 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
         # on state we cannot trust is how a bad day becomes a worse one.
         if ks.reason not in ("portfolio_state_unreliable",
                              "portfolio_state_stale"):
-            _protective_duties(conn, broker, report, now)
+            _protective_duties(conn, broker, report, now, account_mode=account_mode)
         return report
 
     # daily equity mark from the confirmed broker read (dashboard's
@@ -500,7 +521,8 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
     conn.commit()
 
     # ---- 2 + 3. reconcile, then stop duties and hard exits
-    stops_ok, open_rows = _protective_duties(conn, broker, report, now)
+    stops_ok, open_rows = _protective_duties(conn, broker, report, now,
+                                             account_mode=account_mode)
 
     # score refusals whose counterfactual window has elapsed (the
     # feedback loop; failures leave rows unscored for the next cycle)
@@ -627,7 +649,8 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
             c, CostContext(conn=conn,
                            governor_profit_share=Decimal(
                                str(params["governor_profit_share"])),
-                           cycle_id=cycle_id, kind=kind),
+                           cycle_id=cycle_id, kind=kind,
+                           owner_monthly_cap_cents=owner_monthly_cap_cents),
             transport, graph_context=_graph_context(c, conn))
         if log.parsed_view is None:
             report.drop_reasons.setdefault("researched", []).append(

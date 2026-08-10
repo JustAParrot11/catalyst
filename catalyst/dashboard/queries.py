@@ -682,8 +682,28 @@ class Logs:
     reason: str = ""
 
 
+#: A page of logs, and the most a single page may ever ask sqlite for.
+#: LIMIT -1 means "no limit" in sqlite, so an unclamped negative from the
+#: query string would try to render the whole table into one page.
+DEFAULT_LOG_LIMIT = 200
+MAX_LOG_LIMIT = 2000
+
+
+def _log_limit(value) -> int:
+    """The limit box is a free-text query parameter: ?limit=abc reached
+    int() and 500ed the whole page (stage-8 stress). A filter value that
+    makes no sense falls back to the default rather than taking the
+    dashboard down with it."""
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return DEFAULT_LOG_LIMIT
+    return max(1, min(parsed, MAX_LOG_LIMIT))
+
+
 def logs(db: Db, level: str = "", component: str = "", q: str = "",
-         since: str = "", until: str = "", limit: int = 200) -> Logs:
+         since: str = "", until: str = "", limit=DEFAULT_LOG_LIMIT) -> Logs:
+    limit = _log_limit(limit)
     filters = {"level": level, "component": component, "q": q,
                "since": since, "until": until, "limit": limit}
     if not db.table_exists("logs"):

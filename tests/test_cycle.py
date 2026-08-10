@@ -254,7 +254,7 @@ class TestNoTransport:
 class TestMarketSnapshot:
     def test_spread_computed_from_nbbo(self):
         broker, _ = broker_for()
-        snap = build_market_snapshot(broker, "TEST")
+        snap = build_market_snapshot(broker, "TEST", NOW)
         assert snap.last_close == Decimal("50")
         assert snap.half_spread_bp == Decimal("10.0")
 

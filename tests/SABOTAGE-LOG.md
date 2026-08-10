@@ -603,3 +603,15 @@ change kept from this session is the strengthened assertion block in
   replace -> caught. The duplicate-reduction stale-live and float-
   netting fixes were proven by test-writer's pre-written failing tests
   flipping to green (markers then removed).
+
+## Stage 8 — 2026-08-10
+
+- Owner-budget cap wiring neutralized in governor: caught by
+  test_owner_budget_lowers_the_cap. Restored, green.
+- Ghost-position check removed from _broker_positions_agree: caught by
+  test_local_position_with_fill_but_no_broker_holding_blocks. Restored,
+  green.
+- Account-mode: live->paper endpoint redirect and invalid-mode-defaults-
+  to-live both sabotaged and caught (test_account_mode.py docstring).
+- Stage-8 stress pass: 7 further sabotage entries at the bottom of
+  tests/test_stress_stage8.py.

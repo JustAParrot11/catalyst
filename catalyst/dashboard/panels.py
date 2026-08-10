@@ -863,7 +863,10 @@ def logs_panel(db: Db, params: dict, p: str = "log") -> str:
         db,
         level=params.get("level", ""), component=params.get("component", ""),
         q=params.get("q", ""), since=params.get("since", ""),
-        until=params.get("until", ""), limit=int(params.get("limit", 200) or 200),
+        until=params.get("until", ""),
+        # NOT int() here: queries._log_limit owns the coercion, because a
+        # hostile ?limit= must fall back, not raise (stage-8 stress).
+        limit=params.get("limit", queries.DEFAULT_LOG_LIMIT),
     )
     level_opts = "".join(
         f'<option value="{esc(v)}"{" selected" if v == lg.filters["level"] else ""}>'
