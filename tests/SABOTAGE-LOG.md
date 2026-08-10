@@ -560,3 +560,23 @@ backtest-engineer's own pre-existing working-tree changes — nothing
 from this session survived in those three files). The only source
 change kept from this session is the strengthened assertion block in
 `tests/test_backtest.py::test_in_out_of_sample_split_is_chronological`.
+
+## Stage 5 (risk, execution, boundary) — 2026-08-10
+
+- sizing.py spread gate doubled (`> bound*2`): caught by
+  test_spread_gate_is_hard_and_binding. Restored, green.
+- adaptive_params.py loosen asymmetry removed (loosen step = tighten
+  step): caught by test_loosen_step_is_a_third_of_tighten AND
+  test_auto_revert_on_opposing_post_sample. Restored, green.
+- orders.py cancel-confirmation forced true (`if True:`): caught by
+  test_unconfirmed_cancel_places_nothing (the double-stop invariant).
+  Restored, green.
+- boundary.py forced tool_choice relaxed to auto: caught by
+  test_happy_path_two_turns. Restored, green.
+- boundary.py transport called before authorize: caught by
+  test_budget_denied_before_any_call. Restored, green.
+  **Incident:** after restore the test kept failing — the restored file
+  was byte-identical but Python reused the sabotaged .pyc (the swap
+  reorders identical bytes: same size, same mtime second). Cleared
+  __pycache__, suite green. Lesson: verify sabotage restores with a
+  cache clear, not a diff alone.

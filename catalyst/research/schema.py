@@ -100,3 +100,51 @@ SUBMIT_RESEARCH_VIEW_TOOL = {
         "additionalProperties": False,
     },
 }
+
+_VIEW_FIELDS = set(SUBMIT_RESEARCH_VIEW_TOOL["input_schema"]["required"])
+
+
+def make_view_from_tool_input(candidate_id: str, tool_input: dict) -> ResearchView:
+    """Strictly validate a submit_research_view tool call and build the
+    boundary object. Raises (never guesses) on anything malformed - an
+    invalid view becomes a skipped candidate, not a defaulted one.
+
+    A size-shaped field arriving here ("qty", "notional", "position",
+    "shares", "dollars") is refused by the unknown-field check: the
+    schema has no such field and this function accepts nothing beyond
+    the schema."""
+    if not isinstance(tool_input, dict):
+        raise TypeError(f"tool input is {type(tool_input).__name__}, not object")
+    unknown = set(tool_input) - _VIEW_FIELDS
+    if unknown:
+        raise ValueError(f"unknown fields in research view: {sorted(unknown)}")
+    missing = _VIEW_FIELDS - set(tool_input)
+    if missing:
+        raise KeyError(f"missing fields in research view: {sorted(missing)}")
+
+    direction = tool_input["direction"]
+    if direction not in ("long", "short", "no_trade"):
+        raise ValueError(f"invalid direction: {direction!r}")
+    conviction = tool_input["conviction"]
+    if not isinstance(conviction, (int, float)) or isinstance(conviction, bool) \
+            or not (0.0 <= conviction <= 1.0):
+        raise ValueError(f"conviction out of [0,1]: {conviction!r}")
+    holding = tool_input["expected_holding_days"]
+    if not isinstance(holding, int) or isinstance(holding, bool) or holding < 1:
+        raise ValueError(f"invalid expected_holding_days: {holding!r}")
+    if not isinstance(tool_input["priced_in"], bool):
+        raise ValueError(f"priced_in must be boolean: {tool_input['priced_in']!r}")
+    for text_field in ("thesis", "invalidation", "priced_in_reasoning"):
+        if not isinstance(tool_input[text_field], str) or not tool_input[text_field].strip():
+            raise ValueError(f"{text_field} must be a non-empty string")
+
+    return ResearchView(
+        candidate_id=candidate_id,
+        direction=direction,
+        conviction=float(conviction),
+        thesis=tool_input["thesis"],
+        invalidation=tool_input["invalidation"],
+        expected_holding_days=holding,
+        priced_in=tool_input["priced_in"],
+        priced_in_reasoning=tool_input["priced_in_reasoning"],
+    )
