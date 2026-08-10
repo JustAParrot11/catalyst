@@ -23,6 +23,7 @@ from catalyst.dashboard.render import (
     empty_block,
     esc,
     json_pretty,
+    meter,
     ok,
     pill,
     pre,
@@ -253,14 +254,37 @@ def funnel_panel(db: Db, p: str = "funnel") -> str:
         width = max(3, int(380 * stage.count / widest))
         shade = ramp[min(i, len(ramp) - 1)]
         pct = (100.0 * stage.count / widest) if widest else 0.0
+        # Stage-to-stage conversion is the number that turns a list of
+        # counts into a diagnosis: it names WHICH step lost the
+        # candidates, which "3 in, 0 out" never does on its own.
+        prev = data.stages[i - 1].count if i else None
+        if prev is None:
+            conv = '<span class="funnel-conv">&mdash;</span>'
+        elif prev == 0:
+            conv = '<span class="funnel-conv">&mdash;</span>'
+        else:
+            kept = 100.0 * stage.count / prev
+            lost_cls = " lost" if kept < 100.0 else ""
+            conv = (f'<span class="funnel-conv{lost_cls}" title="{stage.count} '
+                    f'of the {prev} that reached the stage above">'
+                    f"{kept:.0f}% kept</span>")
+        # A zero draws NO bar. A minimum-width stub reads as a stray mark
+        # rather than as "none", and the count column already says 0.
+        bar = ("" if stage.count == 0 else
+               f'<span class="funnel-bar" style="width:{width}px;'
+               f'background:{shade}" title="{esc(stage.label)}: {stage.count} '
+               f'({pct:.0f}% of the widest stage)"></span>')
         out.append(
             f'<div class="funnel-row" id="{p}-row-{esc(stage.key)}">'
             f'<span class="funnel-label">{esc(stage.label)}</span>'
             f'<span class="funnel-n">{stage.count}</span>'
-            f'<span class="funnel-bar" style="width:{width}px;'
-            f'background:{shade}" title="{esc(stage.label)}: {stage.count} '
-            f'({pct:.0f}% of the widest stage)"></span></div>'
+            f"{conv}<span>{bar}</span></div>"
         )
+        # A stage starved by the one above it is not its own finding.
+        # Repeating a full empty-state for every downstream stage was
+        # what buried this panel; the query stays reachable either way,
+        # so nothing is lost - only the repetition.
+        starved = stage.count == 0 and prev == 0
         if stage.drops:
             drops = "".join(
                 f"<li>{esc(reason)} &mdash; <b>{esc(n)}</b>"
@@ -269,12 +293,25 @@ def funnel_panel(db: Db, p: str = "funnel") -> str:
                 for reason, n, detail in stage.drops
             )
             out.append(f'<ul class="funnel-drop" id="{p}-drops-{esc(stage.key)}">{drops}</ul>')
-        else:
+        elif not starved:
             out.append(
                 f'<p class="prov" id="{p}-nodrops-{esc(stage.key)}">'
                 "no recorded drop reasons at this stage</p>"
             )
-        if stage.count == 0:
+        if starved:
+            err = (f' <span class="funnel-drop">query FAILED: '
+                   f"{esc(stage.query.error)}</span>"
+                   if stage.query.error else "")
+            out.append(
+                f'<div class="quiet" id="{p}-starved-{esc(stage.key)}">'
+                "nothing reached this stage &mdash; the shortfall is above, "
+                f"not here.{err}"
+                f'<details id="{p}-starved-q-{esc(stage.key)}">'
+                "<summary>its query anyway</summary>"
+                f"<code>{esc(stage.query.sql)}</code> &mdash; returned "
+                f"{stage.query.row_count} row(s)</details></div>"
+            )
+        elif stage.count == 0:
             out.append(empty_block(
                 f"{p}-empty-{esc(stage.key)}", stage.query,
                 meaning=stage.note or f"stage {stage.key} produced nothing",
@@ -312,6 +349,20 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
          f"scheduled {dollars(c.scheduled_mtd_cents)} + manual "
          f"{dollars(c.manual_mtd_cents)}, never pooled"),
     ]))
+
+    # Pace against the cap. days_elapsed is already on the panel; the
+    # marker is where an evenly-spent month would sit today, so under
+    # or over pace is a glance rather than mental arithmetic.
+    import calendar as _cal
+    days_in_month = _cal.monthrange(c.as_of.year, c.as_of.month)[1]
+    pace_pct = 100.0 * c.days_elapsed / days_in_month
+    out.append(meter(
+        f"{p}-meter", float(c.scheduled_mtd_cents), float(c.base_cap_cents),
+        pace=pace_pct,
+        legend=(f"Scheduled spend against the ${c.base_cap_cents / 100:.0f}/month "
+                f"cap. The upright marker is an even-pace month at day "
+                f"{c.days_elapsed} of {days_in_month} - fill left of it is "
+                f"under pace, right of it is over.")))
 
     # Daily billed spend, charted. Same rows as the table below - this
     # is the same data drawn, not a second source of truth.

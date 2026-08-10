@@ -717,3 +717,58 @@ class TestVisualLayer:
         svg = charts.bar_chart([("a", 1.0, "x")], chart_id="b", title="t")
         assert "var(--surface)" in svg and "var(--hairline)" in svg
         assert "#fbfbfd" not in svg
+
+
+class TestAnalysisLayer:
+    """Owner feedback round 2: "optimise for proper analysis and make it
+    easier on the eyes". These pin the analytical content, not taste."""
+
+    def test_meter_marks_pace_not_just_total(self):
+        from catalyst.dashboard.render import meter
+        html = meter("m", used=73.0, cap=500.0, pace=32.0, legend="cap")
+        assert "meter-fill" in html and "14.6%" in html
+        assert "meter-pace" in html and "32.0%" in html, (
+            "a total without the elapsed fraction of the month cannot "
+            "answer 'am I on pace to breach the cap'")
+
+    def test_meter_flags_going_over_the_cap(self):
+        from catalyst.dashboard.render import meter
+        over = meter("m", used=600.0, cap=500.0)
+        assert "over" in over
+        assert "width:100.0%" in over, "the fill must clamp, not overflow its track"
+        assert "over" not in meter("m", used=100.0, cap=500.0)
+
+    def test_funnel_shows_stage_to_stage_conversion(self, seeded):
+        """'3 in, 0 out' does not say WHICH step lost them; a per-stage
+        kept-percentage does, and that is the whole diagnostic value."""
+        db = Db(seeded)
+        html = panels.funnel_panel(db, "f")
+        assert "funnel-conv" in html
+        assert "kept</span>" in html, "a stage with an upstream must show conversion"
+        db.close()
+
+    def test_starved_stages_do_not_repeat_a_full_empty_state(self, bare):
+        """Six identical SQL dumps is what made this page unreadable.
+        A stage starved by the one above gets one quiet line - and its
+        query is still reachable, so nothing is actually hidden."""
+        db = Db(bare)
+        html = panels.funnel_panel(db, "f")
+        starved = html.count("nothing reached this stage")
+        full = html.count("Empty result &mdash; here is exactly why")
+        assert starved >= 1, "downstream empty stages should be summarised"
+        assert full <= 1, (
+            f"{full} full empty-states rendered; only the FIRST empty stage "
+            "is a finding, the rest are consequences of it")
+        # the query survives the summarising
+        assert "its query anyway" in html
+
+    def test_prose_is_measure_limited_for_readability(self):
+        from catalyst.dashboard.render import _CSS
+        assert "max-width: 82ch" in _CSS, (
+            "unconstrained prose on a 1180px page runs ~170 characters a "
+            "line, about twice a comfortable measure")
+
+    def test_surface_is_not_pure_white(self):
+        from catalyst.dashboard.render import _CSS
+        assert "--surface:     #fbfbf9" in _CSS
+        assert "--surface:     #ffffff" not in _CSS
