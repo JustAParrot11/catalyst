@@ -71,7 +71,7 @@ def seeded(tmp_path):
     conn.execute("INSERT INTO limit_applications VALUES (?,?,?,?,?,?)",
                  ("d1", "max_loss_per_position", "0.10", "0.12", "hard", 1))
     conn.execute("INSERT INTO orders VALUES (?,?,?,?,?,?,?,?,?,?)",
-                 ("o1", "d1", "bro-1", "buy", "4.6", "market", "day", _iso(d5),
+                 ("o1", "c1", "bro-1", "buy", "4.6", "market", "day", _iso(d5),
                   "filled",
                   json.dumps({"status": "filled",
                               "echo": {"APCA-API-KEY-ID": FAKE_ALPACA_KEY}})))
@@ -465,11 +465,27 @@ def test_refusals_show_the_scored_outcome_and_flag_the_tiny_sample(seeded):
 # ---------------------------------------------------------------------- logs
 
 
-def test_logs_missing_table_is_named_not_blank(bare):
+def test_logs_missing_table_is_named_not_blank(bare, tmp_path):
+    """The logs DDL was folded into storage/schema.sql at stage 5, so a
+    freshly init'd DB always HAS the table (empty). The missing-table
+    path still exists for a database created by an older version - built
+    here by dropping the table explicitly."""
+    import sqlite3 as _sq
+
     lg = queries.logs(Db(bare))
-    assert lg.available is False
-    assert "schema_logs.sql" in lg.reason
-    assert "logs table is not in this database" in panels.logs_panel(Db(bare), {})
+    assert lg.available is True          # schema now creates it
+    assert lg.query.row_count == 0
+
+    old = tmp_path / "old-version.db"
+    conn = _sq.connect(old)
+    conn.executescript(
+        (Path(__file__).resolve().parent.parent / "catalyst" / "storage"
+         / "schema.sql").read_text())
+    conn.execute("DROP TABLE logs")
+    conn.commit(); conn.close()
+    lg2 = queries.logs(Db(str(old)))
+    assert lg2.available is False
+    assert "logs table is not in this database" in panels.logs_panel(Db(str(old)), {})
 
 
 def test_logs_filter_by_level_and_text(seeded):

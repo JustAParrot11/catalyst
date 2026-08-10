@@ -287,7 +287,7 @@ def funnel(db: Db) -> Funnel:
     orders_q = db.count("orders")
     unfilled_q = db.q(
         "SELECT COUNT(*) FROM risk_decisions d WHERE d.action = 'trade' "
-        "AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.decision_id = d.id)"
+        "AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.decision_id = d.candidate_id)"
     )
     rejected_q = _grouped(db,
         "SELECT status, COUNT(*) n FROM orders GROUP BY status ORDER BY n DESC")
@@ -467,8 +467,8 @@ def decision_list(db: Db, limit: int = 200) -> QueryResult:
         "       v.direction, v.conviction, v.priced_in, "
         "       (SELECT d.action FROM risk_decisions d WHERE d.candidate_id = c.id "
         "        ORDER BY d.decided_at DESC LIMIT 1) AS action, "
-        "       (SELECT COUNT(*) FROM orders o JOIN risk_decisions d2 ON o.decision_id = d2.id "
-        "        WHERE d2.candidate_id = c.id) AS n_orders, "
+        "       (SELECT COUNT(*) FROM orders o "
+        "        WHERE o.decision_id = c.id) AS n_orders, "
         "       (SELECT COUNT(*) FROM research_calls rc WHERE rc.candidate_id = c.id) AS n_calls "
         "FROM candidates c LEFT JOIN research_views v ON v.candidate_id = c.id "
         "ORDER BY c.discovered_at DESC LIMIT ?",
@@ -572,18 +572,12 @@ def decision_trace(db: Db, candidate_id: str) -> Trace:
             (row["id"],),
         )
 
-    decision_ids = [r["id"] for r in decisions_q.rows]
-    if decision_ids:
-        marks = ",".join("?" * len(decision_ids))
-        orders_q = db.q(
-            f"SELECT * FROM orders WHERE decision_id IN ({marks}) ORDER BY submitted_at",
-            tuple(decision_ids),
-        )
-    else:
-        orders_q = QueryResult(
-            "SELECT * FROM orders WHERE decision_id IN (<risk_decisions for this candidate>)",
-            (), [], None,
-        )
+    # orders.decision_id holds the candidate id (production semantics
+    # since the stage-5 FK correction), so the trace fetches directly
+    orders_q = db.q(
+        "SELECT * FROM orders WHERE decision_id = ? ORDER BY submitted_at",
+        (candidate_id,),
+    )
 
     fills_by_order = {}
     for row in orders_q.rows:
