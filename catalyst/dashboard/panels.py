@@ -21,6 +21,7 @@ from catalyst.dashboard.render import (
     details,
     dollars,
     empty_block,
+    zero_block,
     esc,
     json_pretty,
     meter,
@@ -291,7 +292,11 @@ def funnel_panel(db: Db, p: str = "funnel") -> str:
         # Repeating a full empty-state for every downstream stage was
         # what buried this panel; the query stays reachable either way,
         # so nothing is lost - only the repetition.
-        starved = stage.count == 0 and prev == 0
+        # A stage with recorded drop reasons is NOT starved, whatever
+        # the count above it was: it saw candidates and rejected them,
+        # and saying "nothing reached this stage" beside ten listed
+        # rejections is a contradiction the owner had to read twice.
+        starved = stage.count == 0 and prev == 0 and not stage.drops
         if stage.drops:
             drops = "".join(
                 f"<li>{esc(reason)} &mdash; <b>{esc(n)}</b>"
@@ -300,6 +305,18 @@ def funnel_panel(db: Db, p: str = "funnel") -> str:
                 for reason, n, detail in stage.drops
             )
             out.append(f'<ul class="funnel-drop" id="{p}-drops-{esc(stage.key)}">{drops}</ul>')
+            total = 0
+            for _reason, _n, _detail in stage.drops:
+                try:
+                    total += int(_n)
+                except (TypeError, ValueError):
+                    pass
+            if prev and total > prev:
+                out.append(prov(
+                    f"These reasons add up to {total}, more than the {prev} "
+                    "that reached this stage: one candidate can be recorded "
+                    "under several reasons at once, so the list explains "
+                    "WHY things stopped, it does not partition them."))
         elif not starved:
             out.append(
                 f'<p class="prov" id="{p}-nodrops-{esc(stage.key)}">'
@@ -319,9 +336,9 @@ def funnel_panel(db: Db, p: str = "funnel") -> str:
                 f"{stage.query.row_count} row(s)</details></div>"
             )
         elif stage.count == 0:
-            out.append(empty_block(
+            out.append(zero_block(
                 f"{p}-empty-{esc(stage.key)}", stage.query,
-                meaning=stage.note or f"stage {stage.key} produced nothing",
+                meaning=stage.note or "",
             ))
         elif stage.note:
             out.append(prov(stage.note))

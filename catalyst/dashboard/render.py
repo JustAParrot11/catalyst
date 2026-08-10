@@ -572,6 +572,34 @@ def empty_block(eid: str, result: QueryResult, upstream: str | None = None,
     return "".join(parts)
 
 
+def zero_block(zid: str, result: QueryResult, meaning: str = "") -> str:
+    """A COUNT that came back ZERO - which is not the same thing as a
+    query returning no rows, and must not be described as one.
+
+    Owner report 2026-08-10: the funnel said "Empty result - here is
+    exactly why it is empty ... rows returned: 1", which is a flat
+    contradiction. Both halves were true and neither was useful: the
+    stage counted zero, and the COUNT query that established this
+    returned its single row exactly as it should.
+    """
+    parts = [f'<div class="empty" id="{esc(zid)}">']
+    parts.append("<b>This stage counted zero.</b> ")
+    if meaning:
+        parts.append(f"{esc(meaning)} ")
+    if result.error:
+        parts.append(
+            f'<span class="funnel-drop">The count FAILED: {esc(result.error)} '
+            "&mdash; that is a broken query, not an absence of data.</span>")
+    else:
+        parts.append("The counting query ran normally and returned 0.")
+    parts.append(
+        f'<details id="{esc(zid)}-detail"{" open" if result.error else ""}>'
+        "<summary>the query that counted it</summary>"
+        f"<pre>{esc(result.sql)}\nparams: {esc(result.params)}</pre></details>")
+    parts.append("</div>")
+    return "".join(parts)
+
+
 def table(tid: str, headers: list, rows: list, numeric_cols: set | None = None) -> str:
     numeric_cols = numeric_cols or set()
     head = "".join(
