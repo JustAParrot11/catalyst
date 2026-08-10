@@ -1407,3 +1407,79 @@ def maintenance_panel(report, p: str = "maint") -> str:
         "any setting or places any order; it only looks."))
     return section(f"{p}-section",
                    "Maintenance: is everything communicating?", "".join(out))
+
+
+# --------------------------------------------------------------------------
+# Broker value vs net value - two different numbers, on purpose
+# --------------------------------------------------------------------------
+
+
+def value_reconciliation_panel(db: Db, p: str = "val") -> str:
+    """What Alpaca says the account is worth, what it is worth after the
+    API bill, and every line between them.
+
+    Owner asked to see the difference clearly. These two figures are
+    SUPPOSED to differ and the page must say why, or the reader assumes
+    one of them is wrong:
+      - Alpaca marks OPEN positions to market; the dashboard's net value
+        counts only profit actually banked on closed trades.
+      - Alpaca has never heard of the Anthropic bill; the dashboard
+        deducts it, because that half is real money even on paper.
+    """
+    perf = queries.performance(db)
+    brok = queries.broker_equity(db)
+    out = []
+
+    net_cents = perf.net_equity_cents
+    if brok.rows:
+        r = dict(brok.rows[0])
+        broker_cents = (Decimal(str(r["equity_usd"])) * 100).quantize(Decimal("1"))
+        as_of = str(r["taken_at"])
+        banked = Decimal(START_CAPITAL_CENTS) + perf.gross_pnl_cents
+        unrealised = broker_cents - banked      # broker marks minus banked
+        costs = perf.scheduled_cost_cents + perf.manual_cost_cents
+        gap = broker_cents - net_cents
+        out.append(tiles(f"{p}-tiles", [
+            ("Alpaca account value", dollars(broker_cents),
+             f"{pill('idle', 'broker read')} as of {esc(as_of)}"),
+            ("Net value after costs", dollars(net_cents),
+             f"{pill('idle', 'this dashboard')} banked profit less the API bill"),
+            ("Difference", dollars(gap),
+             "unrealised marks plus API spend - explained line by line below"),
+        ]))
+        out.append(table(f"{p}-bridge", ["line", "amount", "why it differs"], [
+            ["Alpaca account value", dollars(broker_cents),
+             "what the broker says the account is worth right now, including "
+             "open positions marked to market"],
+            ["less profit not yet banked", "-" + dollars(unrealised),
+             "open positions can still move; this dashboard counts a trade "
+             "only once it has closed"],
+            ["less API spend to date", "-" + dollars(costs),
+             "Alpaca has never heard of the Anthropic bill. Paper P&amp;L is "
+             "fictional; this half is real money"],
+            ["<b>= net value, the line on the chart</b>",
+             "<b>" + dollars(net_cents) + "</b>",
+             "<b>the only figure that can honestly be compared with the "
+             "S&amp;P</b>"],
+        ], numeric_cols={1}))
+        out.append(prov(
+            "Broker figure from equity_snapshots where source='broker_read' "
+            f"({brok.row_count} row read, newest first). Net value from "
+            "closed_trades and cost_events, priced locally. The two are "
+            "expected to differ; a gap is not an error."))
+    else:
+        out.append(tiles(f"{p}-tiles", [
+            ("Alpaca account value", "&mdash;",
+             f"{pill('idle', 'not read yet')} no broker snapshot recorded"),
+            ("Net value after costs", dollars(net_cents),
+             f"{pill('idle', 'this dashboard')} banked profit less the API bill"),
+            ("Difference", "&mdash;", "needs a broker read to compare against"),
+        ]))
+        out.append(empty_block(
+            f"{p}-empty", brok,
+            meaning="equity_snapshots is written once per cycle from a "
+                    "confirmed broker read; until the first cycle runs with "
+                    "credentials there is nothing to compare against.",
+        ))
+    return section(f"{p}-section",
+                   "Broker value vs net value", "".join(out))
