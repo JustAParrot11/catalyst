@@ -268,8 +268,14 @@ starts at `form.070194.idx` — **1994-07-01**.
 **Gotchas**
 - The file is `form.YYYYMMDD.idx`; there is no file on weekends or holidays,
   and the current day's file does not appear until the evening (2026-08-07's
-  was last modified 22:0x ET). A 404 here is normal, not an outage — the
-  script says so in its failure text.
+  was last modified 22:0x ET). **Correction, measured 2026-08-10 while
+  building the live feed: an absent daily index returns `403
+  AccessDenied` (an S3 error body), NOT 404.** `form.20260808.idx`
+  (Saturday) and `form.20260810.idx` (same day, pre-publish) both 403'd.
+  An earlier revision of this section said 404; that was wrong. The live
+  feed (`catalyst/data/sources/edgar_form4.py`) distinguishes the
+  absent-file 403 (`AccessDenied`/`NoSuchKey` body → recorded missing
+  date, raw body kept) from a genuine rate-limit/IP-block 403 (fatal).
 - **The filename format changed.** 1994 uses `form.MMDDYY.idx`
   (`form.070194.idx`); from 2000 onward it is `form.YYYYMMDD.idx`
   (`form.20000103.idx`). Constructing 1990s filenames with the modern

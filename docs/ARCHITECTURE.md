@@ -497,7 +497,13 @@ def check(portfolio: PortfolioState, hard_bounds: HardBounds) -> KillSwitchState
     # is already wrong is the failure mode this closes off.
 
 # risk/adaptive_params.py
-def propose_adjustment(parameter: str, evidence: EvidenceSample) -> AdjustmentProposal: ...
+# (signatures as implemented at stage 5: propose_adjustment gained
+# current_value - the proposal must be computed against the live value
+# it will adjust; apply gained conn - the log table IS the adaptive
+# store, and the disjoint-window + closed-outcome provenance checks
+# read it. Both deviations recorded in the stage-5 PR.)
+def propose_adjustment(parameter: str, current_value: Decimal,
+                       evidence: EvidenceSample) -> AdjustmentProposal: ...
 def apply(
     proposal: AdjustmentProposal,
     hard_bounds: HardBounds,
@@ -505,7 +511,8 @@ def apply(
                                                 # every OTHER adaptive
                                                 # parameter, not a fixed
                                                 # baseline
-) -> AdaptiveParamLogEntry: ...
+    conn: sqlite3.Connection,
+) -> ApplyOutcome: ...
     # apply() re-checks the proposal against hard_bounds itself — it does
     # not trust the caller to have checked. Critically, the worst-case
     # simulation runs against current_snapshot with ONLY the proposed
