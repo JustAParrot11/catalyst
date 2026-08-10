@@ -572,6 +572,21 @@ def evidence_chain(db: Db, candidate_id: str) -> EvidenceChain:
     return EvidenceChain(True, table, cols, res)
 
 
+def broker_equity(db: Db) -> QueryResult:
+    """The most recent equity Alpaca itself reported. Display only.
+
+    Kept separate from the dashboard's own net-value arithmetic on
+    purpose: one is what the broker says the account is worth, the
+    other is what it is worth after the API bill and counting only
+    banked profit. Showing one without the other invites the reader to
+    assume they should match.
+    """
+    return db.q(
+        "SELECT day, taken_at, equity_usd, settled_cash_usd, positions_notional "
+        "FROM equity_snapshots WHERE source = 'broker_read' "
+        "ORDER BY day DESC, taken_at DESC LIMIT 1")
+
+
 def evidence_graph(db: Db, ticker: str) -> QueryResult:
     """Assertions around one company, with entity NAMES resolved.
 

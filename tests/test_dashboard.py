@@ -1024,3 +1024,43 @@ class TestTerminalStyling:
         assert "every assertion behind that diagram, verbatim" in html
         assert "<details" in html
         assert "primary_document" in html      # the data itself survives
+
+
+class TestValueReconciliation:
+    """Owner asked to see the broker's number and ours side by side.
+    They differ for two real reasons and the page must name both."""
+
+    @staticmethod
+    def _with_broker_read(path, equity="1012.40"):
+        conn = sqlite3.connect(path)
+        conn.execute(
+            "INSERT OR REPLACE INTO equity_snapshots VALUES (?,?,?,?,?,?)",
+            ("2026-08-10", "2026-08-10T18:00:00+00:00", equity, "800.00",
+             "196.40", "broker_read"))
+        conn.commit(); conn.close()
+        return path
+
+    def test_bridge_names_both_reasons_for_the_gap(self, seeded):
+        db = Db(self._with_broker_read(seeded))
+        html = panels.value_reconciliation_panel(db, p="val")
+        db.close()
+        assert "Alpaca account value" in html
+        assert "Net value after costs" in html
+        assert "not yet banked" in html          # unrealised marks
+        assert "API spend to date" in html       # the bill Alpaca cannot see
+        assert "a gap is not an error" in html
+
+    def test_it_says_so_when_the_broker_has_never_been_read(self, bare):
+        db = Db(bare)
+        html = panels.value_reconciliation_panel(db, p="val")
+        db.close()
+        assert "not read yet" in html
+        assert "Empty result" in html            # with its query beside it
+
+    def test_the_two_figures_are_never_presented_as_interchangeable(
+            self, seeded):
+        db = Db(self._with_broker_read(seeded))
+        html = panels.value_reconciliation_panel(db, p="val")
+        db.close()
+        assert "broker read" in html and "this dashboard" in html, (
+            "each figure must be labelled with whose number it is")

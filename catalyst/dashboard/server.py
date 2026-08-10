@@ -122,6 +122,7 @@ def render_page(title: str, body: str, active: str, path: str,
 def route_overview(db: Db, params: dict) -> str:
     body = (
         panels.performance_panel(db, p="perf")
+        + panels.value_reconciliation_panel(db, p="ovval")
         + panels.funnel_panel(db, p="funnel")
         + panels.cost_panel(db, p="ovcost", compact=True)
         + panels.alerts_panel(db, p="alerts")
@@ -130,7 +131,9 @@ def route_overview(db: Db, params: dict) -> str:
 
 
 def route_performance(db: Db, params: dict) -> str:
-    return render_page("Performance", panels.performance_panel(db, p="perf"),
+    return render_page("Performance",
+                       panels.performance_panel(db, p="perf")
+                       + panels.value_reconciliation_panel(db, p="val"),
                        "/performance", db.path, db=db)
 
 
