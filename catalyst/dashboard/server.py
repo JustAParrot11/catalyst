@@ -123,6 +123,29 @@ def route_logs(db: Db, params: dict) -> str:
     return render_page("Logs", panels.logs_panel(db, flat, p="log"), "/logs", db.path)
 
 
+def route_maintenance(db: Db, params: dict) -> str:
+    """Passive by default; contacts outside services only when asked.
+
+    Every active probe is free (Alpaca and EDGAR cost nothing, the
+    Anthropic probe reads the bill rather than the model), but they are
+    still opt-in: a page that fires four network requests on every
+    refresh is a page that hammers a rate-limited public API.
+    """
+    from catalyst.dashboard import maintenance
+
+    run_active = params.get("check") == ["now"]
+    creds = None
+    if run_active:
+        try:
+            from catalyst.setup.credentials import load_credentials
+            creds = load_credentials()
+        except Exception:  # noqa: BLE001 - unconfigured is a state, not an error
+            creds = None
+    report = maintenance.build_report(db, creds, run_active=run_active)
+    return render_page("Maintenance", panels.maintenance_panel(report, p="maint"),
+                       "/maintenance", db.path)
+
+
 def route_setup(db: Db, params: dict) -> str:
     """STAGE 7 MOUNT POINT. Replace the body of this function with the
     real credential form; the route, the no-store headers and the
@@ -206,6 +229,19 @@ def diagnostics_bundle(db: Db) -> dict:
         bundle["recent_logs"] = [{"note": "logs table absent; see "
                                           "catalyst/dashboard/schema_logs.sql"}]
 
+    # The maintenance checks, so whoever receives this file sees the
+    # same summary the owner saw. Passive only: producing a diagnostic
+    # bundle must never make network calls of its own.
+    try:
+        from catalyst.dashboard import maintenance
+        bundle["maintenance_checks"] = [
+            {"name": c.name, "group": c.group, "state": c.state,
+             "summary": c.summary, "raw": c.raw}
+            for c in maintenance.passive_checks(db)
+        ]
+    except Exception as exc:  # noqa: BLE001 - a bundle must always render
+        bundle["maintenance_checks"] = [{"error": repr(exc)}]
+
     return redact_obj(bundle)
 
 
@@ -231,6 +267,7 @@ HTML_ROUTES = {
     "/decision": route_decision,
     "/refusals": route_refusals,
     "/logs": route_logs,
+    "/maintenance": route_maintenance,
     "/setup": route_setup,
 }
 
@@ -419,7 +456,22 @@ def main(argv=None) -> int:
                     help="bind address (default 0.0.0.0, per the brief)")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--db", default=db_path(), help="sqlite path, or set CATALYST_DB")
+    ap.add_argument("--diagnostics", action="store_true",
+                    help="print the diagnostic bundle (credentials redacted) "
+                         "to stdout and exit, without starting a server")
     args = ap.parse_args(argv)
+
+    if args.diagnostics:
+        # The bundle has to be obtainable when the PAGE is the thing that
+        # is broken - which is exactly when it is most needed, and was
+        # not possible while /diagnostics.json was the only route to it.
+        db = Db(args.db)
+        try:
+            sys.stdout.write(json.dumps(diagnostics_bundle(db), indent=2,
+                                        default=str) + "\n")
+        finally:
+            db.close()
+        return 0
 
     httpd = make_server(args.host, args.port, args.db)
     sys.stderr.write(
