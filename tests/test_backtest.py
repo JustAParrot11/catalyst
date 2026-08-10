@@ -160,6 +160,39 @@ def test_fill_is_next_session_open_not_same_session_close(tmp_path):
     )
 
 
+def test_entry_queued_for_final_session_is_skipped_not_opened(tmp_path):
+    """Regression for the bake-off bug reported by strategy-analyst
+    (docs/STRATEGY-BAKEOFF.md): a signal on the SECOND-TO-LAST session
+    queues its entry for the final session; entries run after that day's
+    exits, so the position survived the replay and tripped the
+    end-of-range assertion (harness.py:327).
+
+    Correct behavior — skip, never open: a round trip needs an entry
+    session plus at least one LATER session to exit in. The only fill
+    the harness allows on the final session is its open, which is the
+    same price the forced end-of-range exit would use; an open-and-close
+    at the same open is a zero-information trade that books two cost
+    haircuts and nothing else, polluting sample stats with guaranteed
+    small losses. So an entry that would land on the final session is
+    recorded as a skip with reason "range_end_no_entry" instead.
+    """
+    days = weekdays(START, 10)
+    cache = BarCache(tmp_path)
+    cache.write_bars("SPY", flat_bars(days, 100))
+    cache.write_bars("AAA", flat_bars(days, 10))
+    detail = replay_detailed(
+        const_signal(),
+        [mk_candidate("AAA", days[-2], "c1")],  # signal on second-to-last day
+        (days[0], days[-1]),
+        cache=cache,
+    )
+    assert detail.trades == (), "no trade can open on the final session"
+    reasons = {s.candidate_id: s.reason for s in detail.skips}
+    assert reasons.get("c1") == "range_end_no_entry", (
+        f"expected a range_end_no_entry skip for c1, got {reasons}"
+    )
+
+
 def test_forced_exit_at_end_of_range_and_no_open_positions(tmp_path):
     days = weekdays(START, 10)
     cache = BarCache(tmp_path)

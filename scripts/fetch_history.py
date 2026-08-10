@@ -66,6 +66,38 @@ BENCHMARK = "SPY"
 BATCH_SIZE = 50            # symbols per request URL
 PACE_SECONDS = 0.35        # ~170 req/min worst case, under the 200/min limit
 
+SURVIVORSHIP_NOTE = ("universe is currently-listed names only; delisted "
+                     "tickers cannot be enumerated from Alpaca "
+                     "(DATA-SOURCES.md §1.4) — results are flattered for "
+                     "long strategies")
+
+
+def merge_meta(prior: dict | None, fetch_record: dict) -> dict:
+    """Merge one fetch's provenance record into existing cache metadata.
+
+    The cache accumulates across runs (e.g. the default universe first,
+    then --symbols batches for other strategies), so the metadata must
+    too: overwriting it left cache_meta.json describing only the LAST
+    fetch, silently orphaning the provenance of every symbol written by
+    earlier runs.
+
+    Layout: top-level keys still describe the most recent fetch (existing
+    consumers — null_test.py, tests — read meta["feed"] etc. directly),
+    and meta["fetches"] appends every fetch's record, oldest first. A
+    legacy single-fetch meta (no "fetches" key) is preserved as the first
+    record rather than dropped.
+    """
+    fetches: list[dict] = []
+    if prior:
+        fetches = list(prior.get("fetches", []))
+        if not fetches:
+            legacy = {k: v for k, v in prior.items()
+                      if k not in ("survivorship", "fetches")}
+            if legacy:
+                fetches.append(legacy)
+    fetches.append(fetch_record)
+    return {**fetch_record, "fetches": fetches, "survivorship": SURVIVORSHIP_NOTE}
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -106,7 +138,7 @@ def main() -> int:
                   f"{sum(len(b) for b in bars_by_symbol.values())} bars, {elapsed:.1f}s")
             time.sleep(PACE_SECONDS)
 
-    meta = {
+    fetch_record = {
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "source": "alpaca",
         "feed": FEED,
@@ -114,15 +146,12 @@ def main() -> int:
         "start_requested": start.isoformat(),
         "end_requested": end.isoformat(),
         "symbols_requested": len(symbols),
+        "symbols_requested_list": symbols,     # per-batch provenance
         "symbols_fetched": fetched_symbols,
         "total_bars": total_bars,
         "empty_or_odd_responses": all_notes,   # raw bodies beside every zero
-        "survivorship": ("universe is currently-listed names only; delisted "
-                         "tickers cannot be enumerated from Alpaca "
-                         "(DATA-SOURCES.md §1.4) — results are flattered for "
-                         "long strategies"),
     }
-    cache.write_meta(meta)
+    cache.write_meta(merge_meta(cache.read_meta(), fetch_record))
 
     print(f"\ncached {fetched_symbols}/{len(symbols)} symbols, {total_bars} bars "
           f"-> {cache.root}")
