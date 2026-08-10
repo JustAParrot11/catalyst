@@ -1039,7 +1039,14 @@ def _narrative_evidence(t: queries.Trace, p: str, db_for_graph=None,
             marker = f'<span class="tag">source class: {esc(d[source_col])}</span>' + marker
         body = "<br>".join(f"<code>{esc(k)}</code>: {raw(v)}" for k, v in d.items())
         rows.append([marker or "(no source/reliability column found)", body])
-    out.append(table(f"{p}-evidence", ["hop marker", "assertion (all columns, verbatim)"], rows))
+    # The diagram above now carries the meaning; this is the exact
+    # wording, for when that is what you need. Folded, not dropped -
+    # same rule as the empty-state queries.
+    out.append(details(
+        f"{p}-evidence-verbatim",
+        f"every assertion behind that diagram, verbatim ({len(rows)})",
+        table(f"{p}-evidence",
+              ["hop marker", "assertion (all columns, verbatim)"], rows)))
     out.append(prov(
         f"Rendered generically from {ev.table} - columns were read with "
         f"PRAGMA table_info at request time ({', '.join(cols)}) rather than assumed, "
