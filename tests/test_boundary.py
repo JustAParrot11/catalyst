@@ -108,11 +108,17 @@ class TestInvestigate:
         assert db.execute(
             "SELECT COUNT(*) FROM cost_events WHERE component='research'"
         ).fetchone()[0] == 2
-        # 1000 in + 500 out on sonnet = 0.3c + 0.75c = 1.05c per turn
-        assert result.cost_cents == Decimal("2.10")
+        # summation and recording are what THIS test pins; the rate table
+        # itself (incl. the sonnet-5 intro window) is pinned with explicit
+        # dates in test_cost_api_adapter - rates are date-effective, so a
+        # hardcoded cents figure here would flip on 2026-09-01
+        from catalyst.cost.tracker import make_usage_components, price
+        per_turn = price(make_usage_components(dict(USAGE)), "claude-sonnet-5")
+        assert per_turn > 0
+        assert result.cost_cents == 2 * per_turn
         row = db.execute("SELECT cost_cents, skipped_reason FROM research_calls"
                          ).fetchone()
-        assert row == ("2.10", None)
+        assert row == (str(2 * per_turn), None)
         # view persisted
         assert db.execute("SELECT direction FROM research_views"
                           ).fetchone()[0] == "long"

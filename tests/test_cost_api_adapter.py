@@ -20,6 +20,7 @@ Sabotage log (house rule 4):
 import json
 import sqlite3
 from datetime import date
+from decimal import Decimal
 
 import httpx
 import pytest
@@ -144,6 +145,58 @@ class TestReadOnlyGuarantee:
             monkeypatch.setattr(_httpx, verb, poisoned)
         page = fetch_cost_api_day(date(2026, 8, 4), admin_key="k")
         assert len(page.records) == 1 and len(calls) == 1
+
+
+class TestSonnet5IntroPricing:
+    """Found empirically 2026-08-10: Anthropic bills Sonnet 5 at INTRO
+    rates ($2/$10 per MTok) through 2026-08-31 - the owner's real-time
+    console showed ~$0.21 where standard rates predicted $0.326 for the
+    same verbatim usage, and intro rates predict $0.231. Rates are
+    date-effective: the spend date decides, never the reprice date.
+
+    Sabotage (house rule 4): SONNET5_INTRO_ENDS moved to 2026-07-31 in
+    a copy - test_rates_flip_on_september_first failed on the August
+    side. Restored, green."""
+
+    def test_rates_flip_on_september_first(self):
+        from datetime import date as _date
+
+        from catalyst.cost.pricing import rates_for
+        assert rates_for("claude-sonnet-5", _date(2026, 8, 10)) == \
+            (Decimal("200"), Decimal("1000"))
+        assert rates_for("claude-sonnet-5", _date(2026, 8, 31)) == \
+            (Decimal("200"), Decimal("1000"))     # inclusive last day
+        assert rates_for("claude-sonnet-5", _date(2026, 9, 1)) == \
+            (Decimal("300"), Decimal("1500"))
+        # only sonnet-5 has an intro window
+        assert rates_for("claude-sonnet-4-6", _date(2026, 8, 10)) == \
+            (Decimal("300"), Decimal("1500"))
+
+    def test_reprice_uses_the_spend_date_not_the_reprice_date(self, tmp_path):
+        """A September reprice of an August row must keep the August
+        intro rate - otherwise every historical row silently inflates
+        by 50% the day the intro window closes."""
+        import json as _json
+        import uuid as _uuid
+
+        from catalyst.cost.tracker import reprice_all
+        conn = sqlite3.connect(tmp_path / "t.db")
+        conn.executescript(open("catalyst/storage/schema.sql").read())
+        usage = {"input_tokens": 1_000_000, "output_tokens": 0,
+                 "cache_creation_input_tokens": 0,
+                 "cache_read_input_tokens": 0}
+        conn.execute(
+            "INSERT INTO cost_events (id, raw_usage_json, model, kind, "
+            "component, priced_cents, priced_at, api_call_id) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (str(_uuid.uuid4()), _json.dumps(usage), "claude-sonnet-5",
+             "manual", "v", None, "2026-08-10T12:00:00+00:00", None))
+        conn.commit()
+        out = reprice_all(conn)   # runs "today", whatever today is
+        assert out.still_unpriced == []
+        (_, _, new), = out.changes
+        assert new == Decimal("200")   # 1M input tokens at the AUGUST rate
+        conn.close()
 
 
 class TestNightlyReconcileWiring:
@@ -301,17 +354,21 @@ class TestLiveUsageShape2026_08_10:
     }
 
     def test_real_shape_prices_cleanly(self, tmp_path):
-        from decimal import Decimal
-
-        from catalyst.cost.tracker import record_usage
+        from catalyst.cost.tracker import (
+            make_usage_components, price, record_usage,
+        )
         conn = sqlite3.connect(tmp_path / "t.db")
         conn.executescript(open("catalyst/storage/schema.sql").read())
         ev = record_usage(dict(self.REAL_USAGE), "claude-sonnet-5",
                           "manual", "verify", conn)
-        assert ev.priced_cents is not None
-        # 11 in @ 300c/MTok + 4 out @ 1500c/MTok
-        expected = (Decimal(11) * 300 + Decimal(4) * 1500) / 1_000_000
-        assert ev.priced_cents == expected
+        assert ev.priced_cents is not None and ev.priced_cents > 0
+        # record_usage must price at the rate in force on ITS OWN
+        # priced_at date; the rate values per date are pinned in
+        # TestSonnet5IntroPricing (hardcoding cents here would flip when
+        # the intro window ends on 2026-09-01)
+        assert ev.priced_cents == price(
+            make_usage_components(dict(self.REAL_USAGE)),
+            "claude-sonnet-5", on_date=ev.priced_at.date())
         conn.close()
 
     # VERBATIM from the first live web-search research turn (2026-08-10):
@@ -331,26 +388,28 @@ class TestLiveUsageShape2026_08_10:
         "service_tier": "standard",
     }
 
-    def test_web_fetch_counter_is_informational_zero_cost(self, tmp_path):
+    def test_web_fetch_counter_is_informational_zero_cost(self):
+        from datetime import date as _date
         from decimal import Decimal
 
         from catalyst.cost.pricing import WEB_SEARCH_CENTS_PER_QUERY
-        from catalyst.cost.tracker import record_usage
-        conn = sqlite3.connect(tmp_path / "t.db")
-        conn.executescript(open("catalyst/storage/schema.sql").read())
-        ev = record_usage(dict(self.REAL_SEARCH_USAGE), "claude-sonnet-5",
-                          "manual", "verify", conn)
-        expected = ((Decimal(24094) * 300 + Decimal(2271) * 1500)
+        from catalyst.cost.tracker import make_usage_components, price
+        # date-pinned to the day the spend actually happened (intro
+        # window): 24094 in @ 200c/MTok + 2271 out @ 1000c/MTok + 2
+        # searches. This is the row Anthropic really billed.
+        spend_day = _date(2026, 8, 10)
+        expected = ((Decimal(24094) * 200 + Decimal(2271) * 1000)
                     / 1_000_000) + 2 * WEB_SEARCH_CENTS_PER_QUERY
-        assert ev.priced_cents == expected
+        got = price(make_usage_components(dict(self.REAL_SEARCH_USAGE)),
+                    "claude-sonnet-5", on_date=spend_day)
+        assert got == expected
         # a NONZERO fetch count must still price identically - fetch is
         # free; only the searches are charged
         fetched = dict(self.REAL_SEARCH_USAGE)
         fetched["server_tool_use"] = {"web_fetch_requests": 7,
                                       "web_search_requests": 2}
-        ev2 = record_usage(fetched, "claude-sonnet-5", "manual", "v2", conn)
-        assert ev2.priced_cents == expected
-        conn.close()
+        assert price(make_usage_components(fetched), "claude-sonnet-5",
+                     on_date=spend_day) == expected
 
     def test_novel_top_level_billing_key_refuses(self, tmp_path):
         """cost-audit F1: the old substring heuristic let a hypothetical

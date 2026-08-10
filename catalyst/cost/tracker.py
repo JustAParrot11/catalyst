@@ -42,9 +42,9 @@ from catalyst.cost.pricing import (
     CACHE_READ_MULTIPLIER,
     CACHE_WRITE_MULTIPLIER,
     CACHE_WRITE_MULTIPLIER_1H,
-    MODEL_RATES_CENTS_PER_MTOK,
     WEB_SEARCH_CENTS_PER_QUERY,
     UnknownModelError,
+    rates_for,
 )
 from catalyst.cost import CostEvent
 from catalyst.research.schema import UsageComponents
@@ -151,10 +151,16 @@ def make_usage_components(raw_usage: dict) -> UsageComponents:
     )
 
 
-def price(usage: UsageComponents, model: str) -> Decimal:
+def price(usage: UsageComponents, model: str,
+          on_date: date | None = None) -> Decimal:
     """Cents, as Decimal. Reads ALL usage fields, always. Refuses to
     price a usage object carrying unrecognized billing fields - pricing
     a payload we do not fully understand understates it silently.
+
+    `on_date` is the date the SPEND happened (defaults to today): rates
+    are date-effective (Sonnet 5 intro pricing through 2026-08-31), so
+    repricing a historical row must use the rate in force when the
+    tokens were bought, not the rate on the day of the reprice.
 
     Interface note: ARCHITECTURE section 3.2 wrote price(usage) alone;
     pricing requires the model's rate, so `model` is an explicit second
@@ -173,12 +179,9 @@ def price(usage: UsageComponents, model: str) -> Decimal:
             "priority tiers change the rate. Add the multiplier to "
             "cost/pricing.py before pricing this row."
         )
-    if model not in MODEL_RATES_CENTS_PER_MTOK:
-        raise UnknownModelError(
-            f"No pricing for model {model!r}. Add it to pricing.py - "
-            "an unknown model must never price itself at zero (TRAPS.md)."
-        )
-    input_rate, output_rate = MODEL_RATES_CENTS_PER_MTOK[model]
+    if on_date is None:
+        on_date = datetime.now(timezone.utc).date()
+    input_rate, output_rate = rates_for(model, on_date)
 
     cache_1h = 0
     cache_5m = usage.cache_creation_input_tokens
@@ -238,10 +241,11 @@ def record_usage(
     safely on disk; has_unpriced_rows() then blocks the governor.
     """
     usage = make_usage_components(raw_usage)  # lenient - never raises
+    priced_at = datetime.now(timezone.utc)
     priced = None
     pricing_error = None
     try:
-        priced = price(usage, model)
+        priced = price(usage, model, on_date=priced_at.date())
     except (UnknownModelError, UnrecognizedUsageFieldError) as exc:
         pricing_error = exc
 
@@ -251,7 +255,7 @@ def record_usage(
         kind=kind,
         component=component,
         priced_cents=priced,
-        priced_at=datetime.now(timezone.utc),
+        priced_at=priced_at,
         api_call_id=api_call_id,
     )
     record(event, model, conn)
@@ -284,14 +288,18 @@ def reprice_all(conn: sqlite3.Connection) -> RepriceOutcome:
     changes: list[tuple[str, Decimal | None, Decimal]] = []
     still_unpriced: list[tuple[str, str]] = []
     rows = conn.execute(
-        "SELECT id, raw_usage_json, model, priced_cents FROM cost_events"
+        "SELECT id, raw_usage_json, model, priced_cents, priced_at FROM cost_events"
     ).fetchall()
     now = datetime.now(timezone.utc).isoformat()
     try:
-        for row_id, raw_json, model, old in rows:
+        for row_id, raw_json, model, old, priced_at in rows:
             usage = make_usage_components(json.loads(raw_json))
             try:
-                new = price(usage, model)
+                # the rate in force when the tokens were BOUGHT - a
+                # September reprice of an August sonnet-5 row must still
+                # use the August intro rate
+                spend_date = datetime.fromisoformat(priced_at).date()
+                new = price(usage, model, on_date=spend_date)
             except (UnknownModelError, UnrecognizedUsageFieldError):
                 still_unpriced.append((row_id, model))
                 continue
