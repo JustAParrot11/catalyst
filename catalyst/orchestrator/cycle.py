@@ -283,7 +283,7 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
 
     # ---- 1. kill switches, before anything else
     portfolio = build_portfolio_state(broker, conn, now)
-    ks = kill_check(portfolio, HARD_BOUNDS, now)
+    ks = kill_check(portfolio, HARD_BOUNDS)
     report.kill_switch = ks
     if ks.tripped:
         conn.execute(

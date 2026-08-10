@@ -33,6 +33,22 @@ def db(tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def frozen_kill_switch_clock(monkeypatch):
+    """Staleness is deliberately judged against the WALL clock at check
+    time (NTP-jump/suspended-VM protection - stress escalation 10), so
+    these tests pin that clock to NOW; otherwise the whole file goes red
+    the moment the real clock passes NOW + 10 minutes."""
+    import catalyst.risk.kill_switches as kill_switches
+
+    class _FrozenClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW
+
+    monkeypatch.setattr(kill_switches, "datetime", _FrozenClock)
+
+
+@pytest.fixture(autouse=True)
 def stub_prompts(monkeypatch):
     monkeypatch.setattr(prompts, "render_research_prompt",
                         lambda c, graph_context=None: "research")
