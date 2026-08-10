@@ -1196,3 +1196,68 @@ class TestSetupPageLegibility:
         page = render_setup_page()
         for f in FIELDS:
             assert html.escape(f.explanation)[:60] in page, f.name
+
+
+class TestBudgetFieldTellsTheTruth:
+    """Owner report 2026-08-10: entered 20 in the setup page's budget
+    box, then saw $5 everywhere and had no way to know why.
+
+    The behaviour was correct - governor.authorize lets the owner figure
+    only ever LOWER the cap (BUILD-BRIEF: base $5/month, hard; it rises
+    only out of realised profit). The PAGE was the defect: it invited a
+    number it would silently ignore."""
+
+    def test_the_explanation_says_it_cannot_raise_the_ceiling(self):
+        from catalyst.setup.first_run import FIELDS
+
+        f = next(f for f in FIELDS if f.name == "monthly_budget_usd")
+        text = (f.label + " " + f.explanation).lower()
+        assert "cannot raise" in text
+        assert "$5" in f.explanation
+        assert "tighten" in text or "lower" in text
+
+    def test_the_form_warns_live_when_a_bigger_number_is_typed(self):
+        from catalyst.setup.first_run import render_setup_page
+
+        page = render_setup_page()
+        assert 'oninput="budgetHint()"' in page
+        assert "monthly_budget_usd_hint" in page
+        assert "cannot raise the ceiling, only lower it" in page
+
+    def test_a_bigger_owner_figure_really_does_not_raise_the_cap(self, tmp_path):
+        """The page's new promise, checked against the governor itself
+        rather than against its own wording."""
+        import sqlite3
+        from decimal import Decimal
+
+        from catalyst.cost import CostEstimate
+        from catalyst.cost import governor as gov
+        from catalyst.cost.governor import BASE_CAP_CENTS
+
+        conn = sqlite3.connect(tmp_path / "g.db")
+        conn.executescript(open("catalyst/storage/schema.sql").read())
+        est = CostEstimate(estimated_cents=BASE_CAP_CENTS + Decimal("50"),
+                           basis="test", kind="scheduled", component="research")
+        d = gov.authorize(est, conn, Decimal("0.10"),
+                          owner_monthly_cap_cents=Decimal("2000"))  # $20
+        assert d.authorized is False
+        assert d.cap_cents == BASE_CAP_CENTS, (
+            "an owner figure above the ceiling must change nothing")
+        conn.close()
+
+    def test_a_smaller_owner_figure_does_tighten_the_cap(self, tmp_path):
+        import sqlite3
+        from decimal import Decimal
+
+        from catalyst.cost import CostEstimate
+        from catalyst.cost import governor as gov
+
+        conn = sqlite3.connect(tmp_path / "g.db")
+        conn.executescript(open("catalyst/storage/schema.sql").read())
+        est = CostEstimate(estimated_cents=Decimal("150"), basis="test",
+                           kind="scheduled", component="research")
+        d = gov.authorize(est, conn, Decimal("0.10"),
+                          owner_monthly_cap_cents=Decimal("100"))   # $1
+        assert d.cap_cents == Decimal("100")
+        assert d.authorized is False
+        conn.close()

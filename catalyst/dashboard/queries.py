@@ -371,6 +371,7 @@ class CostPanel:
     last_reconciled_ok: str | None
     reconcile_gap_days: int | None
     admin_key_present: bool
+    owner_budget_usd: Decimal | None = None
 
 
 def cost_panel(db: Db, as_of: date | None = None) -> CostPanel:
@@ -466,10 +467,15 @@ def cost_panel(db: Db, as_of: date | None = None) -> CostPanel:
         yesterday = as_of - timedelta(days=1)
         reconcile_gap_days = (yesterday - date.fromisoformat(last_reconciled_ok)).days
     admin_key_present = False
+    owner_budget_usd = None
     try:
         from catalyst.setup.credentials import load_credentials
-        admin_key_present = bool(load_credentials().anthropic_admin_key)
-    except Exception:  # noqa: BLE001 - a bool for display, never fatal
+        _creds = load_credentials()
+        admin_key_present = bool(_creds.anthropic_admin_key)
+        raw_budget = (_creds.settings or {}).get("monthly_budget_usd")
+        if raw_budget is not None:
+            owner_budget_usd = Decimal(str(raw_budget))
+    except Exception:  # noqa: BLE001 - display only, never fatal
         pass
 
     return CostPanel(
@@ -490,6 +496,7 @@ def cost_panel(db: Db, as_of: date | None = None) -> CostPanel:
         check_failed_q=check_failed_q, last_reconciled_ok=last_reconciled_ok,
         reconcile_gap_days=reconcile_gap_days,
         admin_key_present=admin_key_present,
+        owner_budget_usd=owner_budget_usd,
     )
 
 

@@ -772,3 +772,46 @@ class TestAnalysisLayer:
         from catalyst.dashboard.render import _CSS
         assert "--surface:     #fbfbf9" in _CSS
         assert "--surface:     #ffffff" not in _CSS
+
+
+class TestOwnerBudgetReconciliation:
+    """Owner report: set 20 on the setup page, saw $5 everywhere after.
+    The cost page must reconcile the two figures where the owner
+    noticed the contradiction, rather than leaving them to disagree."""
+
+    def _panel_with_budget(self, tmp_path, bare, usd):
+        from catalyst.setup import credentials as creds
+        cpath = str(tmp_path / "c.json")
+        creds.save_credentials("PKFAKE1234567890TEST", "SECFAKE",
+                               "sk-ant-fake", "tok", path=cpath,
+                               settings={"monthly_budget_usd": usd,
+                                         "account_mode": "paper"})
+        import os
+        os.environ["CATALYST_CREDENTIALS"] = cpath
+        try:
+            db = Db(bare)
+            html = panels.cost_panel(db, "cost")
+            db.close()
+        finally:
+            os.environ.pop("CATALYST_CREDENTIALS", None)
+        return html
+
+    def test_a_too_large_setting_is_explained_not_ignored(self, tmp_path, bare):
+        html = self._panel_with_budget(tmp_path, bare, 20)
+        assert "You set a spending limit of $20 a month" in html
+        assert "has no effect" in html
+        # scoped to THIS message: other copy on the page legitimately
+        # contains escaped apostrophes
+        import re as _re
+        msg = _re.search(r"You set a spending limit.*?</div>", html, _re.S).group(0)
+        assert "&#x27;" not in msg, "apostrophe double-escaped in the message"
+
+    def test_a_tighter_setting_is_shown_as_the_one_enforced(self, tmp_path, bare):
+        html = self._panel_with_budget(tmp_path, bare, 2)
+        assert "tighter than" in html
+        assert "yours is the one being enforced" in html
+
+    def test_no_message_when_the_setting_matches_the_ceiling(self, tmp_path, bare):
+        html = self._panel_with_budget(tmp_path, bare, 5)
+        assert "has no effect" not in html
+        assert "tighter than" not in html
