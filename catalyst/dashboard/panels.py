@@ -17,18 +17,21 @@ from catalyst.dashboard.render import (
     SURVIVORSHIP_CAVEAT,
     alarm,
     caveat,
+    caveat_fold,
     details,
     dollars,
     empty_block,
     esc,
     json_pretty,
     ok,
+    pill,
     pre,
     prov,
     raw,
     section,
     signed_pp,
     table,
+    tiles,
 )
 
 # --------------------------------------------------------------------------
@@ -64,6 +67,32 @@ def performance_panel(db: Db, p: str = "perf") -> str:
             "to draw. The two queries behind that emptiness are printed below.</p>"
         )
 
+    # The at-a-glance row. Every tile carries where its number came from,
+    # because a bare figure on this page is not allowed to exist.
+    if perf.bot_points:
+        excess_v = perf.excess_pp
+        state, word = (("good", "ahead of SPY") if (excess_v or 0) >= 0
+                       else ("crit", "behind SPY"))
+        headline_tile = (f'<span class="{"pos" if (excess_v or 0) >= 0 else "neg"}">'
+                         f"{esc(signed_pp(excess_v))}</span>")
+        headline_sub = f"{pill(state, word)} exposure-matched, net of API spend"
+        equity_tile = dollars(perf.net_equity_cents)
+        equity_sub = f"from $1,000 at {esc(perf.start_day)}"
+    else:
+        headline_tile = "&mdash;"
+        headline_sub = f"{pill('idle', 'no closed trades yet')} nothing to compare"
+        equity_tile = "&mdash;"
+        equity_sub = "no equity series recorded yet"
+    sample_state = ("good" if perf.n_closed >= MIN_TRADES_FOR_MEANING
+                    else ("idle" if perf.n_closed == 0 else "warn"))
+    out.append(tiles(f"{p}-tiles", [
+        ("Excess vs SPY", headline_tile, headline_sub),
+        ("Account value", equity_tile, equity_sub),
+        ("Closed trades", str(perf.n_closed),
+         f"{pill(sample_state, f'{perf.n_closed} of {MIN_TRADES_FOR_MEANING}')} "
+         "needed before any number here means anything"),
+    ]))
+
     # Sample-size honesty, first, before any number is read as a verdict.
     if perf.n_closed < MIN_TRADES_FOR_MEANING:
         out.append(alarm(
@@ -83,22 +112,26 @@ def performance_panel(db: Db, p: str = "perf") -> str:
             "the caveats below."
         ))
 
-    out.append(caveat(BAKEOFF_CAVEAT))
-    out.append(caveat(SURVIVORSHIP_CAVEAT))
-    out.append(caveat(PAPER_PNL_CAVEAT))
+    out.append(caveat_fold(
+        f"{p}-caveats",
+        "Three standing caveats on every number here: the bake-off beat "
+        "SPY on a lucky subsample, the graded universes are not "
+        "delisting-complete, and paper P&L is fictional while the API "
+        "bill is real. Open for the full wording.",
+        [BAKEOFF_CAVEAT, SURVIVORSHIP_CAVEAT, PAPER_PNL_CAVEAT]))
 
     # The chart, or an explained absence.
     if perf.bot_points:
         series = [charts.Series(
             "catalyst, net of all API spend",
             [(pt[0].toordinal(), pt[1]) for pt in perf.bot_points],
-            "#2b3a8f",
+            "var(--series-1)",
         )]
         if perf.spy_points:
             series.append(charts.Series(
                 "SPY (total return, same start)",
                 [(pt[0].toordinal(), pt[1]) for pt in perf.spy_points],
-                "#8a2f2f", dash="5 3",
+                "var(--series-2)", dash="5 3",
             ))
         xs = [pt[0] for pt in perf.bot_points]
         mid = xs[len(xs) // 2]
@@ -112,6 +145,16 @@ def performance_panel(db: Db, p: str = "perf") -> str:
             "100 on this chart is $1,000, not a bug."
         ))
     else:
+        # Draw the empty chart AS a chart. A blank gap where a graph
+        # belongs reads as a broken page; the frame plus a plain-English
+        # line keeps "nothing has happened yet" visibly different from
+        # "this is broken" - the raw queries below settle which it is.
+        out.append(charts.placeholder(
+            chart_id=f"{p}-chart-placeholder",
+            title="Account value vs SPY, indexed to 100, net of API spend",
+            explanation="The line starts the day the first trade closes. "
+                        "Nothing has closed yet.",
+        ))
         out.append(empty_block(
             f"{p}-empty-closed", perf.closed_q,
             meaning="closed_trades is what the bot's equity line is built from.",
@@ -184,14 +227,39 @@ def funnel_panel(db: Db, p: str = "funnel") -> str:
         out.append(ok(f'<span id="{p}-blame">Orders have been placed; no stage is '
                       "currently blocking the pipeline end to end.</span>"))
 
+    # Survival rate at a glance: how many of the raw events reached the
+    # far end. The count alone hides whether 3 orders came from 5
+    # candidates or from 5,000.
+    if data.stages:
+        first, last = data.stages[0].count, data.stages[-1].count
+        rate = f"{(100.0 * last / first):.1f}%" if first else "&mdash;"
+        out.append(tiles(f"{p}-tiles", [
+            (data.stages[0].label.strip().capitalize(), str(first),
+             "everything the feeds produced in the window"),
+            (data.stages[-1].label.strip().capitalize(), str(last),
+             "what survived every stage below"),
+            ("Survival rate", rate,
+             f"{last} of {first} - each stage's losses are itemised below"),
+        ]))
+
     widest = max((s.count for s in data.stages), default=0) or 1
-    for stage in data.stages:
-        width = max(2, int(380 * stage.count / widest))
+    # Ordinal ramp, lightest at the widest stage and darkening as
+    # candidates survive - the funnel's own direction is the encoding.
+    # Steps are 100 apart because the validator FAILED the obvious
+    # 6-step version on adjacent lightness (0.047 against a 0.06 floor).
+    ramp = ["var(--step-1)", "var(--step-2)", "var(--step-3)",
+            "var(--step-4)", "var(--step-5)"]
+    for i, stage in enumerate(data.stages):
+        width = max(3, int(380 * stage.count / widest))
+        shade = ramp[min(i, len(ramp) - 1)]
+        pct = (100.0 * stage.count / widest) if widest else 0.0
         out.append(
             f'<div class="funnel-row" id="{p}-row-{esc(stage.key)}">'
             f'<span class="funnel-label">{esc(stage.label)}</span>'
             f'<span class="funnel-n">{stage.count}</span>'
-            f'<span class="funnel-bar" style="width:{width}px"></span></div>'
+            f'<span class="funnel-bar" style="width:{width}px;'
+            f'background:{shade}" title="{esc(stage.label)}: {stage.count} '
+            f'({pct:.0f}% of the widest stage)"></span></div>'
         )
         if stage.drops:
             drops = "".join(
@@ -227,6 +295,51 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
 
     base_hurdle = float(c.base_cap_cents) * 12 / START_CAPITAL_CENTS * 100
     max_hurdle = float(c.max_cap_cents) * 12 / START_CAPITAL_CENTS * 100
+
+    # Tiles first: the three numbers that decide whether this is viable.
+    total_mtd = c.scheduled_mtd_cents + c.manual_mtd_cents
+    cap_used = ((c.scheduled_mtd_cents / c.base_cap_cents * 100)
+                if c.base_cap_cents else Decimal(0))
+    cap_state = ("crit" if cap_used >= 100 else
+                 "warn" if cap_used >= 75 else "good")
+    out.append(tiles(f"{p}-tiles", [
+        ("Scheduled spend, this month", dollars(c.scheduled_mtd_cents),
+         f"{pill(cap_state, f'{cap_used:.0f}% of the ${c.base_cap_cents / 100:.0f} cap')} "
+         "locally priced from stored raw usage"),
+        ("Annual hurdle at the cap", f"{base_hurdle:.1f}%",
+         "what the strategy must beat before a trade counts as good"),
+        ("Spend this month, all kinds", dollars(total_mtd),
+         f"scheduled {dollars(c.scheduled_mtd_cents)} + manual "
+         f"{dollars(c.manual_mtd_cents)}, never pooled"),
+    ]))
+
+    # Daily billed spend, charted. Same rows as the table below - this
+    # is the same data drawn, not a second source of truth.
+    daily = [(str(r["target_date"])[5:], float(r["cost_api_total_cents"] or 0),
+              f"{r['target_date']}: {r['cost_api_total_cents']} cents billed")
+             for r in reversed(c.billed_q.rows)][-30:]
+    if daily:
+        out.append('<div class="chart-wrap">' + charts.bar_chart(
+            daily, chart_id=f"{p}-daily-chart",
+            title="Billed spend per closed day, cents (Anthropic Cost API)",
+            value_fmt=lambda v: f"{v:,.1f}",
+            reference=(float(c.base_cap_cents) / 30.0,
+                       "cap, pro-rata per day"),
+        ) + "</div>")
+        out.append(prov(
+            "Bars are BILLED whole closed days from the Cost API - today is "
+            "never among them, because the Cost API reports whole days only "
+            "(TRAPS.md). The dashed line is the monthly cap divided by 30, "
+            "shown as a pace guide only: the cap is enforced on the month's "
+            "total, never per day."
+        ))
+    else:
+        out.append('<div class="chart-wrap">' + charts.placeholder(
+            chart_id=f"{p}-daily-placeholder",
+            title="Billed spend per closed day, cents (Anthropic Cost API)",
+            explanation="Bars appear once a day has closed and been "
+                        "reconciled against the real bill.",
+        ) + "</div>")
 
     out.append(table(
         f"{p}-summary",

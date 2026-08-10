@@ -636,3 +636,84 @@ def test_empty_block_would_look_different_for_a_broken_query():
     broken = empty_block("s", QueryResult("SELECT 1", (), [], "boom"))
     fine = empty_block("s", QueryResult("SELECT 1", (), [], None))
     assert broken != fine
+
+
+# --------------------------------------------------------------------------
+# Visual layer (owner feedback 2026-08-10: "not very user friendly to
+# understand and visually debug"). These pin the presentation promises
+# the brief makes, not the styling taste.
+# --------------------------------------------------------------------------
+
+
+class TestVisualLayer:
+    def test_every_tile_carries_its_own_provenance(self):
+        from catalyst.dashboard.render import tiles
+        html = tiles("t", [("Spend", "$0.73", "locally priced from raw usage")])
+        assert "Spend" in html and "$0.73" in html
+        assert "locally priced from raw usage" in html, (
+            "a tile without a provenance line is a bare number, which this "
+            "dashboard does not allow")
+
+    def test_status_pill_never_relies_on_colour_alone(self):
+        from catalyst.dashboard.render import pill
+        for state in ("good", "warn", "crit", "idle"):
+            html = pill(state, "behind SPY")
+            assert "behind SPY" in html          # the word
+            assert 'aria-hidden="true">' in html  # and a glyph beside it
+
+    def test_empty_block_folds_the_sql_but_still_contains_it(self):
+        """The wall of SQL is folded, NOT dropped - house rule 3 asks for
+        the query beside the zero, not for it to dominate the page."""
+        r = QueryResult("SELECT COUNT(*) FROM raw_events", (), [], None)
+        html = empty_block("e", r, meaning="nothing arrived")
+        assert "<details" in html
+        assert "SELECT COUNT(*) FROM raw_events" in html   # still present
+        assert "nothing arrived" in html                   # verdict stays visible
+        assert "absence of data" in html
+
+    def test_a_broken_query_is_not_folded_away(self):
+        r = QueryResult("SELECT 1", (), [], "no such column: x")
+        html = empty_block("e", r)
+        assert "<details id=\"e-detail\" open>" in html, (
+            "a FAILED query must be open by default - it is not a detail "
+            "for the reader to go looking for")
+
+    def test_caveat_fold_keeps_every_word_of_every_caveat(self):
+        from catalyst.dashboard.render import (
+            BAKEOFF_CAVEAT, PAPER_PNL_CAVEAT, SURVIVORSHIP_CAVEAT, caveat_fold,
+        )
+        from catalyst.dashboard.render import esc
+        html = caveat_fold("c", "three caveats",
+                           [BAKEOFF_CAVEAT, SURVIVORSHIP_CAVEAT, PAPER_PNL_CAVEAT])
+        # escaped, not altered: the caveats carry quotes and ampersands
+        for text in (BAKEOFF_CAVEAT, SURVIVORSHIP_CAVEAT, PAPER_PNL_CAVEAT):
+            assert esc(text) in html
+
+    def test_bar_chart_labels_stay_inside_the_viewbox(self):
+        svg = charts.bar_chart(
+            [("07-1%d" % i, i * 3.5, "tooltip %d" % i) for i in range(9)],
+            chart_id="bars", title="Billed spend per closed day, cents",
+            reference=(17.0, "cap, pro-rata per day"))
+        assert charts.labels_outside_viewbox(svg) == []
+        assert "<title>tooltip 3</title>" in svg, (
+            "each bar needs a hover tooltip; <title> is the whole hover "
+            "layer on a page that cannot load JavaScript from anywhere")
+
+    def test_bar_chart_refuses_to_fake_an_empty_chart(self):
+        with pytest.raises(ValueError):
+            charts.bar_chart([], chart_id="b", title="t")
+
+    def test_placeholder_says_what_will_appear_and_when(self):
+        svg = charts.placeholder(
+            chart_id="ph", title="Account value vs SPY",
+            explanation="The line starts the day the first trade closes.")
+        assert charts.labels_outside_viewbox(svg) == []
+        assert "first trade closes" in svg
+        assert "Account value vs SPY" in svg
+
+    def test_charts_use_theme_tokens_not_baked_in_light_colours(self):
+        """The page renders in the reader's own light/dark setting; an
+        SVG with hardcoded near-white chrome is unreadable in dark."""
+        svg = charts.bar_chart([("a", 1.0, "x")], chart_id="b", title="t")
+        assert "var(--surface)" in svg and "var(--hairline)" in svg
+        assert "#fbfbfd" not in svg
