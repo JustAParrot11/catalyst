@@ -1058,3 +1058,256 @@ class TestInstallScriptsStatic:
 #    resting BUY LIMIT then counted as a stop and
 #    test_a_resting_buy_limit_is_never_counted_as_a_protective_stop
 #    failed. Restored, green.
+
+
+# ==========================================================================
+# E9: the setup form collected fields the browser never sent.
+#
+# anthropic_admin_key and account_mode were rendered as inputs, explained
+# at length, and then left out of saveAll()'s payload. The owner pasted a
+# billing key, pressed Save, was told "All saved", and the key never left
+# the page. The dashboard then reported no admin key - which reads as
+# "cannot connect" - and the nightly bill check silently never ran.
+#
+# Reported live 2026-08-10: "tell me why it doesnt see my alpaca Admin API
+# key ... running this cmd proves it is valid".
+# ==========================================================================
+
+
+def _app(tmp_path):
+    return _setup_app(tmp_path, [])
+
+
+class TestEveryRenderedFieldIsActuallySent:
+    def _script(self):
+        from catalyst.setup.first_run import render_setup_page
+        return render_setup_page("/setup")
+
+    @pytest.mark.parametrize("field", ["alpaca_key", "alpaca_secret",
+                                       "anthropic_key", "anthropic_admin_key",
+                                       "account_mode", "monthly_budget_usd"])
+    def test_a_field_on_the_form_is_in_the_save_payload(self, field):
+        page = self._script()
+        assert f'name="{field}"' in page, f"{field} is not on the form"
+        body = page.split("function saveAll()")[1].split("function ")[0]
+        assert field in body, (
+            f"{field} is collected by the form but saveAll() does not send "
+            "it, so it is silently discarded")
+
+    def test_the_admin_key_survives_a_round_trip_through_save(self, tmp_path):
+        app = _app(tmp_path)
+        admin = "sk-ant-admin01-" + "z" * 40
+        app.admin_tester = lambda k: (True, "ok")
+        resp = _post_save(app, _body(anthropic_admin_key=admin))
+        assert json.loads(resp.body)["ok"], resp.body
+        loaded = creds.load_credentials(str(tmp_path / "creds.json"))
+        assert loaded.anthropic_admin_key == admin, (
+            "the key was accepted and then not stored")
+
+    def test_replacing_alpaca_keys_does_not_wipe_the_billing_key(self, tmp_path):
+        """A blank admin box means "keep it", not "delete it". Otherwise
+        rotating an expired Alpaca key silently switches the bill check
+        off, and nothing says so."""
+        app = _app(tmp_path)
+        admin = "sk-ant-admin01-" + "y" * 40
+        app.admin_tester = lambda k: (True, "ok")
+        _post_save(app, _body(anthropic_admin_key=admin))
+        _post_save(app, _body())          # no admin field at all this time
+        loaded = creds.load_credentials(str(tmp_path / "creds.json"))
+        assert loaded.anthropic_admin_key == admin
+
+
+class TestSettingsAreChangeableAfterSetup:
+    """Before this, the only post-setup page was "Replace my keys", which
+    refuses to save unless all three secrets are re-pasted. The monthly
+    budget was therefore fixed at whatever was typed on day one, and a
+    billing key could never be added afterwards at all."""
+
+    def _configured(self, tmp_path):
+        app = _app(tmp_path)
+        _post_save(app, _body(monthly_budget_usd="5"))
+        return app
+
+    def test_the_configured_page_offers_a_settings_form(self, tmp_path):
+        app = self._configured(tmp_path)
+        page = app.handle("GET", "/", b"", {}).body.decode()
+        assert 'id="settings_form"' in page
+        assert 'name="monthly_budget_usd"' in page
+        assert 'name="anthropic_admin_key"' in page
+        # and it must NOT demand the secrets again
+        assert 'name="alpaca_secret"' not in page
+
+    def test_the_form_shows_the_budget_currently_in_force(self, tmp_path):
+        app = _app(tmp_path)
+        _post_save(app, _body(monthly_budget_usd="12"))
+        page = app.handle("GET", "/", b"", {}).body.decode()
+        assert 'value="12' in page, "the form does not show the saved budget"
+
+    def test_changing_the_budget_needs_no_keys_and_keeps_them(self, tmp_path):
+        app = self._configured(tmp_path)
+        before = creds.load_credentials(str(tmp_path / "creds.json"))
+        resp = app.handle("POST", "/settings",
+                          json.dumps({"monthly_budget_usd": "12"}).encode(),
+                          {"content-type": "application/json"})
+        assert json.loads(resp.body)["ok"], resp.body
+        after = creds.load_credentials(str(tmp_path / "creds.json"))
+        assert after.settings["monthly_budget_usd"] == 12
+        assert after.alpaca_key == before.alpaca_key
+        assert after.alpaca_secret == before.alpaca_secret
+        assert after.anthropic_key == before.anthropic_key
+
+    def test_the_new_budget_is_what_the_governor_then_uses(self, tmp_path):
+        """The number has to reach the money path, not just the file -
+        that is the exact defect E1 recorded the first time."""
+        from decimal import Decimal
+
+        from catalyst.orchestrator.scheduler import _owner_cap_cents
+        app = self._configured(tmp_path)
+        app.handle("POST", "/settings",
+                   json.dumps({"monthly_budget_usd": "12"}).encode(),
+                   {"content-type": "application/json"})
+        loaded = creds.load_credentials(str(tmp_path / "creds.json"))
+        assert _owner_cap_cents(
+            loaded.settings["monthly_budget_usd"]) == Decimal("1200")
+
+    def test_a_billing_key_can_be_added_after_setup(self, tmp_path):
+        app = self._configured(tmp_path)
+        assert not creds.load_credentials(
+            str(tmp_path / "creds.json")).anthropic_admin_key
+        admin = "sk-ant-admin01-" + "x" * 40
+        app.admin_tester = lambda k: (True, "ok")
+        resp = app.handle("POST", "/settings", json.dumps({
+            "monthly_budget_usd": "5", "anthropic_admin_key": admin,
+        }).encode(), {"content-type": "application/json"})
+        assert json.loads(resp.body)["ok"], resp.body
+        assert creds.load_credentials(
+            str(tmp_path / "creds.json")).anthropic_admin_key == admin
+
+    def test_a_blank_billing_key_keeps_the_saved_one(self, tmp_path):
+        app = self._configured(tmp_path)
+        admin = "sk-ant-admin01-" + "w" * 40
+        app.admin_tester = lambda k: (True, "ok")
+        app.handle("POST", "/settings", json.dumps({
+            "monthly_budget_usd": "5", "anthropic_admin_key": admin,
+        }).encode(), {"content-type": "application/json"})
+        app.handle("POST", "/settings",
+                   json.dumps({"monthly_budget_usd": "7"}).encode(),
+                   {"content-type": "application/json"})
+        loaded = creds.load_credentials(str(tmp_path / "creds.json"))
+        assert loaded.anthropic_admin_key == admin
+        assert loaded.settings["monthly_budget_usd"] == 7
+
+    def test_a_billing_key_that_does_not_work_changes_nothing(self, tmp_path):
+        app = self._configured(tmp_path)
+        app.admin_tester = lambda k: (False, "Anthropic refused this key")
+        resp = app.handle("POST", "/settings", json.dumps({
+            "monthly_budget_usd": "9", "anthropic_admin_key": "sk-ant-nope",
+        }).encode(), {"content-type": "application/json"})
+        assert not json.loads(resp.body)["ok"]
+        loaded = creds.load_credentials(str(tmp_path / "creds.json"))
+        assert loaded.settings["monthly_budget_usd"] == 5, (
+            "the budget moved despite the save being refused")
+        assert not loaded.anthropic_admin_key
+
+    @pytest.mark.parametrize("bad", ["", "lots", "nan", "inf", "-1"])
+    def test_a_budget_that_is_not_a_number_changes_nothing(self, tmp_path, bad):
+        app = self._configured(tmp_path)
+        resp = app.handle("POST", "/settings",
+                          json.dumps({"monthly_budget_usd": bad}).encode(),
+                          {"content-type": "application/json"})
+        assert not json.loads(resp.body)["ok"]
+        assert creds.load_credentials(
+            str(tmp_path / "creds.json")).settings["monthly_budget_usd"] == 5
+
+    def test_the_settings_page_needs_the_access_code_too(self, tmp_path):
+        """A write endpoint must not be the one door left unlocked."""
+        app = _app(tmp_path)
+        app.require_token = True
+        app._stored_token = lambda: "the-code"
+        resp = app.handle("POST", "/settings",
+                          json.dumps({"monthly_budget_usd": "25"}).encode(),
+                          {"content-type": "application/json"})
+        assert resp.status == 403
+
+
+class TestKeysAreReplacedOneAtATime:
+    """Owner request 2026-08-10: "If I want to change the alpaca key i
+    dont want to have to re-enter claude keys aswell." Two secrets typed
+    to change one is how a value ends up pasted into the wrong box."""
+
+    def _configured(self, tmp_path):
+        app = _app(tmp_path)
+        app.admin_tester = lambda k: (True, "ok")
+        _post_save(app, _body(anthropic_admin_key="sk-ant-admin01-" + "q" * 40))
+        return app
+
+    def _replace(self, app, **payload):
+        return json.loads(app.handle(
+            "POST", "/replace-key", json.dumps(payload).encode(),
+            {"content-type": "application/json"}).body)
+
+    def test_replacing_alpaca_leaves_every_other_credential_alone(self, tmp_path):
+        app = self._configured(tmp_path)
+        before = creds.load_credentials(str(tmp_path / "creds.json"))
+        r = self._replace(app, which="alpaca", alpaca_key="PKNEWNEWNEWNEWNEWNEW",
+                          alpaca_secret="brandnewsecretbrandnewsecret")
+        assert r["ok"], r
+        after = creds.load_credentials(str(tmp_path / "creds.json"))
+        assert after.alpaca_key == "PKNEWNEWNEWNEWNEWNEW"
+        assert after.alpaca_secret == "brandnewsecretbrandnewsecret"
+        assert after.anthropic_key == before.anthropic_key
+        assert after.anthropic_admin_key == before.anthropic_admin_key
+        assert after.settings == before.settings
+        assert after.dashboard_token == before.dashboard_token
+
+    def test_replacing_anthropic_leaves_the_broker_alone(self, tmp_path):
+        app = self._configured(tmp_path)
+        before = creds.load_credentials(str(tmp_path / "creds.json"))
+        r = self._replace(app, which="anthropic",
+                          anthropic_key="sk-ant-brandnewbrandnewbrandnew")
+        assert r["ok"], r
+        after = creds.load_credentials(str(tmp_path / "creds.json"))
+        assert after.anthropic_key == "sk-ant-brandnewbrandnewbrandnew"
+        assert after.alpaca_key == before.alpaca_key
+        assert after.alpaca_secret == before.alpaca_secret
+        assert after.anthropic_admin_key == before.anthropic_admin_key
+
+    def test_a_key_that_does_not_work_leaves_the_working_one_in_place(self, tmp_path):
+        app = self._configured(tmp_path)
+        before = creds.load_credentials(str(tmp_path / "creds.json"))
+        app.alpaca_tester = lambda k, s, **kw: (False, "Alpaca said 403")
+        r = self._replace(app, which="alpaca", alpaca_key="PKBADBADBADBADBADBAD",
+                          alpaca_secret="badbadbadbadbadbadbad")
+        assert not r["ok"]
+        assert "still in place" in r["message"]
+        after = creds.load_credentials(str(tmp_path / "creds.json"))
+        assert after.alpaca_key == before.alpaca_key
+        assert after.alpaca_secret == before.alpaca_secret
+
+    def test_half_a_broker_pair_is_refused(self, tmp_path):
+        app = self._configured(tmp_path)
+        r = self._replace(app, which="alpaca", alpaca_key="PKONLYTHEKEYNOSECRET")
+        assert not r["ok"]
+        assert "pair" in r["message"]
+
+    def test_an_unknown_key_name_changes_nothing(self, tmp_path):
+        app = self._configured(tmp_path)
+        assert not self._replace(app, which="dashboard_token",
+                                 anthropic_key="x")["ok"]
+
+    def test_replacing_a_key_needs_the_access_code(self, tmp_path):
+        app = self._configured(tmp_path)
+        app.require_token = True
+        app._stored_token = lambda: "the-code"
+        resp = app.handle("POST", "/replace-key",
+                          json.dumps({"which": "anthropic",
+                                      "anthropic_key": "sk-ant-x"}).encode(),
+                          {"content-type": "application/json"})
+        assert resp.status == 403
+
+    def test_the_page_offers_each_key_its_own_button(self, tmp_path):
+        app = self._configured(tmp_path)
+        page = app.handle("GET", "/", b"", {}).body.decode()
+        assert "replaceKey('alpaca')" in page
+        assert "replaceKey('anthropic')" in page
+        assert "does not mean re-typing anything else" in page

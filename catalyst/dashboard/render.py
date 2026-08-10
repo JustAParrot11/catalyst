@@ -93,6 +93,13 @@ _CSS = """
   --baseline:    #c2c8d1;
   --series-1:    #2a78d6;
   --series-2:    #eb6834;
+  /* Slot 3. The spider diagram is an all-pairs form (any node may
+     sit beside any other), which caps the categorical set at three:
+     validated all-pairs in BOTH modes, worst CVD dE 9.2 light /
+     9.4 dark, worst normal-vision dE 24.0 / 20.9. Aqua sits at
+     2.74:1 on the light surface, so every node carries a visible
+     text label - identity is never colour alone. */
+  --series-3:    #1baf7a;
   --good:        #0ca30c;
   --good-ink:    #006300;
   --warning:     #fab219;
@@ -130,6 +137,7 @@ _CSS = """
     --grid-head: #0b0d10;
     --series-1:  #3987e5;
     --series-2:  #d95926;
+    --series-3:  #199e70;
     --good-ink:  #33d17a;
     --pos:       #33d17a;
     --neg:       #f2555a;
@@ -264,6 +272,31 @@ h3 { font-size: 11px; margin: 18px 0 6px 0; text-transform: uppercase;
          padding: 9px 11px; margin: 9px 0; font-size: 13px; border-radius: 0; }
 .ok { background: var(--good-wash); border-left: 3px solid var(--good);
       padding: 9px 11px; margin: 9px 0; font-size: 13px; border-radius: 0; }
+/* Neutral. For "not ready yet, and that is normal" - which is neither a
+   warning nor a success, and wearing either colour teaches the owner to
+   misread the page. */
+/* Simple / Full record. A visible pair, because a hidden preference is
+   a setting nobody finds; both options are always on screen. */
+.switch { display: flex; gap: 2px; margin: 0 0 14px 0; }
+.switch-opt { display: block; padding: 7px 13px; text-decoration: none;
+              background: var(--surface-2); border: 1px solid var(--hairline);
+              color: var(--ink-2); }
+.switch-opt b { display: block; font-size: 12px; letter-spacing: .04em;
+                text-transform: uppercase; }
+.switch-opt span { display: block; font-size: 11px; color: var(--muted); }
+.switch-opt.active { background: var(--accent); border-color: var(--accent); }
+.switch-opt.active b, .switch-opt.active span { color: var(--header); }
+.lede-line { font-size: 15px; line-height: 1.55; color: var(--ink);
+             max-width: 74ch; margin: 4px 0 14px 0; }
+/* Legend keys. The spider's three arms are labelled on the diagram too -
+   these repeat the identity in text so it is never colour alone. */
+.key { display: inline-block; width: 9px; height: 9px; border-radius: 2px;
+       margin: 0 5px 0 12px; vertical-align: baseline; }
+.key-1 { background: var(--series-1); }
+.key-2 { background: var(--series-2); }
+.key-3 { background: var(--series-3); }
+.note { background: var(--surface-2); border-left: 3px solid var(--accent);
+        padding: 9px 11px; margin: 9px 0; font-size: 13px; border-radius: 0; }
 .empty { background: var(--surface-2); border: 1px dashed var(--baseline);
          padding: 10px 12px; margin: 9px 0; font-size: 12px; border-radius: 2px; }
 .big { font-size: 30px; font-weight: 650; letter-spacing: -.02em; }
@@ -393,6 +426,7 @@ NAV_GROUPS = [
         ("/funnel", "Pipeline", "Raw filings through to orders"),
     ]),
     ("Investigate", [
+        ("/brain", "The brain", "Everything it has linked, as one map"),
         ("/decisions", "Decisions", "Why each trade was taken or declined"),
         ("/refusals", "Refusals", "What declined candidates went on to do"),
         ("/logs", "Logs", "Searchable event log"),
@@ -491,6 +525,15 @@ def prov(text: str) -> str:
 
 def caveat(text: str) -> str:
     return f'<div class="caveat">{esc(text)}</div>'
+
+
+def note(text_html: str) -> str:
+    """Neutral, informational. Not a warning and not a success.
+
+    "The comparison is not ready yet" is neither, and dressing it in
+    amber or red teaches the owner that a healthy page looks broken.
+    """
+    return f'<div class="note">{text_html}</div>'
 
 
 def caveat_fold(cid: str, summary: str, texts: list) -> str:

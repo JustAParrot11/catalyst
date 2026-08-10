@@ -338,17 +338,63 @@ function testAnthropic(){
   post(PREFIX + '/test/anthropic', {anthropic_key: q('anthropic_key').value})
     .then(function(r){ show('anthropic_result', r.ok, r.message); });
 }
+function val(id){ var el = q(id); return el ? el.value : ''; }
+function accountMode(){
+  var picked = document.querySelector('input[name="account_mode"]:checked');
+  return picked ? picked.value : 'paper';
+}
+function testAdmin(){
+  show('admin_result', true, 'Asking Anthropic to read your bill...');
+  post(PREFIX + '/test/admin', {anthropic_admin_key: val('anthropic_admin_key')})
+    .then(function(r){ show('admin_result', r.ok, r.message); });
+}
 function saveAll(){
   show('save_result', true, 'Checking both connections, then saving...');
+  /* EVERY field on the form goes in this payload. The admin key and the
+     paper/live choice were rendered but not sent, so the bot silently
+     kept the defaults and could never read the real bill. */
   post(PREFIX + '/save', {
-    alpaca_key: q('alpaca_key').value,
-    alpaca_secret: q('alpaca_secret').value,
-    anthropic_key: q('anthropic_key').value,
-    monthly_budget_usd: q('monthly_budget_usd').value
+    alpaca_key: val('alpaca_key'),
+    alpaca_secret: val('alpaca_secret'),
+    anthropic_key: val('anthropic_key'),
+    anthropic_admin_key: val('anthropic_admin_key'),
+    account_mode: accountMode(),
+    monthly_budget_usd: val('monthly_budget_usd')
   }).then(function(r){
     show('save_result', r.ok, r.message);
     if (r.ok) { setTimeout(function(){ window.location = PREFIX + '/'; }, 2500); }
   });
+}
+function replaceKey(which){
+  var box = 'r_' + which + '_result';
+  var payload = {which: which};
+  if (which === 'alpaca') {
+    payload.alpaca_key = val('r_alpaca_key');
+    payload.alpaca_secret = val('r_alpaca_secret');
+  } else {
+    payload.anthropic_key = val('r_anthropic_key');
+  }
+  show(box, true, 'Testing the new details before saving anything...');
+  post(PREFIX + '/replace-key', payload).then(function(r){
+    show(box, r.ok, r.message);
+    if (r.ok) {
+      ['r_alpaca_key','r_alpaca_secret','r_anthropic_key'].forEach(function(id){
+        var el = q(id); if (el) { el.value = ''; }
+      });
+    }
+  });
+}
+function saveSettings(ev){
+  if (ev && ev.preventDefault) { ev.preventDefault(); }
+  show('settings_result', true, 'Saving...');
+  post(PREFIX + '/settings', {
+    monthly_budget_usd: val('monthly_budget_usd'),
+    anthropic_admin_key: val('anthropic_admin_key')
+  }).then(function(r){
+    show('settings_result', r.ok, r.message);
+    if (r.ok) { q('anthropic_admin_key').value = ''; }
+  });
+  return false;
 }
 function toggleShow(cb){
   var t = cb.checked ? 'text' : 'password';
@@ -452,17 +498,87 @@ def render_setup_page(prefix: str = "") -> str:
     return _shell("Catalyst setup", inner, prefix)
 
 
-def render_configured_page(prefix: str = "") -> str:
+def render_configured_page(prefix: str = "", *, budget_usd: str = "5",
+                           admin_key_present: bool = False) -> str:
+    """The page after first run: settings changeable, keys not shown.
+
+    Settings and secrets are deliberately separate forms. Changing the
+    monthly budget used to mean going through "Replace my keys" and
+    re-pasting all three secrets, which is enough friction that the
+    budget was in practice fixed at whatever was typed on day one - the
+    setup page offered a choice it then made unreachable.
+    """
+    p = html.escape(prefix)
+    admin_state = ("A billing key is saved, so the nightly bill check can read "
+                   "what Anthropic actually charged."
+                   if admin_key_present else
+                   "No billing key is saved yet. Without one the bot still "
+                   "tracks its own spending, but it cannot cross-check that "
+                   "against the real Anthropic bill - so nothing catches it "
+                   "if its own arithmetic drifts.")
     inner = (
         "<h1>Catalyst is set up</h1>"
-        '<p class="lede">Your details are saved and the bot is running. There is '
-        "nothing more to do here.</p>"
+        '<p class="lede">Your details are saved and the bot is running. You can '
+        "change what it spends below, without re-entering any keys.</p>"
+
+        "<h2>Monthly research budget</h2>"
+        '<form id="settings_form" onsubmit="return saveSettings(event)">'
+        '<label for="monthly_budget_usd">The most the bot may spend on Claude '
+        "research in a month, in US dollars. It obeys you either way, up to a "
+        "maximum of $25. Set 0 to stop it researching, and therefore trading, "
+        "entirely.</label>"
+        '<input type="number" id="monthly_budget_usd" name="monthly_budget_usd" '
+        f'min="0" max="25" step="0.5" value="{html.escape(budget_usd)}" '
+        'oninput="budgetHint()">'
+        '<p class="hint" id="monthly_budget_usd_hint"></p>'
+
+        "<h2>Anthropic billing key <span class=\"opt\">(optional)</span></h2>"
+        f'<p class="hint">{admin_state}</p>'
+        '<label for="anthropic_admin_key">This is a different key from the one '
+        "the bot uses to think. It starts <code>sk-ant-admin</code> and is made "
+        "in the Anthropic console under Settings, then Admin keys - only an "
+        "owner of the organisation can make one. It is read-only here: the bot "
+        "uses it to read your bill and can never change your spending limits "
+        "with it. Leave this box empty to keep whatever is already saved.</label>"
+        '<input type="password" id="anthropic_admin_key" '
+        'name="anthropic_admin_key" placeholder="leave empty to keep the '
+        'current one" autocomplete="off">'
+        '<p><button type="button" onclick="testAdmin()">Test this billing key'
+        "</button></p>"
+        '<div class="result" id="admin_result"></div>'
+
+        '<p><button type="submit">Save these settings</button></p>'
+        '<div class="result" id="settings_result"></div>'
+        "</form>"
+
+        "<h2>Keys</h2>"
         '<div class="note">Your keys are not shown on this page, and never will be. '
         "That is on purpose: anything you can read on a screen can end up in a "
-        "screenshot. If a key stops working, or you replace one at Alpaca or "
-        "Anthropic, use the button below to paste the new value in.</div>"
-        f'<p><a href="{html.escape(prefix)}/?replace=1"><button type="button">'
-        "Replace my keys</button></a></p>"
+        "screenshot. Each one is replaced on its own below - changing your broker "
+        "details does not mean re-typing anything else.</div>"
+
+        '<fieldset><legend>Broker (Alpaca)</legend>'
+        '<label for="r_alpaca_key">Both boxes together, because Alpaca issues them '
+        "as a pair. Leave them alone to keep the ones you have.</label>"
+        '<input type="password" id="r_alpaca_key" placeholder="new API key ID" '
+        'autocomplete="off">'
+        '<input type="password" id="r_alpaca_secret" placeholder="new secret key" '
+        'autocomplete="off">'
+        '<p><button type="button" onclick="replaceKey(\'alpaca\')">'
+        "Replace the broker keys</button></p>"
+        '<div class="result" id="r_alpaca_result"></div></fieldset>'
+
+        '<fieldset><legend>Research (Anthropic)</legend>'
+        '<label for="r_anthropic_key">The key the bot thinks with. Not the billing '
+        "key above - that one is set in its own box.</label>"
+        '<input type="password" id="r_anthropic_key" placeholder="new Anthropic API '
+        'key" autocomplete="off">'
+        '<p><button type="button" onclick="replaceKey(\'anthropic\')">'
+        "Replace the research key</button></p>"
+        '<div class="result" id="r_anthropic_result"></div></fieldset>'
+
+        '<p class="hint">Changing everything at once is still possible: '
+        f'<a href="{p}/?replace=1">open the full setup form</a>.</p>'
     )
     return _shell("Catalyst setup", inner, prefix)
 
@@ -609,8 +725,23 @@ class SetupApp:
 
         if route == "/" and method == "GET":
             if self._is_configured() and not query.get("replace"):
-                return _page(200, render_configured_page(self.path_prefix), cookie)
+                budget, admin_present = self._current_settings()
+                return _page(200, render_configured_page(
+                    self.path_prefix, budget_usd=budget,
+                    admin_key_present=admin_present), cookie)
             return _page(200, render_setup_page(self.path_prefix), cookie)
+
+        if route == "/test/admin" and method == "POST":
+            data = self._parse_body(body, headers)
+            ok, message = self.admin_tester(
+                (data.get("anthropic_admin_key") or "").strip())
+            return _json(200, {"ok": bool(ok), "message": message}, cookie)
+
+        if route == "/settings" and method == "POST":
+            return self._save_settings(self._parse_body(body, headers), cookie)
+
+        if route == "/replace-key" and method == "POST":
+            return self._replace_key(self._parse_body(body, headers), cookie)
 
         if route == "/test/alpaca" and method == "POST":
             data = self._parse_body(body, headers)
@@ -637,6 +768,185 @@ class SetupApp:
             "installed.</p>",
             self.path_prefix,
         ))
+
+    def _current_settings(self) -> tuple[str, bool]:
+        """(budget as typed, is an admin key saved). Never raises: an
+        unreadable credentials file must still render the page, with the
+        recommended default showing, rather than a 500."""
+        try:
+            existing = creds.load_credentials(self.credentials_path)
+        except Exception:  # noqa: BLE001
+            return "5", False
+        budget = (existing.settings or {}).get("monthly_budget_usd", 5)
+        return str(budget), bool(existing.anthropic_admin_key)
+
+    def _replace_key(self, data: dict[str, str],
+                     cookie: list[tuple[str, str]]) -> Response:
+        """Replace ONE credential, leaving the others untouched.
+
+        Replacing an expired Alpaca key used to mean re-pasting the
+        Anthropic key as well, because the only save path demanded all
+        three. Two secrets typed to change one is how a wrong value gets
+        pasted into the wrong box.
+
+        The new value is tested BEFORE anything is written, so a bad
+        paste leaves a working bot working.
+        """
+        which = (data.get("which") or "").strip().lower()
+        if which not in ("alpaca", "anthropic"):
+            return _json(200, {
+                "ok": False,
+                "message": "Nothing was changed: no such key to replace.",
+            }, cookie)
+
+        try:
+            existing = creds.load_credentials(self.credentials_path)
+        except Exception as exc:  # noqa: BLE001
+            return _json(200, {
+                "ok": False,
+                "message": ("Nothing was changed, because the saved details "
+                            "could not be read: " + creds.redact(str(exc))),
+            }, cookie)
+
+        alpaca_key = existing.alpaca_key
+        alpaca_secret = existing.alpaca_secret
+        anthropic_key = existing.anthropic_key
+
+        if which == "alpaca":
+            new_key = (data.get("alpaca_key") or "").strip()
+            new_secret = (data.get("alpaca_secret") or "").strip()
+            if not new_key or not new_secret:
+                return _json(200, {
+                    "ok": False,
+                    "message": ("Nothing was changed. Alpaca issues the key ID "
+                                "and the secret as a pair, so both boxes need "
+                                "filling to change either."),
+                }, cookie)
+            mode = (existing.settings or {}).get("account_mode", "paper")
+            kwargs = ({"base_url": creds.ALPACA_LIVE_BASE_URL}
+                      if mode == "live" else {})
+            ok, message = self.alpaca_tester(new_key, new_secret, **kwargs)
+            if not ok:
+                return _json(200, {
+                    "ok": False,
+                    "message": ("Nothing was changed, because the new Alpaca "
+                                "details did not work - the ones you had are "
+                                "still in place. " + message),
+                }, cookie)
+            alpaca_key, alpaca_secret = new_key, new_secret
+            changed = "broker keys"
+        else:
+            new_key = (data.get("anthropic_key") or "").strip()
+            if not new_key:
+                return _json(200, {
+                    "ok": False,
+                    "message": ("Nothing was changed. Paste the new Anthropic "
+                                "key into the box first."),
+                }, cookie)
+            ok, message = self.anthropic_tester(new_key)
+            if not ok:
+                return _json(200, {
+                    "ok": False,
+                    "message": ("Nothing was changed, because the new Anthropic "
+                                "key did not work - the one you had is still in "
+                                "place. " + message),
+                }, cookie)
+            anthropic_key = new_key
+            changed = "research key"
+
+        try:
+            creds.save_credentials(
+                alpaca_key, alpaca_secret, anthropic_key,
+                None,                       # keep this machine's access code
+                anthropic_admin_key=None,   # keep the billing key
+                settings=None,              # keep budget and account mode
+                path=self.credentials_path,
+            )
+        except creds.CredentialError as exc:
+            return _json(200, {
+                "ok": False,
+                "message": "Nothing was changed. " + str(exc),
+            }, cookie)
+
+        return _json(200, {
+            "ok": True,
+            "message": (f"Saved: the {changed} are replaced and were tested "
+                        "before anything was written. Nothing else changed - "
+                        "your other keys, budget and account choice are as "
+                        "they were."),
+        }, cookie)
+
+    def _save_settings(self, data: dict[str, str],
+                       cookie: list[tuple[str, str]]) -> Response:
+        """Change the budget and the billing key WITHOUT the secrets.
+
+        The alternative was "Replace my keys", which refuses to save
+        unless all three secrets are re-pasted. That made the monthly
+        budget effectively fixed at whatever was typed on day one, and
+        left no way at all to add a billing key afterwards.
+        """
+        budget_raw = (data.get("monthly_budget_usd") or "").strip()
+        try:
+            budget = float(budget_raw)
+            if not math.isfinite(budget) or budget < 0:
+                raise ValueError
+        except ValueError:
+            return _json(200, {
+                "ok": False,
+                "message": ("Nothing was changed. The monthly research budget "
+                            "must be a plain number of dollars - "
+                            f"\"{html.escape(budget_raw)}\" is not one. Try 5."),
+            }, cookie)
+
+        admin_raw = (data.get("anthropic_admin_key") or "").strip()
+        if admin_raw:
+            ok, message = self.admin_tester(admin_raw)
+            if not ok:
+                return _json(200, {
+                    "ok": False,
+                    "message": ("Nothing was changed, because that billing key "
+                                "did not work. " + message),
+                }, cookie)
+
+        try:
+            existing = creds.load_credentials(self.credentials_path)
+        except Exception as exc:  # noqa: BLE001
+            return _json(200, {
+                "ok": False,
+                "message": ("Nothing was changed, because the saved details "
+                            "could not be read: " + creds.redact(str(exc))),
+            }, cookie)
+
+        try:
+            creds.save_credentials(
+                existing.alpaca_key,
+                existing.alpaca_secret,
+                existing.anthropic_key,
+                None,                       # keep this machine's access code
+                anthropic_admin_key=admin_raw or None,   # blank keeps it
+                settings={"monthly_budget_usd": budget},
+                path=self.credentials_path,
+            )
+        except creds.CredentialError as exc:
+            return _json(200, {
+                "ok": False,
+                "message": "Nothing was changed. " + str(exc),
+            }, cookie)
+
+        hurdle = budget * 12 / 1000 * 100
+        note = (" A billing key is saved, so tonight's bill check will read "
+                "your real Anthropic costs." if admin_raw else "")
+        if budget == 0:
+            spend = ("The bot will not spend anything on research, so it will "
+                     "not trade.")
+        else:
+            spend = (f"The bot will stop at ${budget:g} a month, which is "
+                     f"{hurdle:.1f}% a year on a $1,000 account.")
+        return _json(200, {
+            "ok": True,
+            "message": ("Saved. " + spend + note +
+                        " It takes effect on the next research cycle."),
+        }, cookie)
 
     def _save(self, data: dict[str, str], cookie: list[tuple[str, str]]) -> Response:
         alpaca_key = (data.get("alpaca_key") or "").strip()
@@ -717,7 +1027,10 @@ class SetupApp:
                 alpaca_secret,
                 anthropic_key,
                 None,  # keep the access code this machine already has
-                anthropic_admin_key=admin_raw,
+                # None keeps whatever is already saved; "" would WIPE it.
+                # Replacing an expired Alpaca key must not silently
+                # disable the nightly bill check as a side effect.
+                anthropic_admin_key=admin_raw or None,
                 settings={"monthly_budget_usd": budget,
                           "account_mode": account_mode},
                 path=self.credentials_path,

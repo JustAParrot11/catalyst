@@ -294,3 +294,28 @@ CREATE TABLE IF NOT EXISTS equity_snapshots (
     source               TEXT NOT NULL,    -- 'broker_read'
     PRIMARY KEY (day, source)
 );
+
+-- Owner-entered token prices, DATE-EFFECTIVE. Published rates change
+-- (Sonnet 5's introductory pricing ends 2026-08-31), and the alternative
+-- to this table was editing pricing.py and redeploying.
+--
+-- Effective-FROM, never retroactive: a row priced last month keeps the
+-- rate that was in force when the tokens were actually bought. Rewriting
+-- history would make the nightly comparison against the real Anthropic
+-- bill drift for reasons nobody could reconstruct.
+--
+-- Append-only by convention: a correction is a NEW row, so the record of
+-- what was believed when is never lost.
+CREATE TABLE IF NOT EXISTS pricing_overrides (
+    id                    TEXT PRIMARY KEY,
+    model                 TEXT NOT NULL,
+    effective_from        TEXT NOT NULL,   -- ISO date, inclusive
+    input_cents_per_mtok  TEXT NOT NULL,   -- decimal string, cents
+    output_cents_per_mtok TEXT NOT NULL,
+    set_by                TEXT NOT NULL,
+    set_at                TEXT NOT NULL,
+    note                  TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_pricing_overrides_lookup
+    ON pricing_overrides (model, effective_from DESC);

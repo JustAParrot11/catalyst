@@ -13,7 +13,7 @@ catch what they claim to catch.
 import json
 import re
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -402,6 +402,154 @@ def test_acknowledge_records_who_and_when(seeded):
 def test_acknowledge_rejects_an_unknown_event(seeded):
     okay, message = server.acknowledge(seeded, "no-such-id", "a-human")
     assert not okay and "no unacknowledged reconciliation event" in message
+
+
+# ------------------------------------------------- owner-edited token prices
+
+
+def test_cost_page_offers_the_token_price_form_with_every_field_required(seeded):
+    html_out = panels.cost_panel(Db(seeded))
+    assert 'action="/set-token-price"' in html_out
+    for field in ("model", "effective_from", "input_cents_per_mtok",
+                  "output_cents_per_mtok", "set_by"):
+        assert f'name="{field}"' in html_out, field
+    # The unit is the whole trap here: cents per million, not dollars.
+    assert "CENTS per million tokens" in html_out
+    assert "from its date FORWARD" in html_out
+
+
+def test_the_compact_cost_summary_does_not_carry_the_price_form(seeded):
+    """The form is a write path; it belongs on the cost page, not on the
+    overview card where it would be clicked by accident."""
+    assert 'action="/set-token-price"' not in panels.cost_panel(Db(seeded), compact=True)
+
+
+def test_the_page_shows_the_rate_actually_in_force_not_the_newest_row(seeded):
+    """A rate dated in the future must NOT be shown as today's rate -
+    that would silently misstate what the ledger is pricing at."""
+    from catalyst.cost.overrides import set_override
+    conn = sqlite3.connect(seeded)
+    set_override(conn, "claude-sonnet-5", date.today() + timedelta(days=30),
+                 "300", "1500", set_by="a-human")
+    conn.close()
+    html_out = panels.cost_panel(Db(seeded))
+    live = html_out.split('id="cost-price-live"')[1].split("</table>")[0]
+    row = [r for r in live.split("<tr>") if "claude-sonnet-5<" in r]
+    assert len(row) == 1, live
+    assert ">200<" in row[0] and ">1000<" in row[0]   # intro rate still in force
+    assert ">300<" not in row[0] and "built-in table" in row[0]
+    # ...but the future change is visible in the history table.
+    hist = html_out.split('id="cost-price-history"')[1].split("</table>")[0]
+    assert ">300<" in hist and "a-human" in hist
+
+
+def test_a_rate_in_force_names_who_set_it(seeded):
+    from catalyst.cost.overrides import set_override
+    conn = sqlite3.connect(seeded)
+    set_override(conn, "claude-opus-5", date.today() - timedelta(days=1),
+                 "450", "2200", set_by="Billy")
+    conn.close()
+    live = panels.cost_panel(Db(seeded)).split('id="cost-price-live"')[1]
+    assert "set by Billy" in live
+    assert "$4.50" in live          # cents rendered as dollars alongside
+
+
+def test_never_overridden_says_so_rather_than_showing_an_unexplained_blank(seeded):
+    html_out = panels.cost_panel(Db(seeded))
+    assert "no rate has ever been overridden by hand" in html_out
+    assert "FROM pricing_overrides" in html_out       # the query, printed
+
+
+def test_set_token_price_endpoint_records_the_rate(seeded):
+    okay, message = server.set_token_price(seeded, {
+        "model": "claude-sonnet-5", "effective_from": "2026-09-01",
+        "input_cents_per_mtok": "300", "output_cents_per_mtok": "1500",
+        "set_by": "Billy"})
+    assert okay, message
+    conn = sqlite3.connect(seeded)
+    row = conn.execute(
+        "SELECT model, effective_from, input_cents_per_mtok, "
+        "output_cents_per_mtok, set_by FROM pricing_overrides").fetchone()
+    conn.close()
+    assert row == ("claude-sonnet-5", "2026-09-01", "300", "1500", "Billy")
+
+
+@pytest.mark.parametrize("bad, expect", [
+    ({"input_cents_per_mtok": "0"}, "greater than zero"),
+    ({"output_cents_per_mtok": "-5"}, "greater than zero"),
+    ({"set_by": "  "}, "who made it"),
+    ({"model": "gpt-9"}, "No such model"),
+    ({"effective_from": "next tuesday"}, "YYYY-MM-DD"),
+    ({"input_cents_per_mtok": "three hundred"}, "not a number"),
+])
+def test_set_token_price_refuses_bad_input_as_a_sentence(seeded, bad, expect):
+    form = {"model": "claude-sonnet-5", "effective_from": "2026-09-01",
+            "input_cents_per_mtok": "300", "output_cents_per_mtok": "1500",
+            "set_by": "Billy"}
+    form.update(bad)
+    okay, message = server.set_token_price(seeded, form)
+    assert not okay
+    assert expect in message, message
+    assert "Traceback" not in message
+    conn = sqlite3.connect(seeded)
+    count = conn.execute("SELECT COUNT(*) FROM pricing_overrides").fetchone()[0]
+    conn.close()
+    assert count == 0, "a refused rate must not reach the table"
+
+
+def test_typing_dollars_where_cents_are_wanted_is_refused(seeded):
+    """3 instead of 300 prices every later call at 1/100th and nothing on
+    the dashboard would look wrong. It has to be caught at entry."""
+    okay, message = server.set_token_price(seeded, {
+        "model": "claude-sonnet-5", "effective_from": "2026-09-01",
+        "input_cents_per_mtok": "3", "output_cents_per_mtok": "15",
+        "set_by": "Billy"})
+    assert not okay
+    assert "CENTS per MILLION tokens" in message
+    conn = sqlite3.connect(seeded)
+    assert conn.execute("SELECT COUNT(*) FROM pricing_overrides").fetchone()[0] == 0
+    conn.close()
+
+
+def test_a_genuinely_large_change_goes_through_when_confirmed(seeded):
+    okay, message = server.set_token_price(seeded, {
+        "model": "claude-sonnet-5", "effective_from": "2026-09-01",
+        "input_cents_per_mtok": "3", "output_cents_per_mtok": "15",
+        "set_by": "Billy", "allow_large_change": "1"})
+    assert okay, message
+    conn = sqlite3.connect(seeded)
+    assert conn.execute("SELECT COUNT(*) FROM pricing_overrides").fetchone()[0] == 1
+    conn.close()
+
+
+def test_an_ordinary_rate_change_needs_no_confirmation(seeded):
+    """The guard must not obstruct the change it exists to allow. On
+    2026-09-01 the built-in rate is 300/1500 (Sonnet 5's intro pricing
+    ended the day before), so this is a 20% rise on top of that - the
+    shape of every real published rate change."""
+    okay, message = server.set_token_price(seeded, {
+        "model": "claude-sonnet-5", "effective_from": "2026-09-01",
+        "input_cents_per_mtok": "360", "output_cents_per_mtok": "1800",
+        "set_by": "Billy"})
+    assert okay, message
+
+
+@pytest.mark.parametrize("effective, baseline", [
+    (date(2026, 8, 15), "200"),      # inside Sonnet 5's intro window
+    (date(2026, 9, 15), "300"),      # after it ends
+])
+def test_the_guard_measures_against_the_rate_in_force_on_the_effective_date(
+        seeded, effective, baseline):
+    """Not against today's rate. The two differ across 2026-08-31, and
+    measuring a backdated change against the wrong one would fire the
+    guard on a rate that was never in force."""
+    from catalyst.cost.overrides import set_override
+    conn = sqlite3.connect(seeded)
+    with pytest.raises(ValueError) as exc:
+        set_override(conn, "claude-sonnet-5", effective, "1", "5",
+                     set_by="Billy")
+    conn.close()
+    assert f"the {baseline} in force" in str(exc.value), str(exc.value)
 
 
 # ------------------------------------------------------------ decision trace
@@ -1066,3 +1214,360 @@ class TestValueReconciliation:
         db.close()
         assert "broker read" in html and "this dashboard" in html, (
             "each figure must be labelled with whose number it is")
+
+
+# ---------------------------------------- benchmark: too early vs broken
+
+
+def _perf_with_window(tmp_path, monkeypatch, bar_days, first_activity):
+    """A db whose only activity is one cost row on `first_activity`, and
+    a SPY cache holding exactly `bar_days`."""
+    from catalyst.storage import init_db
+
+    root = tmp_path / "bars"
+    root.mkdir(exist_ok=True)
+    if bar_days is not None:
+        lines = ["date,open,high,low,close,volume"]
+        lines += [f"{d},100,101,99,100,1000" for d in bar_days]
+        (root / "SPY.csv").write_text("\n".join(lines) + "\n")
+    monkeypatch.setenv("CATALYST_BARS", str(root))
+
+    path = str(tmp_path / "p.db")
+    conn = init_db(path)
+    conn.execute("INSERT INTO cost_events VALUES (?,?,?,?,?,?,?,?)",
+                 ("c1", "{}", "claude-sonnet-5", "scheduled", "research",
+                  "194", f"{first_activity}T14:00:00+00:00", None))
+    conn.commit()
+    conn.close()
+    return Db(path)
+
+
+def test_a_weekend_old_account_is_not_reported_as_a_broken_benchmark(
+        tmp_path, monkeypatch):
+    """The owner's case: activity began Sunday 2026-08-09, the cache is
+    full and healthy but ends Friday 2026-08-07, so the window holds no
+    trading day. That is Tuesday's problem, not a fault."""
+    db = _perf_with_window(tmp_path, monkeypatch,
+                           ["2026-08-05", "2026-08-06", "2026-08-07"],
+                           "2026-08-09")
+    perf = queries.performance(db)
+    assert perf.spy_points == []
+    assert perf.spy_window_too_short is True
+    html_out = panels.performance_panel(db, p="perf")
+    assert "No SPY comparison yet, and nothing is wrong" in html_out
+    assert "younger than one trading day" in html_out
+    assert 'id="perf-spy-missing"' not in html_out, (
+        "a healthy cache must not raise the missing-benchmark alarm")
+
+
+def test_a_genuinely_missing_cache_still_raises_the_alarm(tmp_path, monkeypatch):
+    """The distinction has to cut both ways, or it is just a softer
+    message for every failure."""
+    db = _perf_with_window(tmp_path, monkeypatch, None, "2026-08-09")
+    perf = queries.performance(db)
+    assert perf.spy_window_too_short is False
+    html_out = panels.performance_panel(db, p="perf")
+    assert 'id="perf-spy-missing"' in html_out
+    assert "SPY benchmark unavailable" in html_out
+
+
+def test_an_empty_cache_file_is_a_fault_not_a_short_window(tmp_path, monkeypatch):
+    db = _perf_with_window(tmp_path, monkeypatch, [], "2026-08-09")
+    assert queries.performance(db).spy_window_too_short is False
+
+
+def test_once_a_trading_day_lands_in_the_window_the_comparison_appears(
+        tmp_path, monkeypatch):
+    db = _perf_with_window(tmp_path, monkeypatch,
+                           ["2026-08-05", "2026-08-06", "2026-08-07"],
+                           "2026-08-07")
+    perf = queries.performance(db)
+    assert perf.spy_points, "a bar inside the window must produce a series"
+    assert perf.spy_window_too_short is False
+
+
+def test_the_overview_leads_with_the_broker_value(seeded):
+    """Owner request: the account's actual worth at Alpaca is what the
+    page is opened for, so it goes above the comparison panels."""
+    html_out = server.route_overview(Db(seeded), {})
+    assert html_out.index('id="ovval-section"') < html_out.index('id="perf-section"')
+
+
+# ------------------------------------------- decisions: simple and full
+
+
+@pytest.fixture
+def rich_decision(tmp_path):
+    """One fully-populated traded candidate: sources, a model view with
+    every field set, a risk decision with every field set, a binding
+    limit, and an evidence graph."""
+    from catalyst.storage import init_db
+
+    path = str(tmp_path / "rich.db")
+    conn = init_db(path)
+    conn.executescript(
+        (Path(__file__).resolve().parent.parent / "catalyst" / "storage"
+         / "schema_graph.sql").read_text())
+    now = datetime.now(timezone.utc)
+    iso = now.isoformat()
+    for src, sid in [("edgar", "acc-1"), ("federal_register", "fr-1")]:
+        conn.execute("INSERT INTO raw_events VALUES (?,?,?,?)", (src, sid, iso, "{}"))
+    conn.execute("INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?,?)",
+                 ("c1", "GBFH", "insider_cluster",
+                  (now + timedelta(days=9)).date().isoformat(), "confirmed",
+                  json.dumps(["acc-1", "fr-1"]), iso, "financials",
+                  json.dumps(["fin"])))
+    conn.execute("INSERT INTO research_views VALUES (?,?,?,?,?,?,?,?)",
+                 ("c1", "long", 0.74, "Cluster of open-market buys.",
+                  "A 10b5-1 plan would kill it.", 14, 0, "Not priced in."))
+    conn.execute("INSERT INTO risk_decisions VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                 ("d1", "c1", "trade", "long", "182.50", "4.1", "39.20",
+                  (now + timedelta(days=14)).date().isoformat(), "[]",
+                  json.dumps({"conviction_floor": 0.6}), iso))
+    conn.execute("INSERT INTO limit_applications VALUES (?,?,?,?,?,?)",
+                 ("d1", "max_loss_per_position", "0.12", "0.10", "hard", 1))
+    conn.execute("INSERT INTO limit_applications VALUES (?,?,?,?,?,?)",
+                 ("d1", "sector_concentration", "0.30", "0.30", "adaptive", 0))
+    for eid, kind, key, name in [
+            ("e1", "company", "company:GBFH", "GBFH"),
+            ("e2", "person", "person:restrepo", "J. Restrepo, CFO"),
+            ("e3", "event", "event:q3", "Q3 earnings, 14 Sep")]:
+        conn.execute("INSERT INTO graph_entities VALUES (?,?,?,?,?)",
+                     (eid, kind, key, name, iso))
+    for i, (s_, pred, o_) in enumerate([("e2", "bought shares of", "e1"),
+                                        ("e1", "reports on", "e3")]):
+        conn.execute("INSERT INTO graph_assertions VALUES (?,?,?,?,?,?,?,?,?)",
+                     (f"a{i}", s_, pred, o_, None, "edgar_filing",
+                      "SEC Form 4", iso, "primary_document"))
+    conn.commit()
+    conn.close()
+    return path
+
+
+@pytest.mark.parametrize("must_appear", [
+    "GBFH",                     # the candidate
+    "edgar",                    # a source it saw
+    "federal_register",
+    "insider cluster",          # the catalyst type
+    "J. Restrepo, CFO",         # an evidence-graph neighbour
+    "Q3 earnings, 14 Sep",
+    "long",                     # the model's direction
+    "conviction 0.74",
+    "hold 14 days",             # expected_holding_days
+    "not priced in",
+    "trade",                    # what the code did
+    "$182.50",
+    "stop 39.20",
+    "max_loss_per_position",    # the limit that BOUND
+])
+def test_every_recorded_field_reaches_the_spider(rich_decision, must_appear):
+    """Each of these is a real column. A wrong column name reads as None
+    and drops the fact silently - which is how two of them were missing
+    the first time this panel was written."""
+    html_out = panels.trace_simple(Db(rich_decision), "c1", p="trs")
+    assert must_appear in html_out, f"{must_appear!r} never reached the page"
+
+
+def test_a_limit_that_did_not_bind_is_not_drawn_as_though_it_did(rich_decision):
+    html_out = panels.trace_simple(Db(rich_decision), "c1", p="trs")
+    assert "sector_concentration" not in html_out
+
+
+def test_the_simple_view_leads_with_a_sentence_not_a_table(rich_decision):
+    html_out = panels.trace_simple(Db(rich_decision), "c1", p="trs")
+    assert "The bot traded GBFH" in html_out
+    assert "the risk engine - not the model - chose a size" in html_out
+    assert html_out.index("trs-story") < html_out.index("trs-spider")
+    assert "<table" not in html_out, "the simple view is the read, not the record"
+
+
+def test_the_spider_groups_the_three_stages_of_the_decision(rich_decision):
+    html_out = panels.trace_simple(Db(rich_decision), "c1", p="trs")
+    for arm in ("What it saw", "What it concluded", "What the code did"):
+        assert arm in html_out, arm
+
+
+def test_identity_is_never_colour_alone(rich_decision):
+    """A light-mode slot is under 3:1 on the surface, so the relief rule
+    applies: every arm is named in text as well as coloured."""
+    html_out = panels.trace_simple(Db(rich_decision), "c1", p="trs")
+    svg = html_out[html_out.index("<svg"):html_out.index("</svg>")]
+    for arm in ("What it saw", "What it concluded", "What the code did"):
+        assert arm in svg, f"{arm} is not labelled inside the diagram"
+
+
+def test_both_views_are_reachable_from_each_other(rich_decision):
+    simple = panels.trace_simple(Db(rich_decision), "c1", p="trs")
+    full = panels.trace_page(Db(rich_decision), "c1", p="tr")
+    assert "view=full" in simple
+    assert "view=simple" in full
+
+
+def test_the_decision_route_defaults_to_simple(rich_decision):
+    db = Db(rich_decision)
+    assert 'id="trs-spider"' in server.route_decision(db, {"candidate_id": ["c1"]})
+    full = server.route_decision(db, {"candidate_id": ["c1"], "view": ["full"]})
+    assert 'id="trs-spider"' not in full
+    assert "1. What the model saw" in full or 'id="tr-tiles"' in full
+
+
+def test_a_candidate_with_nothing_recorded_says_so(bare, tmp_path):
+    from catalyst.storage import init_db
+    path = str(tmp_path / "thin.db")
+    conn = init_db(path)
+    conn.execute("INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?,?)",
+                 ("c9", "NUL", "unknown", "2026-09-01", "estimated", "[]",
+                  _iso(date.today()), "unknown", "[]"))
+    conn.commit()
+    conn.close()
+    html_out = panels.trace_simple(Db(path), "c9", p="trs")
+    # The catalyst type alone is still something, so the diagram draws;
+    # what must never happen is a crash or a blank panel.
+    assert "trs-section" in html_out
+    assert "NUL" in html_out
+
+
+# --------------------------------------------------------- the brain map
+
+
+@pytest.fixture
+def wired(tmp_path):
+    """A database with a real chain: two sources feed a candidate, the
+    candidate carries an evidence graph, a model view, a risk decision
+    and an outcome."""
+    from catalyst.storage import init_db
+
+    path = str(tmp_path / "wired.db")
+    conn = init_db(path)
+    conn.executescript(
+        (Path(__file__).resolve().parent.parent / "catalyst" / "storage"
+         / "schema_graph.sql").read_text())
+    iso = datetime.now(timezone.utc).isoformat()
+    for src, sid in [("edgar", "e-1"), ("federal_register", "f-1")]:
+        conn.execute("INSERT INTO raw_events VALUES (?,?,?,?)", (src, sid, iso, "{}"))
+    conn.execute("INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?,?)",
+                 ("c1", "GBFH", "insider_cluster", "2026-09-01", "confirmed",
+                  # "ghost-1" is named by the candidate but was never
+                  # stored as a raw event - it must produce NO node and
+                  # NO edge, or the map claims a source the bot cannot
+                  # show you.
+                  json.dumps(["e-1", "f-1", "ghost-1"]), iso, "financials", "[]"))
+    conn.execute("INSERT INTO research_views VALUES (?,?,?,?,?,?,?,?)",
+                 ("c1", "long", 0.74, "t", "i", 14, 0, "r"))
+    conn.execute("INSERT INTO risk_decisions VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                 ("d1", "c1", "trade", "long", "180.00", "4.0", "39.00",
+                  "2026-09-15", "[]", "{}", iso))
+    conn.execute("INSERT INTO positions VALUES (?,?,?,?,?,?,?)",
+                 ("p1", "GBFH", "[]", "s1", iso, "2026-09-15", "closed"))
+    conn.execute("INSERT INTO closed_trades VALUES (?,?,?,?,?,?,?,?,?)",
+                 ("p1", "paper", "42.71", "45.02", "target_reached",
+                  1000, 12, 4, iso))
+    for eid, kind, key, name in [("e1", "company", "company:GBFH", "GBFH"),
+                                 ("e2", "person", "person:r", "J. Restrepo, CFO")]:
+        conn.execute("INSERT INTO graph_entities VALUES (?,?,?,?,?)",
+                     (eid, kind, key, name, iso))
+    conn.execute("INSERT INTO graph_assertions VALUES (?,?,?,?,?,?,?,?,?)",
+                 ("a1", "e2", "bought shares of", "e1", None, "edgar_filing",
+                  "SEC Form 4", iso, "primary_document"))
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_the_brain_draws_the_whole_chain(wired):
+    b = queries.brain(Db(wired))
+    names = [label for label, _ in b.layers]
+    assert names == ["Sources", "Candidates", "What it linked", "Model view",
+                     "Risk engine", "Outcome"]
+    assert b.edge_count >= 5
+    html_out = panels.brain_panel(Db(wired), p="brain")
+    for expect in ("edgar", "federal register", "GBFH", "J. Restrepo, CFO",
+                   "long", "trade", "target reached"):
+        assert expect in html_out, expect
+
+
+def test_an_entity_is_labelled_by_its_NAME_not_its_key(wired):
+    """The key is "person:r"; the name is "J. Restrepo, CFO". Drawing the
+    key shows an id where a name belongs, which is not evidence anyone
+    can check."""
+    html_out = panels.brain_panel(Db(wired), p="brain")
+    svg = html_out[html_out.index("<svg"):html_out.index("</svg>")]
+    assert "J. Restrepo, CFO" in svg
+    assert ">person:r<" not in svg
+
+
+def test_every_drawn_edge_has_both_endpoints_on_the_map(wired):
+    """An edge to a node that was never drawn would be a line into empty
+    space - and worse, a link the reader cannot check."""
+    b = queries.brain(Db(wired))
+    drawn = {nid for _, nodes in b.layers for nid, _, _ in nodes}
+    for src, dst, _, _ in b.edges:
+        assert src in drawn or dst in drawn, f"{src}->{dst} touches no node"
+
+
+def test_the_brain_invents_no_links(wired):
+    """Every edge must trace to a row. The exact count is checked because
+    a layout that 'looks denser' by adding connectors is the one failure
+    this picture must never have."""
+    b = queries.brain(Db(wired))
+    sources = [s for s, _, _, _ in b.edges if s.startswith("src:")]
+    assert len(sources) == 2, (
+        "one edge per source event that was actually STORED - the "
+        f"candidate names three, one of which does not exist: {sources}")
+    assert not any("ghost" in s for s in sources)
+    views = [e for e in b.edges if e[1].startswith("view:")]
+    assert len(views) == 1
+    outcomes = [e for e in b.edges if e[1].startswith("out:")]
+    assert len(outcomes) == 1
+
+
+def test_an_empty_database_says_so_and_prints_its_queries(bare):
+    html_out = panels.brain_panel(Db(bare), p="brain")
+    assert "Nothing is wired up yet" in html_out
+    assert "FROM candidates" in html_out, "the query behind the emptiness"
+    assert "<svg" not in html_out, "nothing to draw means nothing drawn"
+
+
+def test_the_brain_route_is_in_the_nav_and_renders(wired):
+    from catalyst.dashboard.render import NAV
+    assert any(href == "/brain" for href, _ in NAV)
+    assert 'id="brain-map"' in server.route_brain(Db(wired), {})
+
+
+# ------------------------------------------------------ refusals, simple
+
+
+def test_refusals_simple_maps_reason_to_candidate_to_outcome(seeded):
+    html_out = panels.refusals_simple(Db(seeded), p="refs")
+    assert 'id="refs-map"' in html_out
+    svg = html_out[html_out.index("<svg"):html_out.index("</svg>")]
+    assert "adverse gap exceeds max loss" in svg   # the reason
+    assert "BIOX" in svg                            # the candidate
+    assert "went UP after refusal" in svg           # what it then did
+
+
+def test_an_unscored_refusal_is_never_counted_as_an_outcome(seeded, tmp_path):
+    """Scoring is the whole point of the tracker; an unscored refusal
+    must read as unfinished business, not as a result."""
+    conn = sqlite3.connect(seeded)
+    conn.execute("UPDATE refusals SET scored_at = NULL, outcome_return = NULL")
+    conn.commit()
+    conn.close()
+    html_out = panels.refusals_simple(Db(seeded), p="refs")
+    svg = html_out[html_out.index("<svg"):html_out.index("</svg>")]
+    assert "not scored yet" in svg
+    assert "went UP after refusal" not in svg, (
+        "an unscored refusal was drawn as though its outcome were known")
+    assert "none scored yet" in html_out
+
+
+def test_both_refusal_views_reach_each_other(seeded):
+    simple = panels.refusals_simple(Db(seeded), p="refs")
+    full = panels.refusals_panel(Db(seeded), p="ref")
+    assert "view=full" in simple and "view=simple" in full
+
+
+def test_the_refusals_route_defaults_to_the_map(seeded):
+    db = Db(seeded)
+    assert 'id="refs-map"' in server.route_refusals(db, {})
+    assert 'id="ref-table"' in server.route_refusals(db, {"view": ["full"]})

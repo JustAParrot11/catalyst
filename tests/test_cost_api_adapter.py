@@ -470,3 +470,218 @@ class TestLiveUsageShape2026_08_10:
         assert conn.execute("SELECT priced_cents FROM cost_events"
                             ).fetchone()[0] is None
         conn.close()
+
+
+class TestPricedAgainstTheRealBill:
+    """The whole ledger rests on one empirical claim: that our arithmetic
+    reproduces what Anthropic actually charges. These figures are a
+    verbatim capture of 2026-08-07 from the live Cost and Usage APIs,
+    frozen here so the claim is re-checked on every run without a
+    socket.
+
+    The capture settles the cents-vs-dollars question on its own. Web
+    search is billed at $10 per 1,000 queries, so 8 queries is 8 cents
+    and $0.08. The cost report says "8". Nothing but cents fits.
+    """
+
+    # /v1/organizations/usage_report/messages, 2026-08-07, verbatim
+    REAL_VOLUMES = {
+        "input_tokens": 4375,                    # "uncached_input_tokens"
+        "output_tokens": 11946,
+        "cache_read_input_tokens": 117725,
+        "cache_creation_input_tokens": 109253,
+        "cache_creation": {"ephemeral_1h_input_tokens": 0,
+                           "ephemeral_5m_input_tokens": 109253},
+        "server_tool_use": {"web_search_requests": 8},
+        "service_tier": "standard",
+    }
+
+    # /v1/organizations/cost_report?group_by[]=description, same day.
+    # Amounts verbatim, in cents.
+    REAL_BILL_CENTS = {
+        "Claude Sonnet 5 Usage - Input Tokens": Decimal("0.875"),
+        "Claude Sonnet 5 Usage - Input Tokens, Cache Hit": Decimal("2.3545"),
+        "Claude Sonnet 5 Usage - Input Tokens, Cache Write": Decimal("27.31325"),
+        "Claude Sonnet 5 Usage - Output Tokens": Decimal("11.946"),
+        "Web Search Usage": Decimal("8"),
+    }
+    REAL_BILL_TOTAL_CENTS = Decimal("50.48875")   # $0.5049
+
+    def test_our_price_equals_the_real_bill_to_the_cent(self):
+        from datetime import date
+
+        from catalyst.cost.tracker import make_usage_components, price
+
+        ours = price(make_usage_components(dict(self.REAL_VOLUMES)),
+                     "claude-sonnet-5", on_date=date(2026, 8, 7))
+        assert sum(self.REAL_BILL_CENTS.values()) == self.REAL_BILL_TOTAL_CENTS
+        assert ours == self.REAL_BILL_TOTAL_CENTS, (
+            f"our arithmetic says {ours} cents, Anthropic charged "
+            f"{self.REAL_BILL_TOTAL_CENTS}")
+
+    def test_the_web_search_line_proves_the_unit_is_cents(self):
+        """8 queries at $10/1,000 is $0.08. Billed as "8". If the field
+        were dollars this line would be 800 queries in a day the usage
+        report says had 8."""
+        queries = self.REAL_VOLUMES["server_tool_use"]["web_search_requests"]
+        dollars_per_query = Decimal("10") / Decimal("1000")
+        assert dollars_per_query * queries * 100 == self.REAL_BILL_CENTS[
+            "Web Search Usage"]
+
+    def test_the_intro_rate_is_what_reproduces_the_bill_not_the_standard_one(self):
+        """2026-08-07 sits inside Sonnet 5's introductory window. Pricing
+        it at the standard $3/$15 misses by half - so this doubles as a
+        live check that rates_for()'s date window is right."""
+        from datetime import date
+
+        from catalyst.cost.pricing import rates_for
+        from catalyst.cost.tracker import make_usage_components, price
+
+        assert rates_for("claude-sonnet-5", date(2026, 8, 7)) == (
+            Decimal("200"), Decimal("1000"))
+        usage = make_usage_components(dict(self.REAL_VOLUMES))
+        standard = price(usage, "claude-sonnet-5",
+                         rates=(Decimal("300"), Decimal("1500")))
+        assert standard != self.REAL_BILL_TOTAL_CENTS
+        assert price(usage, "claude-sonnet-5", on_date=date(2026, 8, 7)) == \
+            self.REAL_BILL_TOTAL_CENTS
+
+    def test_dropping_cache_tokens_understates_the_bill_by_more_than_half(self):
+        """TRAPS.md's headline claim, measured against a real bill rather
+        than asserted."""
+        from datetime import date
+
+        from catalyst.cost.tracker import make_usage_components, price
+
+        no_cache = dict(self.REAL_VOLUMES)
+        no_cache["cache_read_input_tokens"] = 0
+        no_cache["cache_creation_input_tokens"] = 0
+        no_cache["cache_creation"] = {"ephemeral_1h_input_tokens": 0,
+                                      "ephemeral_5m_input_tokens": 0}
+        understated = price(make_usage_components(no_cache),
+                            "claude-sonnet-5", on_date=date(2026, 8, 7))
+        missed = self.REAL_BILL_TOTAL_CENTS - understated
+        assert missed / self.REAL_BILL_TOTAL_CENTS > Decimal("0.5")
+
+
+# The verbatim grouped payload for 2026-08-07, captured live. Used to
+# drive the dashboard breakdown offline.
+REAL_GROUPED_PAYLOAD = {
+    "data": [{
+        "starting_at": "2026-08-07T00:00:00Z",
+        "ending_at": "2026-08-08T00:00:00Z",
+        "results": [
+            {"currency": "USD", "amount": "0.875", "workspace_id": None,
+             "description": "Claude Sonnet 5 Usage - Input Tokens",
+             "cost_type": "tokens", "context_window": "0-200k",
+             "model": "claude-sonnet-5", "service_tier": "standard",
+             "token_type": "uncached_input_tokens", "inference_geo": "global"},
+            {"currency": "USD", "amount": "2.3545", "workspace_id": None,
+             "description": "Claude Sonnet 5 Usage - Input Tokens, Cache Hit",
+             "cost_type": "tokens", "context_window": "0-200k",
+             "model": "claude-sonnet-5", "service_tier": "standard",
+             "token_type": "cache_read_input_tokens", "inference_geo": "global"},
+            {"currency": "USD", "amount": "27.31325", "workspace_id": None,
+             "description": "Claude Sonnet 5 Usage - Input Tokens, Cache Write",
+             "cost_type": "tokens", "context_window": "0-200k",
+             "model": "claude-sonnet-5", "service_tier": "standard",
+             "token_type": "cache_creation.ephemeral_5m_input_tokens",
+             "inference_geo": "global"},
+            {"currency": "USD", "amount": "11.946", "workspace_id": None,
+             "description": "Claude Sonnet 5 Usage - Output Tokens",
+             "cost_type": "tokens", "context_window": "0-200k",
+             "model": "claude-sonnet-5", "service_tier": "standard",
+             "token_type": "output_tokens", "inference_geo": "global"},
+            {"currency": "USD", "amount": "8", "workspace_id": None,
+             "description": "Web Search Usage", "cost_type": "web_search",
+             "context_window": None, "model": None, "service_tier": None,
+             "token_type": None, "inference_geo": None},
+        ]}],
+    "has_more": False, "next_page": None,
+}
+
+
+class TestTheBillIsItemised:
+    def test_the_fetch_asks_for_the_description_breakdown(self):
+        seen = {}
+        fetch_cost_api_day(date(2026, 8, 7), admin_key="k",
+                           http_get=http_get_returning(REAL_GROUPED_PAYLOAD,
+                                                       capture=seen))
+        assert seen["params"]["group_by[]"] == "description"
+        assert seen["params"]["limit"] == PAGE_LIMIT   # still explicit
+
+    def test_grouping_does_not_change_the_total(self):
+        """Verified live against the ungrouped call on five separate days
+        (2026-08-05..09) before being adopted; frozen here so a future
+        change to the params cannot quietly alter what is reconciled."""
+        page = fetch_cost_api_day(
+            date(2026, 8, 7), admin_key="k",
+            http_get=http_get_returning(REAL_GROUPED_PAYLOAD))
+        assert sum(Decimal(r["amount"]) for r in page.records) == \
+            Decimal("50.48875")
+        assert len(page.records) == 5
+
+
+class TestTheDashboardShowsWhereTheMoneyWent:
+    def _rendered(self, tmp_path):
+        from catalyst.dashboard.db import Db
+        from catalyst.dashboard import panels
+        from catalyst.cost.tracker import record_usage, reconcile_day
+
+        dbf = str(tmp_path / "c.db")
+        conn = sqlite3.connect(dbf)
+        conn.executescript(open("catalyst/storage/schema.sql").read())
+        record_usage(dict(TestPricedAgainstTheRealBill.REAL_VOLUMES),
+                     "claude-sonnet-5", "scheduled", "research", conn)
+        conn.execute("UPDATE cost_events SET priced_at = "
+                     "'2026-08-07T12:00:00+00:00'")
+        conn.commit()
+        reconcile_day(date(2026, 8, 7), conn,
+                      lambda d: fetch_cost_api_day(
+                          d, admin_key="k",
+                          http_get=http_get_returning(REAL_GROUPED_PAYLOAD)))
+        conn.close()
+        return panels.cost_panel(Db(dbf))
+
+    def test_each_billed_line_appears_with_its_share(self, tmp_path):
+        html = self._rendered(tmp_path)
+        assert "Where the billed money went" in html
+        for label in ("Cache Write", "Cache Hit", "Output Tokens",
+                      "Web Search Usage"):
+            assert label in html, label
+        # cache write is 27.31325 of 50.48875 = 54.1%
+        assert "54.1%" in html
+
+    def test_the_lines_are_ordered_biggest_first(self, tmp_path):
+        html = self._rendered(tmp_path)
+        seg = html.split('id="cost-bill-breakdown"')[1].split("</table>")[0]
+        assert seg.index("Cache Write") < seg.index("Output Tokens") \
+            < seg.index("Web Search") < seg.index("Cache Hit")
+
+    def test_the_breakdown_is_labelled_billed_not_estimated(self, tmp_path):
+        """It comes from Anthropic, unlike everything above it on the
+        page. Mislabelling which numbers are real is the failure this
+        dashboard exists to prevent."""
+        html = self._rendered(tmp_path)
+        seg = html[html.find("Where the billed money went"):]
+        assert "BILLED figures, itemised by Anthropic" in seg
+
+    def test_an_unreadable_amount_is_named_not_silently_dropped(self, tmp_path):
+        from catalyst.dashboard import panels
+        from catalyst.dashboard.db import QueryResult
+
+        broken = json.loads(json.dumps(REAL_GROUPED_PAYLOAD))
+        broken["data"][0]["results"][0]["amount"] = "not-a-number"
+        rows = [{"target_date": "2026-08-07",
+                 "api_raw_response": json.dumps(broken)}]
+        html = panels._billed_breakdown(
+            QueryResult("sql", (), rows, None), "cost")
+        assert "could not be read and are NOT in the total" in html
+        assert "2026-08-07" in html
+
+    def test_no_reconciled_day_renders_nothing_rather_than_a_bare_zero(self):
+        from catalyst.dashboard import panels
+        from catalyst.dashboard.db import QueryResult
+
+        assert panels._billed_breakdown(
+            QueryResult("sql", (), [], None), "cost") == ""

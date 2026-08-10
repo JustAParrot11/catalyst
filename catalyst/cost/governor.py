@@ -75,10 +75,13 @@ def authorize(
     owner_monthly_cap_cents: Decimal | None = None,
 ) -> GovernorDecision:
     """owner_monthly_cap_cents is the number the owner typed into the
-    setup page ("the bot will not go past it"). It can only ever LOWER
-    the scheduled cap - an owner figure above the hard clamp changes
-    nothing (stress stage-8 E1: the field was collected and read by
-    nobody, which made the setup page's promise false)."""
+    setup page ("the bot will not go past it"). It REPLACES the base
+    cap, upward or downward, and is then clamped to OWNER_MAX_CAP_CENTS
+    - a person choosing to spend more is a decision, where a system
+    paying itself more out of its own profit is a ratchet, so only the
+    first is allowed above the base. (Stress stage-8 E1: the field was
+    collected and read by nobody, which made the setup page's promise
+    false. It is read here.)"""
     as_of = as_of or datetime.now(timezone.utc).date()
     spent = month_to_date_cents(estimate.kind, conn, as_of)
 

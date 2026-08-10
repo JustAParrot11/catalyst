@@ -46,6 +46,11 @@ PHASE_NUM=0
 PHASE_NAME="starting up"
 OLD_COMMIT=""
 NEW_COMMIT=""
+# set -u is on: these are read in the final report whether or not the
+# fetch phase ran, so they must exist before it.
+NOTHING_FETCHED=0
+UPGRADE_BRANCH="unknown"
+NEW_BUILD_HASH="unknown"
 BACKUP_MADE=0
 
 # --------------------------------------------------------------------------
@@ -379,10 +384,12 @@ if [ "${CATALYST_SKIP_PULL}" -eq 0 ]; then
          "Fix the connection and run the upgrade again."
   fi
   NEW_COMMIT="$(git -C "${REPO_DIR}" rev-parse HEAD)"
+  UPGRADE_BRANCH="$(git -C "${REPO_DIR}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
   if [ "${NEW_COMMIT}" = "${OLD_COMMIT}" ]; then
-    note "there is no new version - you already have the latest"
+    NOTHING_FETCHED=1
+    note "no new version on branch '${UPGRADE_BRANCH}' - already at ${NEW_COMMIT:0:12}"
   else
-    ok "new version fetched (${NEW_COMMIT:0:12})"
+    ok "new version fetched (${OLD_COMMIT:0:12} -> ${NEW_COMMIT:0:12} on '${UPGRADE_BRANCH}')"
   fi
 else
   note "skipped, as asked"
@@ -396,6 +403,7 @@ if ! run "${VENV_PY}" -m pip install --quiet "${REPO_DIR}[dev]"; then
   rollback "The new version could not be installed." "$(log_tail)"
 fi
 NEW_VERSION="$("${VENV_PY}" -c 'import catalyst; print(catalyst.__version__)' 2>>"${LOG_FILE}" || echo unknown)"
+NEW_BUILD_HASH="$("${VENV_PY}" -c 'from catalyst.dashboard.build import BUILD_HASH; print(BUILD_HASH)' 2>>"${LOG_FILE}" || echo unknown)"
 if [ "${NEW_VERSION}" = "unknown" ]; then
   rollback "The new version installed, but Catalyst will not even start up." "$(log_tail)"
 fi
@@ -476,10 +484,35 @@ printf ' Upgrade complete.\n'
 printf '================================================================\n\n'
 printf '   version before:  %s\n' "${OLD_VERSION}"
 printf '   version now:     %s\n' "${NEW_VERSION}"
+printf '   code before:     %s\n' "${OLD_COMMIT:0:12}"
+printf '   code now:        %s  (branch %s)\n' "${NEW_COMMIT:0:12}" "${UPGRADE_BRANCH}"
+printf '   dashboard build: %s\n' "${NEW_BUILD_HASH}"
 printf '   tests:           all passed\n'
 printf '   backup kept at:  %s\n\n' "${BACKUP_PATH}"
-printf ' Your database, your saved keys and any open positions carried\n'
-printf ' straight over. There is nothing else to do.\n\n'
+
+# The version string is hand-maintained and can sit still across many
+# real changes, so it must never be the only thing reported. The COMMIT
+# always moves when the code does - and when it has not moved, saying
+# "Upgrade complete" is a lie the owner then spends an evening chasing
+# through browser caches (owner-reported 2026-08-10).
+if [ "${NOTHING_FETCHED}" -eq 1 ]; then
+  printf ' NOTHING CHANGED. There was no new version to fetch on branch\n'
+  printf " '%s', so the code you are running is exactly what\n" "${UPGRADE_BRANCH}"
+  printf ' you were running before. That is not a failure - it means the\n'
+  printf ' changes you are expecting have not been published to that\n'
+  printf ' branch yet.\n\n'
+  printf ' If you were told a change had shipped, ask whoever told you\n'
+  printf ' which branch it went to. To see what this machine is following:\n'
+  printf '   git -C %s status -sb\n\n' "${REPO_DIR}"
+else
+  printf ' Your database, your saved keys and any open positions carried\n'
+  printf ' straight over. There is nothing else to do.\n\n'
+  printf ' If the pages still look the same, compare the build above with\n'
+  printf ' the one printed at the bottom of the dashboard sidebar. If they\n'
+  printf ' match, you are seeing the new version and the change is\n'
+  printf ' somewhere else. If they differ, the browser is showing a cached\n'
+  printf ' page.\n\n'
+fi
 printf ' If anything looks wrong later, the backup above is a complete\n'
 printf ' copy of how things stood before this upgrade, and the folder\n'
 printf ' contains the exact instructions for putting it back.\n'

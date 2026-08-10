@@ -25,6 +25,7 @@ from catalyst.dashboard.render import (
     esc,
     json_pretty,
     meter,
+    note,
     ok,
     pill,
     pre,
@@ -59,8 +60,13 @@ def performance_panel(db: Db, p: str = "perf") -> str:
         )
         bot_text = (f"bot index {perf.bot_index:.2f} "
                     f"(= {dollars(perf.net_equity_cents)} on a $1,000 start)")
-        spy_text = (f"SPY index {perf.spy_index:.2f}" if perf.spy_index is not None
-                    else "SPY index unavailable, see the benchmark note below")
+        if perf.spy_index is not None:
+            spy_text = f"SPY index {perf.spy_index:.2f}"
+        elif perf.spy_window_too_short:
+            spy_text = ("no SPY comparison yet - the account is younger than "
+                        "one trading day")
+        else:
+            spy_text = "SPY index unavailable, see the benchmark note below"
         out.append(prov(f"{bot_text} vs {spy_text}."))
     else:
         out.append(
@@ -77,7 +83,9 @@ def performance_panel(db: Db, p: str = "perf") -> str:
         # `(None or 0) >= 0` read as "ahead of SPY" and wore a green
         # badge beside the word "n/a" (caught by rendering it).
         if excess_v is None:
-            state, word = "idle", "no benchmark to compare against"
+            state, word = "idle", ("too early to compare - needs a trading day"
+                                   if perf.spy_window_too_short
+                                   else "no benchmark to compare against")
         elif excess_v >= 0:
             state, word = "good", "ahead of SPY"
         else:
@@ -201,12 +209,29 @@ def performance_panel(db: Db, p: str = "perf") -> str:
             "not - a like-for-like exposure-matched comparison needs a daily "
             "position-value series the schema does not record yet."
         ))
+    elif perf.spy_window_too_short:
+        # Healthy cache, window shorter than one trading day. An alarm
+        # here taught the owner to distrust a working benchmark.
+        out.append(note(
+            f'<b id="{p}-spy-early">No SPY comparison yet, and nothing is '
+            "wrong.</b> The benchmark cache is healthy - "
+            f"{perf.spy_rows} daily closes are loaded from "
+            f"<code>{esc(perf.spy_source or 'the local bar cache')}</code> - but "
+            f"the bot's own history so far ({esc(perf.start_day)} to "
+            f"{esc(perf.end_day)}) does not yet contain a completed trading "
+            "day to index against. A weekend or a first Monday looks exactly "
+            "like this. It fills in on its own once the market has closed on "
+            "a day the bot was running. Raw reason: "
+            f"<code>{esc(perf.spy_error or 'unknown')}</code>."
+        ))
     else:
         out.append(alarm(
             f'<b id="{p}-spy-missing">SPY benchmark unavailable.</b> source tried: '
             f"<code>{esc(perf.spy_source or 'local bar cache')}</code>; rows usable: "
             f"{perf.spy_rows}. Raw reason: <code>{esc(perf.spy_error or 'unknown')}</code>. "
-            "This is why the excess figure above reads unavailable rather than 0."
+            "This is why the excess figure above reads unavailable rather than 0. "
+            "The bot refreshes this cache once a day from Alpaca; if this "
+            "persists, the Maintenance page shows whether Alpaca is reachable."
         ))
     out.append(prov(
         "Missing on purpose rather than invented: the T-bill comparison the brief "
@@ -590,6 +615,8 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
          details(f"{p}-recon-raw-{i}", "raw payload", pre(json_pretty(r["api_raw_response"])))]
         for i, r in enumerate(c.reconciliation_q.rows)
     ]
+    out.append(_billed_breakdown(c.reconciliation_q, p))
+
     out.append("<h3>Reconciliation history (local ledger vs Cost API, one closed day each)</h3>")
     if recon_rows:
         out.append(table(
@@ -622,7 +649,175 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
             f"{p}-empty-governor", c.governor_q,
             meaning="the governor has never been asked to authorize anything",
         ))
+
+    out.append(_token_price_editor(db, p, c.as_of))
     return section(f"{p}-section", "Cost, with provenance on every number", "".join(out))
+
+
+def _billed_breakdown(recon_q, p: str) -> str:
+    """Where the money actually went, from Anthropic's own itemisation.
+
+    The Cost API is asked to group by description, so the raw response
+    already stored beside each reconciliation carries the bill line by
+    line. That answers a question the totals cannot: on 2026-08-07 cache
+    WRITES were 54% of the bill, which is a tuning target and is
+    invisible in a single "$0.50" figure.
+
+    Read from the stored payload, never re-fetched - this panel cannot
+    spend money or disagree with what was reconciled.
+    """
+    if not recon_q or not recon_q.rows:
+        return ""
+    from collections import OrderedDict
+    lines: "OrderedDict[str, Decimal]" = OrderedDict()
+    total = Decimal("0")
+    days = 0
+    unreadable = []
+    for r in recon_q.rows:
+        payload = jload(r["api_raw_response"], None)
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            unreadable.append(r["target_date"])
+            continue
+        days += 1
+        for bucket in payload["data"]:
+            for rec in (bucket or {}).get("results") or []:
+                label = str(rec.get("description") or "(not itemised)")
+                try:
+                    amount = Decimal(str(rec.get("amount")))
+                except Exception:  # noqa: BLE001 - shown, never silently zeroed
+                    unreadable.append(f"{r['target_date']}:{label}")
+                    continue
+                lines[label] = lines.get(label, Decimal("0")) + amount
+                total += amount
+    if not lines or total <= 0:
+        return ""
+    ordered = sorted(lines.items(), key=lambda kv: kv[1], reverse=True)
+    rows = [[esc(label), dollars(amount),
+             f"{(amount / total * 100):.1f}%",
+             meter(f"{p}-bill-{i}", float(amount), float(total))]
+            for i, (label, amount) in enumerate(ordered)]
+    out = [f"<h3>Where the billed money went, across {days} reconciled "
+           "day(s)</h3>",
+           table(f"{p}-bill-breakdown",
+                 ["line, as Anthropic names it", "billed", "share", ""],
+                 rows, numeric_cols={1, 2})]
+    out.append(prov(
+        f"BILLED figures, itemised by Anthropic and totalling "
+        f"{dollars(total)} across {days} closed day(s). Read from the raw "
+        "payload stored at reconciliation time, not re-fetched - this table "
+        "cannot disagree with the reconciliation above it. Cache WRITES are "
+        "charged at 1.25x the input rate and cache READS at 0.1x, so a large "
+        "cache-write share means context is being rebuilt rather than reused."))
+    if unreadable:
+        out.append(alarm(
+            f'<b id="{p}-bill-unreadable">{len(unreadable)} bill line(s) '
+            "could not be read and are NOT in the total above:</b> "
+            + esc(", ".join(str(u) for u in unreadable[:10]))))
+    return "".join(out)
+
+
+def _token_price_editor(db: Db, p: str, as_of) -> str:
+    """Owner-entered token rates, date-effective and append-only.
+
+    Published rates change - Sonnet 5's introductory pricing ends
+    2026-08-31 - and the alternative to this form is editing pricing.py
+    and redeploying, which the owner should never be asked to do. The
+    three properties that matter are enforced in cost/overrides.py, not
+    here: effective-from rather than retroactive, append-only, and a
+    refusal of any zero or negative rate.
+    """
+    from catalyst.cost import overrides as _ovr
+    from catalyst.cost.pricing import MODEL_RATES_CENTS_PER_MTOK
+
+    out: list[str] = ["<h3>Token prices &mdash; what the ledger prices at</h3>"]
+
+    # What is in force today, per model, so the form has a baseline to
+    # correct rather than a blank box.
+    live_rows = []
+    for m in sorted(MODEL_RATES_CENTS_PER_MTOK):
+        try:
+            if db.conn is not None:
+                inp, outp = _ovr.rates_for_on(db.conn, m, as_of)
+            else:
+                from catalyst.cost.pricing import rates_for
+                inp, outp = rates_for(m, as_of)
+            source = "built-in table"
+            if db.conn is not None:
+                hit = db.q(
+                    "SELECT effective_from, set_by FROM pricing_overrides "
+                    "WHERE model = ? AND effective_from <= ? "
+                    "ORDER BY effective_from DESC, set_at DESC LIMIT 1",
+                    (m, as_of.isoformat()))
+                if hit.rows:
+                    source = (f"set by {hit.rows[0]['set_by']}, effective "
+                              f"{hit.rows[0]['effective_from']}")
+            live_rows.append([esc(m), f"{inp}", f"{outp}",
+                              f"${Decimal(inp) / 100:.2f}",
+                              f"${Decimal(outp) / 100:.2f}", esc(source)])
+        except Exception as exc:      # a pricing failure must be visible
+            live_rows.append([esc(m), "-", "-", "-", "-",
+                              esc(f"{type(exc).__name__}: {exc}")])
+    out.append(table(
+        f"{p}-price-live",
+        ["model", "input c/MTok", "output c/MTok", "input $/M", "output $/M",
+         "where this rate came from"],
+        live_rows, numeric_cols={1, 2, 3, 4}))
+
+    today = as_of.isoformat()
+    model_opts = "".join(
+        f'<option value="{esc(m)}"'
+        + (" selected" if m == "claude-sonnet-5" else "")
+        + f">{esc(m)}</option>"
+        for m in sorted(MODEL_RATES_CENTS_PER_MTOK))
+    out.append(
+        f'<form class="inline" id="{p}-price-form" method="post" '
+        'action="/set-token-price">'
+        f'<label class="prov">model <select name="model">{model_opts}</select>'
+        "</label> "
+        '<label class="prov">in force from <input type="date" '
+        f'name="effective_from" value="{esc(today)}" required></label> '
+        '<label class="prov">input cents per million tokens '
+        '<input type="number" step="0.01" min="0.01" '
+        'name="input_cents_per_mtok" required></label> '
+        '<label class="prov">output cents per million tokens '
+        '<input type="number" step="0.01" min="0.01" '
+        'name="output_cents_per_mtok" required></label> '
+        '<label class="prov">your name <input type="text" name="set_by" '
+        'required placeholder="who is making this change"></label> '
+        '<label class="prov"><input type="checkbox" name="allow_large_change" '
+        'value="1"> yes, the rate really did move more than 20x</label> '
+        '<button type="submit">Record new rate</button></form>')
+    out.append(prov(
+        "Rates are in CENTS per million tokens, so $3.00 per million is "
+        "300. A new rate applies from its date FORWARD only: spend already "
+        "recorded keeps the rate it was priced at, which is what keeps the "
+        "nightly comparison against the real Anthropic bill reconstructable. "
+        "A correction is a new row, never an edit, so the record of what was "
+        "believed when survives. A zero is refused at entry. Sonnet 5 is on "
+        "introductory pricing until 2026-08-31 and the built-in table "
+        "already knows that, so this form is only needed when published "
+        "rates change again."))
+
+    hist = db.q("SELECT model, effective_from, input_cents_per_mtok, "
+                "output_cents_per_mtok, set_by, set_at, note "
+                "FROM pricing_overrides ORDER BY set_at DESC LIMIT 50")
+    if hist.rows:
+        out.append(table(
+            f"{p}-price-history",
+            ["model", "in force from", "input c/MTok", "output c/MTok",
+             "set by", "recorded at", "note"],
+            [[esc(r["model"]), esc(r["effective_from"]),
+              esc(r["input_cents_per_mtok"]), esc(r["output_cents_per_mtok"]),
+              esc(r["set_by"]), esc(r["set_at"]), esc(r["note"] or "-")]
+             for r in hist.rows], numeric_cols={2, 3}))
+    else:
+        out.append(empty_block(
+            f"{p}-empty-price-history", hist,
+            meaning="no rate has ever been overridden by hand; every figure "
+                    "above is priced from the built-in table in "
+                    "catalyst/cost/pricing.py",
+        ))
+    return "".join(out)
 
 
 # --------------------------------------------------------------------------
@@ -1098,6 +1293,175 @@ def _conviction_gauge(value: float, p: str) -> str:
         "</div>")
 
 
+def _spider_groups(t, c, db, ticker: str) -> list:
+    """The three arms of the decision, each built from what is actually
+    recorded. An arm with nothing in it is dropped rather than drawn
+    empty - a branch to nowhere reads as a fact the bot had and did not
+    use, which is the opposite of true.
+    """
+    view = dict(t.view_q.rows[0]) if t.view_q.rows else {}
+    decision = dict(t.decisions_q.rows[0]) if t.decisions_q.rows else {}
+
+    # 1. WHAT IT SAW - sources, plus the evidence graph if it has one.
+    seen = []
+    for r in t.raw_events_q.rows[:4]:
+        d = dict(r)
+        seen.append((str(d.get("source") or "source"),
+                     f"fetched {d.get('fetched_at') or 'unknown'}"))
+    ev = queries.evidence_graph(db, ticker) if ticker else None
+    for r in (ev.rows if ev else [])[:4]:
+        d = dict(r)
+        # Whichever END IS NOT THE COMPANY is the interesting one. An
+        # assertion can point either way - "the CFO bought shares of
+        # GBFH" has the company as the OBJECT - so reading object_label
+        # first drops exactly the assertions that name a person.
+        subj = str(d.get("subject_label") or "").strip()
+        obj = str(d.get("object_label") or "").strip()
+        label = subj if obj == ticker else obj
+        if not label:
+            label = str(d.get("object_date") or "").strip()
+        if label and label != ticker:
+            seen.append((label, str(d.get("predicate") or "linked to")))
+    if c.get("catalyst_type"):
+        seen.append((str(c["catalyst_type"]).replace("_", " "), "catalyst type"))
+
+    # 2. WHAT IT CONCLUDED - the model's view, in the model's terms.
+    concluded = []
+    if view:
+        if view.get("direction"):
+            concluded.append((str(view["direction"]), "direction"))
+        if view.get("conviction") is not None:
+            concluded.append((f"conviction {view['conviction']}", "0 to 1"))
+        if view.get("expected_holding_days") is not None:
+            concluded.append(
+                (f"hold {view['expected_holding_days']} days", "expected"))
+        priced = view.get("priced_in")
+        if priced is not None:
+            concluded.append(("already priced in" if int(priced or 0)
+                              else "not priced in", "model's judgement"))
+
+    # 3. WHAT THE CODE DID - the risk engine, and every limit that bound.
+    did = []
+    if decision:
+        did.append((str(decision.get("action") or "no action"), "risk engine"))
+        if decision.get("notional_usd"):
+            did.append((f"${decision['notional_usd']}", "size the code chose"))
+        if decision.get("stop_price"):
+            did.append((f"stop {decision['stop_price']}", "resting at the broker"))
+        if decision.get("planned_exit_date"):
+            did.append(
+                (f"exit by {decision['planned_exit_date']}", "hard date"))
+    limits = t.limits_by_decision.get(decision.get("id"))
+    for r in (limits.rows if limits else []):
+        d = dict(r)
+        if int(d.get("binding") or 0):
+            did.append((str(d.get("rule_name") or "limit"), "this one bound"))
+    for reason in (jload(decision.get("skip_reasons"), []) or [])[:3]:
+        did.append((str(reason).replace("_", " "), "why it stopped"))
+
+    return [("What it saw", seen[:6]),
+            ("What it concluded", concluded[:5]),
+            ("What the code did", did[:6])]
+
+
+def trace_simple(db: Db, candidate_id: str, p: str = "trs") -> str:
+    """The decision in one picture and one paragraph.
+
+    The full dossier is the record; this is the read. Someone opening a
+    trade for the first time should get the shape of it - what was seen,
+    what was concluded, what the code then did - before meeting a single
+    table.
+    """
+    t = queries.decision_trace(db, candidate_id)
+    if not t.candidate_q.rows:
+        return section(f"{p}-section", "Decision",
+                       empty_block(f"{p}-empty", t.candidate_q,
+                                   meaning=f"no candidate with id {candidate_id!r}"))
+    c = dict(t.candidate_q.rows[0])
+    ticker = str(c.get("ticker") or "")
+    view = dict(t.view_q.rows[0]) if t.view_q.rows else {}
+    decision = dict(t.decisions_q.rows[0]) if t.decisions_q.rows else {}
+    closed = dict(t.closed_q.rows[0]) if t.closed_q.rows else {}
+    action = str(decision.get("action") or "").lower()
+
+    verdict = {"trade": "TRADED", "skip": "DECLINED"}.get(
+        action, "NO RISK DECISION YET")
+    out = [_view_switch(candidate_id, "simple", p)]
+
+    # The sentence first. If a reader takes one thing from this page,
+    # it should be a sentence, not a diagram.
+    who = ticker or candidate_id
+    if action == "trade":
+        story = (f"The bot traded {who}. The model read it as "
+                 f"{view.get('direction') or 'a directional bet'} with conviction "
+                 f"{view.get('conviction', 'unrecorded')}, and the risk engine - "
+                 f"not the model - chose a size of "
+                 f"{dollars(_cents(decision.get('notional_usd'))) if decision.get('notional_usd') else 'an unrecorded amount'}.")
+    elif action == "skip":
+        reasons = jload(decision.get("skip_reasons"), []) or []
+        story = (f"The bot declined {who}. "
+                 + ("It stopped on: " + ", ".join(
+                     str(r).replace("_", " ") for r in reasons[:3]) + "."
+                    if reasons else
+                    "No skip reason was recorded, which is itself a gap worth "
+                    "chasing - a refusal should always carry its reason."))
+    else:
+        story = (f"{who} reached the risk engine but no decision is recorded "
+                 "against it yet.")
+    if closed:
+        story += (f" It closed for {dollars(closed.get('realized_pnl_cents'))} "
+                  f"({closed.get('exit_reason') or 'no exit reason recorded'}).")
+    out.append(f'<p class="lede-line" id="{p}-story">{esc(story)}</p>')
+
+    groups = _spider_groups(t, c, db, ticker)
+    if any(leaves for _, leaves in groups):
+        out.append('<div class="chart-wrap">' + charts.decision_spider(
+            esc(who), esc(verdict),
+            [(esc(label), [(esc(a), esc(b)) for a, b in leaves])
+             for label, leaves in groups],
+            chart_id=f"{p}-spider") + "</div>")
+        out.append('<p class="prov"><span class="key key-1"></span>what it saw '
+                   '<span class="key key-2"></span>what it concluded '
+                   '<span class="key key-3"></span>what the code did</p>')
+        out.append(prov(
+            "Every box is something actually recorded against this candidate - "
+            "nothing here is inferred for the picture. Hover a line for the "
+            "detail behind it. The three arms are the whole architecture: the "
+            "model proposes on the middle arm, deterministic code disposes on "
+            "the right one, and it can only ever narrow what the model asked "
+            "for."))
+    else:
+        out.append(note(
+            f'<b id="{p}-nothing">Nothing is recorded against this candidate '
+            "yet</b> beyond its own row - no sources, no model view, no risk "
+            "decision. The full view below shows each of those queries and "
+            "what it returned."))
+    out.append(f'<p class="prov"><a href="/decision?candidate_id='
+               f'{esc(candidate_id)}&amp;view=full">Open the full record</a> for '
+               "the prompt, every tool call, each limit that bound, and the "
+               "fills.</p>")
+    return section(f"{p}-section", f"Decision: {esc(who)}", "".join(out))
+
+
+def _view_switch(candidate_id: str, active: str, p: str) -> str:
+    """Simple and full, as a visible pair - not a hidden preference.
+
+    Both links carry the candidate id, so a bookmarked or shared URL
+    lands on the same view its sender was looking at.
+    """
+    def one(key: str, label: str, hint: str) -> str:
+        on = " active" if key == active else ""
+        return (f'<a class="switch-opt{on}" href="/decision?candidate_id='
+                f'{esc(candidate_id)}&amp;view={key}"'
+                + (' aria-current="page"' if key == active else "")
+                + f"><b>{esc(label)}</b><span>{esc(hint)}</span></a>")
+    return (f'<div class="switch" id="{p}-switch" role="navigation" '
+            'aria-label="Level of detail">'
+            + one("simple", "Simple", "the decision in one picture")
+            + one("full", "Full record", "every query, prompt and limit")
+            + "</div>")
+
+
 def trace_page(db: Db, candidate_id: str, p: str = "tr") -> str:
     t = queries.decision_trace(db, candidate_id)
     if not t.candidate_q.rows:
@@ -1141,6 +1505,7 @@ def trace_page(db: Db, candidate_id: str, p: str = "tr") -> str:
         header.append(_conviction_gauge(conviction_f, p))
 
     body = [
+        _view_switch(candidate_id, "full", p),
         "".join(header),
         f"<p class='prov' id='{p}-intro'>A single decision, start to finish. Someone "
         "who was not there should be able to read this page and understand why the "
@@ -1171,9 +1536,122 @@ def trace_page(db: Db, candidate_id: str, p: str = "tr") -> str:
 # --------------------------------------------------------------------------
 
 
+def _refusal_switch(active: str, p: str) -> str:
+    def one(key, label, hint):
+        on = " active" if key == active else ""
+        return (f'<a class="switch-opt{on}" href="/refusals?view={key}"'
+                + (' aria-current="page"' if key == active else "")
+                + f"><b>{esc(label)}</b><span>{esc(hint)}</span></a>")
+    return (f'<div class="switch" id="{p}-switch" role="navigation" '
+            'aria-label="Level of detail">'
+            + one("simple", "Simple", "which reasons refuse, and were they right")
+            + one("full", "Full record", "every refusal, with prices")
+            + "</div>")
+
+
+def refusals_simple(db: Db, p: str = "refs") -> str:
+    """The refusal tracker as a map: reason -> candidate -> what happened.
+
+    The brief calls this the single most important feedback loop, and a
+    table makes you compute the loop in your head. Drawn, the question
+    "is a particular reason refusing things that then went up?" is
+    answered by following one strand instead of reading a column.
+    """
+    r = queries.refusals(db)
+    out = [_refusal_switch("simple", p)]
+    rows = [dict(x) for x in r.query.rows]
+    if not rows:
+        out.append(empty_block(f"{p}-empty", r.query,
+                               meaning="no candidate has been declined and "
+                                       "recorded, so there is nothing to score"))
+        return section(f"{p}-section", "Refusals", "".join(out))
+
+    if r.n_scored:
+        share = 100.0 * r.n_positive / r.n_scored
+        out.append(
+            f"<p id='{p}-headline'><span class='big'>{r.mean_outcome_return:+.4f}"
+            f"</span> mean outcome return across {r.n_scored} scored "
+            f"refusal(s); {r.n_positive} of {r.n_scored} ({share:.0f}%) moved "
+            "the way the system declined to go.</p>")
+    else:
+        out.append(
+            f"<p id='{p}-headline'>{len(rows)} refusal(s) recorded, "
+            "<b>none scored yet</b>. Until they are scored there is no answer "
+            "to \"is it too strict\" - only the question.</p>")
+
+    reason_hits, cand_hits, outcome_hits = {}, {}, {}
+    edges = []
+    for x in rows:
+        cid = f"c:{x['candidate_id']}"
+        cand_hits[cid] = (x["ticker"] or x["candidate_id"], 0)
+        reasons = jload(x["skip_reasons"], []) or ["no reason recorded"]
+        for reason in reasons:
+            rk = f"r:{reason}"
+            reason_hits[rk] = reason_hits.get(rk, 0) + 1
+            edges.append((rk, cid, 1,
+                          f"{x['ticker'] or x['candidate_id']} was refused on "
+                          f"{reason}"))
+        # The outcome column is the point of the whole tracker.
+        if not x["scored_at"]:
+            ok = "o:not scored yet"
+            detail = "refused, outcome not yet measured"
+        else:
+            ret = _dec_or_none(x["outcome_return"])
+            if ret is None:
+                ok, detail = "o:scored, no return recorded", "scored but no return"
+            elif ret > 0:
+                ok = "o:went UP after refusal"
+                detail = f"outcome return {ret:+}"
+            else:
+                ok = "o:did not go up"
+                detail = f"outcome return {ret:+}"
+        outcome_hits[ok] = outcome_hits.get(ok, 0) + 1
+        edges.append((cid, ok, 1, detail))
+
+    degree = {}
+    for a, b_, _, _ in edges:
+        degree[a] = degree.get(a, 0) + 1
+        degree[b_] = degree.get(b_, 0) + 1
+    layers = [
+        ("Why it refused", [(k, k[2:].replace("_", " "), v)
+                            for k, v in sorted(reason_hits.items(),
+                                               key=lambda kv: -kv[1])]),
+        ("Which candidate", [(k, label, degree.get(k, 0))
+                             for k, (label, _) in cand_hits.items()]),
+        ("What it then did", [(k, k[2:], v)
+                              for k, v in sorted(outcome_hits.items(),
+                                                 key=lambda kv: -kv[1])]),
+    ]
+    out.append('<div class="chart-wrap">' + charts.neural_map(
+        [(esc(lbl), [(esc(a), esc(b_), w) for a, b_, w in ns])
+         for lbl, ns in layers],
+        [(esc(a), esc(b_), w, esc(t)) for a, b_, w, t in edges],
+        chart_id=f"{p}-map") + "</div>")
+    out.append(prov(
+        "Left is the rule that declined it, middle is the candidate, right is "
+        "what the price did afterwards. A reason with most of its strands "
+        "landing on \"went UP after refusal\" is a reason refusing money - "
+        "which is the number that is allowed to move the conviction floor, "
+        "and only once the sample is big enough."))
+    if r.n_scored < MIN_TRADES_FOR_MEANING:
+        out.append(alarm(
+            f"<b id='{p}-small-sample'>Too small to act on.</b> {r.n_scored} "
+            f"scored refusal(s) against a {MIN_TRADES_FOR_MEANING} minimum. "
+            "Read the shape, not the verdict."))
+    return section(f"{p}-section", "Refusals", "".join(out))
+
+
+def _dec_or_none(value):
+    from decimal import Decimal, InvalidOperation
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
 def refusals_panel(db: Db, p: str = "ref") -> str:
     r = queries.refusals(db)
-    out = []
+    out = [_refusal_switch("full", p)]
     if r.n_scored:
         share = 100.0 * r.n_positive / r.n_scored
         out.append(
@@ -1496,3 +1974,67 @@ def value_reconciliation_panel(db: Db, p: str = "val") -> str:
         ))
     return section(f"{p}-section",
                    "Broker value vs net value", "".join(out))
+
+
+# --------------------------------------------------------------------------
+# The brain
+# --------------------------------------------------------------------------
+
+
+def brain_panel(db: Db, p: str = "brain") -> str:
+    """The whole system's wiring in one picture.
+
+    Not a metaphor and not an illustration: every node is a row and
+    every line is a foreign key or a recorded assertion. A picture of a
+    machine that draws links the machine does not have would be worse
+    than no picture, because it would be believed.
+    """
+    b = queries.brain(db)
+    out = []
+    if not b.edge_count:
+        out.append(note(
+            f'<b id="{p}-quiet">Nothing is wired up yet.</b> The bot has not '
+            "yet linked a source to a candidate, so there is nothing to draw. "
+            "This fills in on its own as discovery runs - the queries behind "
+            "it are printed below, so an empty brain and a broken query are "
+            "never the same picture."))
+        for i, q in enumerate(b.queries):
+            out.append(empty_block(f"{p}-q-{i}", q,
+                                   meaning="no rows behind this layer yet"))
+        return section(f"{p}-section", "The brain", "".join(out))
+
+    out.append(
+        f'<p id="{p}-headline"><span class="big">{b.edge_count}</span> recorded '
+        f"link(s) across {b.node_count} node(s). Left to right is the path a "
+        "filing takes to become a trade: what the bot read, what it built from "
+        "it, what it linked, what the model made of it, what the code decided, "
+        "and what actually happened.</p>")
+    out.append('<div class="chart-wrap">' + charts.neural_map(
+        [(esc(label), [(esc(nid), esc(nlabel), w) for nid, nlabel, w in nodes])
+         for label, nodes in b.layers],
+        [(esc(s), esc(d), w, esc(t)) for s, d, w, t in b.edges],
+        chart_id=f"{p}-map") + "</div>")
+    out.append(prov(
+        "Every line is one recorded relationship - a source event named by a "
+        "candidate, an assertion in the evidence graph, a view against a "
+        "candidate, a decision against a view. Nothing is added to make the "
+        "picture denser. Hover any line for the row behind it, and any node "
+        "for how many links it carries. Brightness is how heavily a link is "
+        "used; dot size is how connected a node is. Colour is depth only - "
+        "left is early, right is late - not category."))
+    out.append(caveat(
+        "This draws what the database HAS, which is not the same as what the "
+        "bot considered. A source that returned nothing, or a candidate "
+        "dropped before it was stored, leaves no node here. Read the Pipeline "
+        "page for the drop reasons at each stage."))
+
+    rows = []
+    for label, nodes in b.layers:
+        for _, nlabel, weight in nodes:
+            rows.append([esc(label), esc(nlabel), str(weight)])
+    if rows:
+        out.append(details(
+            f"{p}-node-table", f"the same {len(rows)} nodes as a table",
+            table(f"{p}-nodes", ["layer", "node", "links"], rows,
+                  numeric_cols={2})))
+    return section(f"{p}-section", "The brain", "".join(out))

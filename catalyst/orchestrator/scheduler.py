@@ -268,6 +268,35 @@ def _maybe_refresh_benchmark(state: dict) -> None:
         _log.exception("The benchmark refresh failed; trading is unaffected.")
 
 
+def _owner_cap_cents(budget_usd):
+    """The owner's monthly budget, in cents, or None for the base cap.
+
+    The setup page validates this on the way in, but the credentials
+    file outlives any one version of that page, and a value it cannot
+    parse must not take the trading cycle down with it. Falling back to
+    None means the governor uses its $5 base - the safe direction, and
+    it is logged loudly because a budget silently ignored is how the
+    setup page's promise became false once already.
+    """
+    from decimal import Decimal as _D
+    if budget_usd is None:
+        return None
+    try:
+        cents = (_D(str(budget_usd)) * 100).quantize(_D("1"))
+    except Exception:  # noqa: BLE001 - any unparseable value, same answer
+        _log.error(
+            "The saved monthly research budget %r is not a number the "
+            "governor can use. Falling back to the $5 base cap. Re-enter "
+            "it on the setup page to raise it.", budget_usd)
+        return None
+    if not cents.is_finite() or cents < 0:
+        _log.error(
+            "The saved monthly research budget %r is not a usable amount "
+            "(%s cents). Falling back to the $5 base cap.", budget_usd, cents)
+        return None
+    return cents
+
+
 def _run_one_cycle(db_file: str):
     """Wire the live dependencies and run exactly one cycle. Thin by
     design: every piece here is constructed, none is decided."""
@@ -295,10 +324,7 @@ def _run_one_cycle(db_file: str):
 
     conn = sqlite3.connect(db_file)
     try:
-        from decimal import Decimal as _D
-        budget = (creds.settings or {}).get("monthly_budget_usd")
-        owner_cap = (_D(str(budget)) * 100).quantize(_D("1")) \
-            if budget is not None else None
+        owner_cap = _owner_cap_cents((creds.settings or {}).get("monthly_budget_usd"))
         return run_cycle(conn, broker, transport, feed,
                          build_candidates, cluster,
                          account_mode=account_mode,

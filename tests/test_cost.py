@@ -508,3 +508,82 @@ class TestOwnerSetsTheCap:
             self, tmp_db):
         d = self._authorize(tmp_db, 1, owner_cents=-500)
         assert d.cap_cents == Decimal("0")
+
+
+class TestOwnerEditableTokenPrices:
+    """Published rates change; the alternative was editing pricing.py
+    and redeploying. The owner chose a DATE-EFFECTIVE editor, and that
+    choice is the safety property: history keeps the rate in force when
+    the tokens were bought, so the nightly comparison against the real
+    Anthropic bill cannot drift for reasons nobody can reconstruct."""
+
+    def _set(self, conn, model, when, inp, outp, by="owner"):
+        from catalyst.cost.overrides import set_override
+        return set_override(conn, model, when, Decimal(inp), Decimal(outp),
+                            set_by=by)
+
+    def test_a_new_rate_applies_from_its_date_forward(self, tmp_db):
+        from catalyst.cost.overrides import rates_for_on
+        self._set(tmp_db, "claude-sonnet-5", date(2026, 9, 1), "300", "1500")
+        assert rates_for_on(tmp_db, "claude-sonnet-5", date(2026, 9, 2)) \
+            == (Decimal("300"), Decimal("1500"))
+
+    def test_history_keeps_the_rate_that_was_in_force(self, tmp_db):
+        """The whole point of date-effective. August tokens were bought
+        at August prices and must stay priced that way forever."""
+        from catalyst.cost.overrides import rates_for_on
+        from catalyst.cost.pricing import SONNET5_INTRO_RATES
+        self._set(tmp_db, "claude-sonnet-5", date(2026, 9, 1), "300", "1500")
+        assert rates_for_on(tmp_db, "claude-sonnet-5", date(2026, 8, 15)) \
+            == SONNET5_INTRO_RATES
+
+    def test_the_latest_row_on_or_before_the_day_wins(self, tmp_db):
+        from catalyst.cost.overrides import rates_for_on
+        self._set(tmp_db, "claude-sonnet-5", date(2026, 9, 1), "300", "1500")
+        self._set(tmp_db, "claude-sonnet-5", date(2026, 10, 1), "400", "2000")
+        assert rates_for_on(tmp_db, "claude-sonnet-5", date(2026, 9, 20)) \
+            == (Decimal("300"), Decimal("1500"))
+        assert rates_for_on(tmp_db, "claude-sonnet-5", date(2026, 10, 5)) \
+            == (Decimal("400"), Decimal("2000"))
+
+    def test_a_correction_is_a_new_row_not_an_edit(self, tmp_db):
+        """Append-only: what was believed when is never lost."""
+        from catalyst.cost.overrides import rates_for_on
+        self._set(tmp_db, "claude-sonnet-5", date(2026, 9, 1), "300", "1500")
+        self._set(tmp_db, "claude-sonnet-5", date(2026, 9, 1), "310", "1550")
+        assert tmp_db.execute(
+            "SELECT COUNT(*) FROM pricing_overrides").fetchone()[0] == 2
+        assert rates_for_on(tmp_db, "claude-sonnet-5", date(2026, 9, 5)) \
+            == (Decimal("310"), Decimal("1550"))
+
+    def test_no_override_falls_back_to_the_built_in_table(self, tmp_db):
+        from catalyst.cost.overrides import rates_for_on
+        from catalyst.cost.pricing import rates_for
+        assert rates_for_on(tmp_db, "claude-sonnet-5", date(2026, 12, 1)) \
+            == rates_for("claude-sonnet-5", date(2026, 12, 1))
+
+    def test_an_unknown_model_still_refuses_rather_than_pricing_at_zero(
+            self, tmp_db):
+        from catalyst.cost.overrides import rates_for_on
+        from catalyst.cost.pricing import UnknownModelError
+        with pytest.raises(UnknownModelError):
+            rates_for_on(tmp_db, "claude-renamed-v9", date(2026, 9, 1))
+
+    def test_a_zero_or_negative_rate_is_refused(self, tmp_db):
+        """A zero rate prices every future call at nothing - the exact
+        silent-understatement failure TRAPS.md is about."""
+        for bad in ("0", "-100"):
+            with pytest.raises(ValueError):
+                self._set(tmp_db, "claude-sonnet-5", date(2026, 9, 1), bad, "1500")
+            with pytest.raises(ValueError):
+                self._set(tmp_db, "claude-sonnet-5", date(2026, 9, 1), "300", bad)
+
+    def test_recording_a_live_call_uses_the_override(self, tmp_db):
+        from catalyst.cost.tracker import record_usage
+        today = datetime.now(timezone.utc).date()
+        self._set(tmp_db, "claude-sonnet-5", today, "1000", "1000")
+        ev = record_usage({"input_tokens": 1_000_000, "output_tokens": 0,
+                           "cache_creation_input_tokens": 0,
+                           "cache_read_input_tokens": 0},
+                          "claude-sonnet-5", "manual", "t", tmp_db)
+        assert ev.priced_cents == Decimal("1000")

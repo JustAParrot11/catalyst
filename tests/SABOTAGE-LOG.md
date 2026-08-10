@@ -618,3 +618,80 @@ change kept from this session is the strengthened assertion block in
 - cost_api adapter: bucket-flattening removed (records=buckets) and
   missing-amount refusal removed (unreadable record priced as zero):
   both caught by test_cost_api_adapter. Restored, green.
+- Owner-editable token prices (2026-08-10). Six sabotages, all caught,
+  all restored:
+  1. Live-rate table reads the newest override regardless of its
+     effective date -> test_the_page_shows_the_rate_actually_in_force.
+  2. Price form leaked onto the compact summary card ->
+     test_the_compact_cost_summary_does_not_carry_the_price_form.
+  3. set_token_price swallows refusals and reports success -> four
+     test_set_token_price_refuses_bad_input cases.
+  4. Magnitude guard removed (3 accepted where 300 was meant) ->
+     test_typing_dollars_where_cents_are_wanted_is_refused.
+  5. Magnitude factor tightened to 1.1x (blocks a real rate change) ->
+     test_an_ordinary_rate_change_needs_no_confirmation.
+  6. Magnitude baseline taken from today instead of the effective date
+     -> test_the_guard_measures_against_the_rate_in_force_on_the_
+     effective_date. FIRST ATTEMPT AT THIS TEST DID NOT CATCH IT: both
+     dates fell inside Sonnet 5's intro window so the two baselines were
+     identical. Rewritten to assert which rate the refusal names, and
+     parametrised across 2026-08-31, after which it fails on sabotage.
+- Owner budget read from credentials (2026-08-10). Two sabotages:
+  finite/negative check removed (nan and -3 became spending limits), and
+  the parse failure re-raised instead of falling back to the base cap.
+  Both caught by TestOwnerBudgetIsReadSafely. Restored, green.
+- Setup form fields that were never sent (2026-08-10, owner-reported).
+  Three sabotages: saveAll() reverted to the shipped 4-field payload
+  (caught by test_a_field_on_the_form_is_in_the_save_payload for both
+  anthropic_admin_key and account_mode); blank admin box wiping the
+  saved key; the /settings write route skipping the access-code check.
+  All caught, restored, green.
+- Billed breakdown (2026-08-10). Three sabotages: an unreadable amount
+  silently skipped instead of named, lines sorted ascending, and
+  group_by dropped from the Cost API request. All caught, restored.
+- Per-key replacement and the benchmark distinction (2026-08-10). Four
+  sabotages: replace-key blanking the admin key; replace-key writing
+  before testing (so a bad paste would replace a working key);
+  spy_window_too_short set unconditionally (which would soften every
+  benchmark failure into "too early"); and the overview panel order
+  reverted. All caught.
+  NOTE: the overview-order test appeared to fail after its sabotage was
+  restored. Cause was a stale .pyc surviving a cp-based restore, not the
+  code. Clear __pycache__ after restoring a file by copy, or the next
+  run measures the sabotage.
+- Decision spider (2026-08-10). Three sabotages: the two wrong column
+  names restored (expected_hold_days / hard_exit_date - both read as
+  None and dropped their facts silently, which is how they shipped
+  wrong the first time); object_label read before subject_label, which
+  drops every assertion naming a person because the company is the
+  OBJECT of "the CFO bought shares of GBFH"; and non-binding limits
+  drawn as though they bound. All caught by
+  test_every_recorded_field_reaches_the_spider and
+  test_a_limit_that_did_not_bind_is_not_drawn_as_though_it_did.
+  Layout was checked by SCREENSHOT, not by reasoning - the first render
+  had three boxes overlapping in the top arm, fixed with a deterministic
+  radius stagger and re-rendered.
+- The brain and refusal map (2026-08-10). Three sabotages: entity nodes
+  labelled by canonical_key instead of display_name; unknown source ids
+  falling back to a real source name (inventing a link); and unscored
+  refusals bucketed as a known outcome. Two caught immediately.
+  THE SECOND WAS NOT: the fixture had no unknown source id, so the test
+  could not tell the honest code from the sabotage. Fixed by giving the
+  candidate a source_event_id that was never stored ("ghost-1") - the
+  map must draw two edges, not three - after which the sabotage fails.
+  Labels were checked by SCREENSHOT: the first render had every node
+  label struck through by the connectors behind it, fixed with a
+  paint-order halo and re-rendered.
+- Upgrade reporting (2026-08-10, owner-reported). Three sabotages: the
+  commit dropped from the summary so only the version shows; the
+  "NOTHING CHANGED" branch collapsed back into "Upgrade complete"; and
+  a summary variable losing its default, which under set -u aborts the
+  script at the very end, AFTER the upgrade has happened. All caught.
+  One of these tests was itself wrong first: splitting on "Upgrade
+  complete" and taking [1] truncated at the phrase's SECOND occurrence
+  and hid half the report from the assertions. Fixed to slice from the
+  first occurrence to the end.
+  Both upgrade paths were then run for real against a throwaway git
+  remote: a change on a feature branch reports NOTHING CHANGED with an
+  unmoved commit, and the same change merged to main moves the commit
+  and completes.

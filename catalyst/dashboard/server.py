@@ -6,6 +6,7 @@ restricted.
 
 Read-only over the database EXCEPT two endpoints, both explicit:
   POST /acknowledge-reconciliation  -> cost.tracker.acknowledge_discrepancy
+  POST /set-token-price             -> cost.overrides.set_override
   POST /setup                       -> STUB, stage 7 owns the real flow
 
 Every response carries Cache-Control: no-store and a build hash, so a
@@ -120,9 +121,13 @@ def render_page(title: str, body: str, active: str, path: str,
 
 
 def route_overview(db: Db, params: dict) -> str:
+    # Broker value FIRST. What the account is actually worth at Alpaca is
+    # the one number the owner opens this page for; it used to sit below
+    # a performance panel that leads with a comparison unavailable in the
+    # account's first days.
     body = (
-        panels.performance_panel(db, p="perf")
-        + panels.value_reconciliation_panel(db, p="ovval")
+        panels.value_reconciliation_panel(db, p="ovval")
+        + panels.performance_panel(db, p="perf")
         + panels.funnel_panel(db, p="funnel")
         + panels.cost_panel(db, p="ovcost", compact=True)
         + panels.alerts_panel(db, p="alerts")
@@ -162,18 +167,35 @@ def route_decisions(db: Db, params: dict) -> str:
 
 def route_decision(db: Db, params: dict) -> str:
     cid = (params.get("candidate_id") or [""])[0]
+    # Simple by default: the full dossier is the record, not the read.
+    # Anyone who needs every query is one click away and the link says so.
+    wants_full = (params.get("view") or ["simple"])[0] == "full"
     if not cid:
         body = section("tr-section", "Decision trace",
                        "<p>Give a candidate_id: <code>/decision?candidate_id=...</code>. "
                        "The <a href='/decisions'>decisions list</a> links to each one.</p>")
-    else:
+    elif wants_full:
         body = panels.trace_page(db, cid, p="tr")
+    else:
+        body = panels.trace_simple(db, cid, p="trs")
     return render_page("Decision trace", body, "/decisions", db.path, db=db)
 
 
+def route_brain(db: Db, params: dict) -> str:
+    return render_page("The brain", panels.brain_panel(db, p="brain"),
+                       "/brain", db.path, db=db,
+                       subtitle="Every line is one recorded link")
+
+
 def route_refusals(db: Db, params: dict) -> str:
-    return render_page("Refusals", panels.refusals_panel(db, p="ref"),
-                       "/refusals", db.path, db=db)
+    # Simple by default, same as Decisions: the map answers "is a reason
+    # refusing money" by following a strand; the table makes you compute
+    # it in your head.
+    if (params.get("view") or ["simple"])[0] == "full":
+        body = panels.refusals_panel(db, p="ref")
+    else:
+        body = panels.refusals_simple(db, p="refs")
+    return render_page("Refusals", body, "/refusals", db.path, db=db)
 
 
 def route_logs(db: Db, params: dict) -> str:
@@ -324,6 +346,7 @@ HTML_ROUTES = {
     "/costs": route_costs,
     "/decisions": route_decisions,
     "/decision": route_decision,
+    "/brain": route_brain,
     "/refusals": route_refusals,
     "/logs": route_logs,
     "/maintenance": route_maintenance,
@@ -334,6 +357,41 @@ HTML_ROUTES = {
 # --------------------------------------------------------------------------
 # Write endpoints
 # --------------------------------------------------------------------------
+
+
+def set_token_price(db_file: str, form: dict) -> tuple[bool, str]:
+    """Record an owner-entered token rate, effective from a date.
+
+    Validation lives in cost.overrides; this only shapes the form into
+    its arguments and turns a refusal into a message. A bad rate must
+    reach the owner as a sentence, never as a traceback or - far worse -
+    as a silently accepted zero.
+    """
+    import sqlite3
+    from datetime import date as _date
+
+    from catalyst.cost.overrides import set_override
+
+    model = (form.get("model") or "").strip()
+    who = (form.get("set_by") or "").strip()
+    try:
+        effective = _date.fromisoformat((form.get("effective_from") or "").strip())
+    except ValueError:
+        return False, ("Give the date the new rate starts, as YYYY-MM-DD. "
+                       "Rates apply from that day forward; earlier spending "
+                       "keeps the rate it was priced at.")
+    conn = sqlite3.connect(db_file)
+    try:
+        set_override(conn, model, effective,
+                     form.get("input_cents_per_mtok"),
+                     form.get("output_cents_per_mtok"),
+                     set_by=who, note=(form.get("note") or "").strip(),
+                     allow_large_change=bool(form.get("allow_large_change")))
+    except Exception as exc:  # noqa: BLE001 - the owner reads this
+        return False, str(exc)
+    finally:
+        conn.close()
+    return True, "recorded"
 
 
 def acknowledge(db_file: str, event_id: str, acknowledged_by: str) -> tuple[bool, str]:
@@ -460,6 +518,26 @@ class Handler(BaseHTTPRequestHandler):
         raw_body = self.rfile.read(length).decode("utf-8") if length else ""
         form = {k: v[0] for k, v in parse_qs(raw_body).items()}
         db_file = self.db_file or db_path()
+
+        if parsed.path == "/set-token-price":
+            okay, message = set_token_price(db_file, form)
+            if okay:
+                self.send_response(303)
+                self.send_header("Location", "/costs?price=ok")
+                _no_store_headers(self, "text/plain", 0)
+                self.end_headers()
+                return
+            db = Db(db_file)
+            try:
+                body = render_page(
+                    "Rate change refused",
+                    section("price-fail", "Rate change refused",
+                            f"<p>{esc(message)}</p>"
+                            "<p><a href=\"/costs\">Back to the cost page</a></p>"),
+                    "/costs", db.path, db=db)
+            finally:
+                db.close()
+            return self._send_html(400, body)
 
         if parsed.path == "/acknowledge-reconciliation":
             okay, message = acknowledge(

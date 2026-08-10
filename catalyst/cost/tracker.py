@@ -151,8 +151,23 @@ def make_usage_components(raw_usage: dict) -> UsageComponents:
     )
 
 
+
+def _owner_rates(conn, model: str, on_date: date):
+    """Owner-entered rate in force on `on_date`, or None to use the
+    built-in table. Never raises for a missing table - an older database
+    simply has no overrides."""
+    try:
+        from catalyst.cost.overrides import rates_for_on
+        return rates_for_on(conn, model, on_date)
+    except UnknownModelError:
+        raise
+    except Exception:  # noqa: BLE001 - fall back to the built-in table
+        return None
+
+
 def price(usage: UsageComponents, model: str,
-          on_date: date | None = None) -> Decimal:
+          on_date: date | None = None,
+          rates: tuple | None = None) -> Decimal:
     """Cents, as Decimal. Reads ALL usage fields, always. Refuses to
     price a usage object carrying unrecognized billing fields - pricing
     a payload we do not fully understand understates it silently.
@@ -181,7 +196,10 @@ def price(usage: UsageComponents, model: str,
         )
     if on_date is None:
         on_date = datetime.now(timezone.utc).date()
-    input_rate, output_rate = rates_for(model, on_date)
+    if rates is not None:
+        input_rate, output_rate = rates
+    else:
+        input_rate, output_rate = rates_for(model, on_date)
 
     cache_1h = 0
     cache_5m = usage.cache_creation_input_tokens
@@ -245,7 +263,8 @@ def record_usage(
     priced = None
     pricing_error = None
     try:
-        priced = price(usage, model, on_date=priced_at.date())
+        priced = price(usage, model, on_date=priced_at.date(),
+                       rates=_owner_rates(conn, model, priced_at.date()))
     except (UnknownModelError, UnrecognizedUsageFieldError) as exc:
         pricing_error = exc
 
@@ -299,7 +318,8 @@ def reprice_all(conn: sqlite3.Connection) -> RepriceOutcome:
                 # September reprice of an August sonnet-5 row must still
                 # use the August intro rate
                 spend_date = datetime.fromisoformat(priced_at).date()
-                new = price(usage, model, on_date=spend_date)
+                new = price(usage, model, on_date=spend_date,
+                            rates=_owner_rates(conn, model, spend_date))
             except (UnknownModelError, UnrecognizedUsageFieldError):
                 still_unpriced.append((row_id, model))
                 continue

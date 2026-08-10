@@ -1277,3 +1277,80 @@ class TestBudgetFieldTellsTheTruth:
         assert d.cap_cents == Decimal("100")
         assert d.authorized is False
         conn.close()
+
+
+# ==========================================================================
+# The upgrade has to say what actually changed.
+#
+# Owner-reported 2026-08-10: "i am running the upgrade but the dashboard
+# changes dont seem to have taken effect ... The version now and version
+# before have been 0.1.0 for a while now."
+#
+# The upgrade was working correctly. The changes were published to a
+# branch the server does not follow, so `git pull --ff-only` had nothing
+# to fetch - and the report still ended with "Upgrade complete", the
+# version string being hand-maintained and identical either way. An
+# evening was then spent on browser caches.
+# ==========================================================================
+
+
+class TestTheUpgradeReportsWhatChanged:
+    def _text(self):
+        return UPGRADE_SH.read_text()
+
+    def _summary(self):
+        """Everything from the success banner to the end. Split-and-take
+        [1] truncates at the SECOND occurrence of the phrase and silently
+        hid half the report from these assertions."""
+        text = self._text()
+        return text[text.index("Upgrade complete"):]
+
+    def test_the_version_string_is_not_the_only_thing_reported(self):
+        """__version__ is hand-maintained and can sit still across many
+        real changes. The commit cannot."""
+        summary = self._summary()
+        assert "OLD_COMMIT" in summary and "NEW_COMMIT" in summary
+
+    def test_the_report_names_the_branch_the_machine_follows(self):
+        """'Which branch is this server on' is the question that ends the
+        confusion, so the answer is printed rather than looked up."""
+        assert "UPGRADE_BRANCH" in self._text()
+        summary = self._summary()
+        assert "UPGRADE_BRANCH" in summary
+
+    def test_nothing_fetched_does_not_read_as_a_successful_change(self):
+        summary = self._summary()
+        assert "NOTHING_FETCHED" in summary
+        assert "NOTHING CHANGED" in summary
+        assert "not a failure" in summary
+
+    def test_the_build_hash_is_printed_so_a_cached_page_is_provable(self):
+        """The sidebar prints the same hash. Equal means you are looking
+        at the new version; different means the browser cached it."""
+        summary = self._summary()
+        assert "NEW_BUILD_HASH" in summary
+        assert "cached" in summary
+
+    @pytest.mark.parametrize("name", ["NOTHING_FETCHED", "UPGRADE_BRANCH",
+                                      "NEW_BUILD_HASH"])
+    def test_every_reported_variable_has_a_default(self, name):
+        """set -u is on and the fetch phase is skippable, so a variable
+        read in the summary but only assigned inside that phase aborts
+        the script at the very end - after the upgrade has happened."""
+        text = self._text()
+        init = text.split("BACKUP_MADE=0")[0]
+        assert f"{name}=" in init, (
+            f"{name} is read in the summary but never initialised")
+
+
+def test_the_package_version_and_the_project_version_agree():
+    """They are two hand-maintained strings for one number. Letting them
+    drift means the upgrade reports one thing and pip installs another."""
+    import re
+
+    pkg = re.search(r'__version__ = "([^"]+)"',
+                    (REPO_ROOT / "catalyst" / "__init__.py").read_text()).group(1)
+    proj = re.search(r'^version = "([^"]+)"',
+                     (REPO_ROOT / "pyproject.toml").read_text(),
+                     re.M).group(1)
+    assert pkg == proj, f"catalyst.__version__ is {pkg}, pyproject says {proj}"

@@ -737,20 +737,47 @@ def test_admin_key(key: str, *, transport: "Transport | None" = None,
     if not key:
         return False, ("Enter the Anthropic ADMIN key (it starts sk-ant-admin) "
                        "then press Test again.")
+    # NOT refused on its prefix. Pasting the ordinary API key here is the
+    # obvious mistake and the prefix is how you spot it, but refusing on
+    # the prefix would lock the owner out the day Anthropic changes the
+    # format. So the key is always tried, and the prefix only shapes the
+    # explanation when the API itself rejects it.
+    looks_like_admin = key.startswith("sk-ant-admin")
     import httpx as _httpx
+
+    # A window that MOVES with the calendar. A fixed one passes for as
+    # long as it happens to sit in the past and then quietly stops
+    # meaning anything. Yesterday to today is always a closed day.
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+    today = _dt.now(_tz.utc).date()
     try:
         with _httpx.Client(transport=transport, timeout=20.0) as client:
             resp = client.get(
                 "https://api.anthropic.com/v1/organizations/cost_report",
                 headers={"x-api-key": key,
                          "anthropic-version": "2023-06-01"},
-                params={"starting_at": "2026-08-01T00:00:00Z",
-                        "ending_at": "2026-08-02T00:00:00Z", "limit": 1})
+                params={"starting_at": f"{today - _td(days=1)}T00:00:00Z",
+                        "ending_at": f"{today}T00:00:00Z", "limit": 1})
     except Exception as exc:  # noqa: BLE001
         return False, redact(f"Could not reach the Anthropic Cost API: {exc}")
     if resp.status_code == 200:
         return True, ("The admin key works: the nightly bill check can read "
-                      "your organization's real API costs.")
+                      "your organization's real API costs. Anthropic reports "
+                      "whole days only, so today's spend does not appear "
+                      "until the day closes - a fresh account reading zero "
+                      "is normal, not broken.")
+    if resp.status_code in (401, 403):
+        why = ("This key does not start sk-ant-admin, so it is most likely "
+               "the ordinary API key - the bot's thinking key cannot read a "
+               "bill. Make an admin key in the Anthropic console under "
+               "Settings, then Admin keys; only an organisation owner can. "
+               if not looks_like_admin else
+               "The key has the right shape, so this is more likely a "
+               "permissions or organisation problem than a typo. ")
+        return False, redact(
+            f"Anthropic refused this key (error {resp.status_code}). {why}"
+            f"It said: {resp.text[:300]}")
     return False, redact(
         f"Anthropic refused this admin key (error {resp.status_code}). "
         f"It said: {resp.text[:300]}")
