@@ -640,3 +640,12 @@ change kept from this session is the strengthened assertion block in
   finite/negative check removed (nan and -3 became spending limits), and
   the parse failure re-raised instead of falling back to the base cap.
   Both caught by TestOwnerBudgetIsReadSafely. Restored, green.
+- Setup form fields that were never sent (2026-08-10, owner-reported).
+  Three sabotages: saveAll() reverted to the shipped 4-field payload
+  (caught by test_a_field_on_the_form_is_in_the_save_payload for both
+  anthropic_admin_key and account_mode); blank admin box wiping the
+  saved key; the /settings write route skipping the access-code check.
+  All caught, restored, green.
+- Billed breakdown (2026-08-10). Three sabotages: an unreadable amount
+  silently skipped instead of named, lines sorted ascending, and
+  group_by dropped from the Cost API request. All caught, restored.

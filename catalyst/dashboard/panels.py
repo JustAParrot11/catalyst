@@ -590,6 +590,8 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
          details(f"{p}-recon-raw-{i}", "raw payload", pre(json_pretty(r["api_raw_response"])))]
         for i, r in enumerate(c.reconciliation_q.rows)
     ]
+    out.append(_billed_breakdown(c.reconciliation_q, p))
+
     out.append("<h3>Reconciliation history (local ledger vs Cost API, one closed day each)</h3>")
     if recon_rows:
         out.append(table(
@@ -625,6 +627,68 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
 
     out.append(_token_price_editor(db, p, c.as_of))
     return section(f"{p}-section", "Cost, with provenance on every number", "".join(out))
+
+
+def _billed_breakdown(recon_q, p: str) -> str:
+    """Where the money actually went, from Anthropic's own itemisation.
+
+    The Cost API is asked to group by description, so the raw response
+    already stored beside each reconciliation carries the bill line by
+    line. That answers a question the totals cannot: on 2026-08-07 cache
+    WRITES were 54% of the bill, which is a tuning target and is
+    invisible in a single "$0.50" figure.
+
+    Read from the stored payload, never re-fetched - this panel cannot
+    spend money or disagree with what was reconciled.
+    """
+    if not recon_q or not recon_q.rows:
+        return ""
+    from collections import OrderedDict
+    lines: "OrderedDict[str, Decimal]" = OrderedDict()
+    total = Decimal("0")
+    days = 0
+    unreadable = []
+    for r in recon_q.rows:
+        payload = jload(r["api_raw_response"], None)
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            unreadable.append(r["target_date"])
+            continue
+        days += 1
+        for bucket in payload["data"]:
+            for rec in (bucket or {}).get("results") or []:
+                label = str(rec.get("description") or "(not itemised)")
+                try:
+                    amount = Decimal(str(rec.get("amount")))
+                except Exception:  # noqa: BLE001 - shown, never silently zeroed
+                    unreadable.append(f"{r['target_date']}:{label}")
+                    continue
+                lines[label] = lines.get(label, Decimal("0")) + amount
+                total += amount
+    if not lines or total <= 0:
+        return ""
+    ordered = sorted(lines.items(), key=lambda kv: kv[1], reverse=True)
+    rows = [[esc(label), dollars(amount),
+             f"{(amount / total * 100):.1f}%",
+             meter(f"{p}-bill-{i}", float(amount), float(total))]
+            for i, (label, amount) in enumerate(ordered)]
+    out = [f"<h3>Where the billed money went, across {days} reconciled "
+           "day(s)</h3>",
+           table(f"{p}-bill-breakdown",
+                 ["line, as Anthropic names it", "billed", "share", ""],
+                 rows, numeric_cols={1, 2})]
+    out.append(prov(
+        f"BILLED figures, itemised by Anthropic and totalling "
+        f"{dollars(total)} across {days} closed day(s). Read from the raw "
+        "payload stored at reconciliation time, not re-fetched - this table "
+        "cannot disagree with the reconciliation above it. Cache WRITES are "
+        "charged at 1.25x the input rate and cache READS at 0.1x, so a large "
+        "cache-write share means context is being rebuilt rather than reused."))
+    if unreadable:
+        out.append(alarm(
+            f'<b id="{p}-bill-unreadable">{len(unreadable)} bill line(s) '
+            "could not be read and are NOT in the total above:</b> "
+            + esc(", ".join(str(u) for u in unreadable[:10]))))
+    return "".join(out)
 
 
 def _token_price_editor(db: Db, p: str, as_of) -> str:

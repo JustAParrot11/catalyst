@@ -28,6 +28,7 @@ from catalyst.cost.tracker import CostApiPage
 COST_REPORT_URL = "https://api.anthropic.com/v1/organizations/cost_report"
 ANTHROPIC_VERSION = "2023-06-01"
 PAGE_LIMIT = 31            # explicit, always (TRAPS.md)
+GROUP_BY = "description"   # itemises the bill; total-preserving (verified)
 ADMIN_KEY_ENV = "ANTHROPIC_ADMIN_KEY"
 
 
@@ -65,7 +66,14 @@ def fetch_cost_api_day(
     resp = get(
         COST_REPORT_URL,
         headers={"x-api-key": key, "anthropic-version": ANTHROPIC_VERSION},
-        params={"starting_at": start, "ending_at": end, "limit": PAGE_LIMIT},
+        params={"starting_at": start, "ending_at": end, "limit": PAGE_LIMIT,
+                # Itemised by line, so the stored raw response can answer
+                # "where did the money go" rather than only "how much".
+                # Verified total-preserving against the ungrouped call on
+                # five separate days (2026-08-05..09): identical sums,
+                # 5 records instead of 1. reconcile_day sums the records
+                # either way, so the reconciliation is unaffected.
+                "group_by[]": GROUP_BY},
         timeout=30.0)
     if resp.status_code != 200:
         raise CostApiError(
