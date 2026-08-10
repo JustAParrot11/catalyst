@@ -68,6 +68,36 @@ ownership table in the brief. Branch per task, merge one at a time,
 run the tests between merges. Schema and config changes go through a
 single session, never two at once.
 
+## Finished work goes to `main`, or it does not exist
+
+**The VPS follows `main`.** `install/upgrade.sh` runs `git pull
+--ff-only` on whatever branch the machine is on, so work sitting on a
+feature branch is invisible to the owner no matter how well it is
+tested. It is not shipped until `main` has it.
+
+This has already cost an evening: six commits of finished, green work
+sat on a branch while the owner ran the upgrade, was told "Upgrade
+complete", saw the same version before and after, and went hunting
+through browser caches for a change that had never reached the machine.
+
+So, whenever you say a change is ready for the owner to upgrade:
+
+1. **Land it on `main` first**, then tell them. Never announce work as
+   ready to upgrade while it is only on a branch.
+2. **Say which commit is on `main`** when you report it, so "did it
+   ship" is a check rather than a memory.
+3. **Confirm, do not assume** — `git log --oneline origin/main -1` and
+   `git log origin/main..HEAD` (the second must be empty). Rule 2 below
+   applies: never report a landing you have not confirmed.
+4. The exception is **risk, execution or broker code**, which needs
+   human review first (house rule 5). Open a PR, say plainly that it is
+   waiting on them, and do **not** describe it as ready to upgrade
+   until it is merged.
+
+The version string is not the signal — it is hand-maintained and sits
+still across real changes. The **commit** and the dashboard **build
+hash** are what move, and `upgrade.sh` prints both.
+
 ## Commands
 
 - Run all tests before any commit. They must be **fully offline**.
