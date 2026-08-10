@@ -5,7 +5,7 @@ kill decision (ARCHITECTURE.md section 2.1).
 """
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 
@@ -47,3 +47,39 @@ class RiskDecision:
 class KillSwitchState:
     tripped: bool
     reason: str | None
+
+
+@dataclass(frozen=True)
+class OpenPosition:
+    position_id: str
+    ticker: str
+    notional_usd: Decimal
+    cluster_key: str
+    opened_at_date: date
+    planned_exit_date: date
+
+
+@dataclass(frozen=True)
+class PortfolioState:
+    """Built ONLY from a confirmed broker read plus local position rows.
+    reliable=False (or a stale as_of) makes kill_switches fail closed."""
+
+    equity_usd: Decimal
+    settled_cash_usd: Decimal
+    open_positions: tuple[OpenPosition, ...]
+    day_pnl_usd: Decimal
+    peak_equity_usd: Decimal          # for drawdown
+    consecutive_losses: int
+    as_of: datetime
+    reliable: bool                    # False = broker read failed/stale
+
+
+@dataclass(frozen=True)
+class MarketSnapshot:
+    """Per-candidate market context, independent of anything Claude said."""
+
+    ticker: str
+    last_close: Decimal
+    half_spread_bp: Decimal           # measured, from live NBBO at decision time
+    median_daily_dollar_volume: Decimal
+

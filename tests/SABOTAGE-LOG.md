@@ -560,3 +560,46 @@ backtest-engineer's own pre-existing working-tree changes — nothing
 from this session survived in those three files). The only source
 change kept from this session is the strengthened assertion block in
 `tests/test_backtest.py::test_in_out_of_sample_split_is_chronological`.
+
+## Stage 5 (risk, execution, boundary) — 2026-08-10
+
+- sizing.py spread gate doubled (`> bound*2`): caught by
+  test_spread_gate_is_hard_and_binding. Restored, green.
+- adaptive_params.py loosen asymmetry removed (loosen step = tighten
+  step): caught by test_loosen_step_is_a_third_of_tighten AND
+  test_auto_revert_on_opposing_post_sample. Restored, green.
+- orders.py cancel-confirmation forced true (`if True:`): caught by
+  test_unconfirmed_cancel_places_nothing (the double-stop invariant).
+  Restored, green.
+- boundary.py forced tool_choice relaxed to auto: caught by
+  test_happy_path_two_turns. Restored, green.
+- boundary.py transport called before authorize: caught by
+  test_budget_denied_before_any_call. Restored, green.
+  **Incident:** after restore the test kept failing — the restored file
+  was byte-identical but Python reused the sabotaged .pyc (the swap
+  reorders identical bytes: same size, same mtime second). Cleared
+  __pycache__, suite green. Lesson: verify sabotage restores with a
+  cache clear, not a diff alone.
+- cycle.py kill-switch early return removed: caught by
+  test_broker_down_trips_and_stops_everything. Restored (with cache
+  clear), green.
+- refusal_tracker.py evidence sign flipped (profitable refusals would
+  RAISE the conviction floor): caught by
+  test_profitable_refusals_push_floor_down. Restored, green.
+- adaptive_params.py F3 fix undone (reverted rows hidden from the
+  window check): caught by
+  test_reverted_adjustments_window_still_blocks_reuse. Restored, green.
+- cycle.py kill-trip protective duties removed (B2 fix undone): caught
+  by test_loss_trip_still_runs_exits_but_blocks_entries. Restored, green.
+- Re-review batch (NEW-1..6, B4 residuals, F1 dedupe, escalations
+  1/2/4/5/6/8/9): six of the stress-tester's xfail escalation tests
+  flipped to PASSING purely by applying the fixes (the tests were
+  written first and carried the desired behavior) - the equivalent of
+  a failing-test-first cycle for each. Markers removed so they are
+  permanent regressions.
+- Risk round-3 batch: two-pass 404 terminalization sabotaged (single
+  404 terminalizes) -> caught by both new reconcile tests; done_for_day
+  removed from the void list -> caught; intraday-high max reverted to
+  replace -> caught. The duplicate-reduction stale-live and float-
+  netting fixes were proven by test-writer's pre-written failing tests
+  flipping to green (markers then removed).
