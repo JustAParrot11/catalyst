@@ -320,3 +320,102 @@ python3 scripts/run_bakeoff.py --only E,A --variant tuned --is-only  # tuning, I
 
 Disk: `data/` totals ~850MB (insider zips 450MB, insider bars ~330MB,
 XBRL 27MB, bars 15MB). All gitignored.
+
+## Market-structure verdict on C (measured)
+
+Owner: `market-structure`. Measured 2026-08-10, answering §5 Q1-Q3 and
+the §4 pre-registered gate: **per-side cost ≤20bp reopens C; ≥40bp
+closes it.** Every number below is a measurement against live Alpaca
+SIP historical NBBO, not an estimate.
+
+### Which quotes were used, and why (staleness disclosed)
+
+- Measurement ran Monday 2026-08-10 ~10:05-10:20 UTC (06:05 ET,
+  pre-market). The latest-quote endpoint was checked first and was
+  **stale/unusable as required to disclose**: timestamps came back
+  `2026-08-07T20:00:01Z` (Friday's close), and this subscription
+  rejects recent SIP (`"subscription does not permit querying recent
+  SIP data"`); the IEX latest feed is not an NBBO (AAPL ask=0,
+  OPK 1.15/1.58). Off-hours quotes would have biased the verdict
+  toward killing C, so none were used.
+- Instead: **historical SIP NBBO for the last regular session's final
+  30 minutes** — 2026-08-07 19:30:00Z-20:00:00Z — via
+  `GET /v2/stocks/{symbol}/quotes?feed=sip`, one page of up to 10,000
+  quotes per symbol (median covered window 1,800s, i.e. full coverage;
+  75/794 liquid names truncated, time-weighted over the covered span).
+  Where the window's head was uncovered >60s, the prevailing quote
+  before 19:30Z was fetched and carried. Half-spread per symbol =
+  time-weighted mean of `(ask-bid)/2/mid`, valid intervals only
+  (bid>0, ask≥bid).
+
+### Sample construction
+
+C's OOS event list was reconstructed by replaying
+`insider_cluster.py`'s exact signal-time filter (last close ≥$5,
+median 20-session dollar volume ≥$1M, 5-day staleness guard) over
+`data/insider/cluster_events.csv` against `data/bars_insider/`:
+3,521 OOS events (2024-01-02..2026-08-07) → **1,526 eligible events,
+865 distinct symbols** — matching the bake-off's 1,522 (difference is
+the end-of-range workaround). 794/865 symbols were measurable;
+**71 returned `quotes:null` + `trades:null` for all of 2026** (raw
+responses checked — delisted/acquired/renamed since their events, e.g.
+ATSG, BERY; they carry 124/1,526 = 8% of events). Bias direction:
+dead names' spreads are unmeasurable and were likely wider, so the
+distribution below is slightly flattered; all of them did pass the
+$1M floor at event time.
+
+### The distribution — half-spread, bp, per side
+
+| Universe / weighting | n | p25 | **median** | mean | p75 | p90 | worst-decile mean |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| **C, equal-weight per symbol** | 794 | 4.4 | **8.3** | 13.8 | 15.1 | 29.2 | 57.8 |
+| **C, event-frequency-weighted** | 1,402 ev | 4.4 | **8.2** | 13.4 | 15.0 | 29.2 | 54.1 |
+| A baseline (100 large caps) | 100 | 0.9 | **1.5** | 1.7 | 2.3 | 3.0 | 3.6 |
+
+The A baseline landing at the expected 1-3bp/side validates the
+method; C's number is not an artifact of the measurement.
+
+By half-spread bucket (event-weighted): <10bp = 818 events, 10-20bp =
+356, 20-40bp = 146, ≥40bp = 82. So **84% of measured events cost
+<20bp/side; 6% sit at ≥40bp/side** (worst names: CMIIU 348bp,
+ECOR 234bp, EDSA 206bp — exactly the SPAC/micro-biotech tail).
+
+### Depth and slippage at $200-330 clips (§5 Q3)
+
+Displayed inside size (SIP sizes are **shares**, shown in round-lot
+multiples since the Nov-2025 tiered round-lot change — verified on
+AAPL, sizes all multiples of its 40-share lot): median min(bid,ask)
+dollar depth = **21x a $330 clip**; 5th percentile 4.2x; one symbol
+of 794 below 1x. A $330 order is ~0.03% of a $1M ADV. **Depth is not
+binding at this size — confirmed, not presumed.** Note the backtest
+fills at the next-day opening auction, which pays the auction clearing
+price, not the quoted spread; the numbers above are the honest cost of
+any continuous-session entry/exit (stops, early exits) and a ceiling
+for auction fills. Opening-auction slippage at these clips remains
+unmeasured (§5 Q2 stays open).
+
+### Verdict, per the pre-registered gates
+
+**Median round-trip cost = 16.4bp event-weighted (2 × 8.2bp/side),
+16.6bp equal-weight — under the 40bp (2×20bp) reopen gate with 2.4x
+margin, and a quarter of the 80bp kill gate. C's pre-registered kill
+condition is NOT triggered; by its own reopen condition, C reopens.**
+
+- The harness's primary grade (15bp/side, OOS excess +6.73pp) assumed
+  a cost *above* the measured event-weighted mean (13.4bp/side). The
+  30bp/side stress that flipped C to −15.17pp corresponds to ~p90 of
+  the measured distribution — the typical trade does not pay it.
+- **Tradeable — with one required modification:** the worst decile
+  (≥29bp/side, tail mean 54-58bp) breaches the kill gate individually
+  and must be excluded by a deterministic max-spread gate at entry
+  (skip if measured half-spread >20bp). That keeps 84% of event flow
+  (~41/month of the 49) and caps every taken trade inside the reopen
+  gate. Without the gate: tradeable-smaller at best; with it:
+  **tradeable** at $200-330 clips.
+- What would change this verdict: opening-auction fills measurably
+  worse than the continuous quote (§5 Q2), or the delisted-8% turning
+  out to have carried a disproportionate share of the *edge* rather
+  than just the cost.
+
+Raw per-symbol measurements: scratchpad `c_spreads.json` /
+`a_spreads.json` (session-local); method script `measure_spreads.py`.
