@@ -55,9 +55,19 @@ _KNOWN_TOP_KEYS = {
     "input_tokens", "output_tokens",
     "cache_creation_input_tokens", "cache_read_input_tokens",
     "cache_creation", "server_tool_use", "service_tier",
+    # observed live 2026-08-10: a BREAKDOWN of output_tokens (thinking
+    # vs visible), not an additional billable quantity - thinking tokens
+    # are billed as output tokens and output_tokens already includes
+    # them. The nested check below still flags any NEW key inside it.
+    "output_tokens_details",
 }
-_KNOWN_SERVER_TOOL_KEYS = {"web_search_requests"}
+# web_fetch_requests observed live 2026-08-10 (web search implies fetch).
+# Web fetch is NOT metered per-request - the field is an informational
+# counter, zero cost; only tokens are billed for fetched content. Web
+# search remains the one per-request charge (WEB_SEARCH_CENTS_PER_QUERY).
+_KNOWN_SERVER_TOOL_KEYS = {"web_search_requests", "web_fetch_requests"}
 _KNOWN_CACHE_CREATION_KEYS = {"ephemeral_1h_input_tokens", "ephemeral_5m_input_tokens"}
+_KNOWN_OUTPUT_DETAIL_KEYS = {"thinking_tokens"}
 
 
 class UnrecognizedUsageFieldError(ValueError):
@@ -88,6 +98,10 @@ def _find_unknown_fields(raw_usage: dict) -> list[str]:
     cache_nested = raw_usage.get("cache_creation") or {}
     unknown += [f"cache_creation.{k}" for k in cache_nested
                 if k not in _KNOWN_CACHE_CREATION_KEYS]
+    out_nested = raw_usage.get("output_tokens_details") or {}
+    if isinstance(out_nested, dict):
+        unknown += [f"output_tokens_details.{k}" for k in out_nested
+                    if k not in _KNOWN_OUTPUT_DETAIL_KEYS]
     return sorted(unknown)
 
 

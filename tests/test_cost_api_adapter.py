@@ -159,3 +159,91 @@ class TestAdminKeyInSetup:
                           admin="sk-ant-admin-bad")
         assert json.loads(resp.body)["ok"] is False
         assert not creds.credentials_exist(str(tmp_path / "c.json"))
+
+
+class TestLiveUsageShape2026_08_10:
+    """The VERBATIM usage object the real Messages API returned on the
+    first live call (2026-08-10). The tracker refused to price it until
+    output_tokens_details was reviewed - which is the record-first
+    discipline doing its job - and prices it now. thinking_tokens is a
+    breakdown of output_tokens (already billed there), never additional."""
+
+    REAL_USAGE = {
+        "input_tokens": 11, "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cache_creation": {"ephemeral_5m_input_tokens": 0,
+                           "ephemeral_1h_input_tokens": 0},
+        "output_tokens": 4,
+        "output_tokens_details": {"thinking_tokens": 0},
+        "service_tier": "standard", "inference_geo": "global",
+    }
+
+    def test_real_shape_prices_cleanly(self, tmp_path):
+        from decimal import Decimal
+
+        from catalyst.cost.tracker import record_usage
+        conn = sqlite3.connect(tmp_path / "t.db")
+        conn.executescript(open("catalyst/storage/schema.sql").read())
+        ev = record_usage(dict(self.REAL_USAGE), "claude-sonnet-5",
+                          "manual", "verify", conn)
+        assert ev.priced_cents is not None
+        # 11 in @ 300c/MTok + 4 out @ 1500c/MTok
+        expected = (Decimal(11) * 300 + Decimal(4) * 1500) / 1_000_000
+        assert ev.priced_cents == expected
+        conn.close()
+
+    # VERBATIM from the first live web-search research turn (2026-08-10):
+    # server_tool_use carries web_fetch_requests beside web_search_requests.
+    # Web fetch is not metered per-request (informational counter); web
+    # search bills at WEB_SEARCH_CENTS_PER_QUERY. The tracker refused this
+    # row until reviewed - record-first discipline, again.
+    REAL_SEARCH_USAGE = {
+        "cache_creation": {"ephemeral_1h_input_tokens": 0,
+                           "ephemeral_5m_input_tokens": 0},
+        "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+        "inference_geo": "global", "input_tokens": 24094,
+        "output_tokens": 2271,
+        "output_tokens_details": {"thinking_tokens": 2155},
+        "server_tool_use": {"web_fetch_requests": 0,
+                            "web_search_requests": 2},
+        "service_tier": "standard",
+    }
+
+    def test_web_fetch_counter_is_informational_zero_cost(self, tmp_path):
+        from decimal import Decimal
+
+        from catalyst.cost.pricing import WEB_SEARCH_CENTS_PER_QUERY
+        from catalyst.cost.tracker import record_usage
+        conn = sqlite3.connect(tmp_path / "t.db")
+        conn.executescript(open("catalyst/storage/schema.sql").read())
+        ev = record_usage(dict(self.REAL_SEARCH_USAGE), "claude-sonnet-5",
+                          "manual", "verify", conn)
+        expected = ((Decimal(24094) * 300 + Decimal(2271) * 1500)
+                    / 1_000_000) + 2 * WEB_SEARCH_CENTS_PER_QUERY
+        assert ev.priced_cents == expected
+        # a NONZERO fetch count must still price identically - fetch is
+        # free; only the searches are charged
+        fetched = dict(self.REAL_SEARCH_USAGE)
+        fetched["server_tool_use"] = {"web_fetch_requests": 7,
+                                      "web_search_requests": 2}
+        ev2 = record_usage(fetched, "claude-sonnet-5", "manual", "v2", conn)
+        assert ev2.priced_cents == expected
+        conn.close()
+
+    def test_new_key_inside_details_still_refuses(self, tmp_path):
+        import pytest as _pytest
+
+        from catalyst.cost.tracker import (
+            UnrecognizedUsageFieldError, record_usage,
+        )
+        conn = sqlite3.connect(tmp_path / "t.db")
+        conn.executescript(open("catalyst/storage/schema.sql").read())
+        mutated = dict(self.REAL_USAGE)
+        mutated["output_tokens_details"] = {"thinking_tokens": 0,
+                                            "mystery_tokens": 9}
+        with _pytest.raises(UnrecognizedUsageFieldError):
+            record_usage(mutated, "claude-sonnet-5", "manual", "v", conn)
+        # recorded anyway, unpriced - the governor blocks from here
+        assert conn.execute("SELECT priced_cents FROM cost_events"
+                            ).fetchone()[0] is None
+        conn.close()
