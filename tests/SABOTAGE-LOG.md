@@ -649,3 +649,13 @@ change kept from this session is the strengthened assertion block in
 - Billed breakdown (2026-08-10). Three sabotages: an unreadable amount
   silently skipped instead of named, lines sorted ascending, and
   group_by dropped from the Cost API request. All caught, restored.
+- Per-key replacement and the benchmark distinction (2026-08-10). Four
+  sabotages: replace-key blanking the admin key; replace-key writing
+  before testing (so a bad paste would replace a working key);
+  spy_window_too_short set unconditionally (which would soften every
+  benchmark failure into "too early"); and the overview panel order
+  reverted. All caught.
+  NOTE: the overview-order test appeared to fail after its sabotage was
+  restored. Cause was a stale .pyc surviving a cp-based restore, not the
+  code. Clear __pycache__ after restoring a file by copy, or the next
+  run measures the sabotage.

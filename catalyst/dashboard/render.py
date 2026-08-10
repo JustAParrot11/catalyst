@@ -264,6 +264,11 @@ h3 { font-size: 11px; margin: 18px 0 6px 0; text-transform: uppercase;
          padding: 9px 11px; margin: 9px 0; font-size: 13px; border-radius: 0; }
 .ok { background: var(--good-wash); border-left: 3px solid var(--good);
       padding: 9px 11px; margin: 9px 0; font-size: 13px; border-radius: 0; }
+/* Neutral. For "not ready yet, and that is normal" - which is neither a
+   warning nor a success, and wearing either colour teaches the owner to
+   misread the page. */
+.note { background: var(--surface-2); border-left: 3px solid var(--accent);
+        padding: 9px 11px; margin: 9px 0; font-size: 13px; border-radius: 0; }
 .empty { background: var(--surface-2); border: 1px dashed var(--baseline);
          padding: 10px 12px; margin: 9px 0; font-size: 12px; border-radius: 2px; }
 .big { font-size: 30px; font-weight: 650; letter-spacing: -.02em; }
@@ -491,6 +496,15 @@ def prov(text: str) -> str:
 
 def caveat(text: str) -> str:
     return f'<div class="caveat">{esc(text)}</div>'
+
+
+def note(text_html: str) -> str:
+    """Neutral, informational. Not a warning and not a success.
+
+    "The comparison is not ready yet" is neither, and dressing it in
+    amber or red teaches the owner that a healthy page looks broken.
+    """
+    return f'<div class="note">{text_html}</div>'
 
 
 def caveat_fold(cid: str, summary: str, texts: list) -> str:

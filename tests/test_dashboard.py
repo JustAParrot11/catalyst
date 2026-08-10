@@ -1214,3 +1214,80 @@ class TestValueReconciliation:
         db.close()
         assert "broker read" in html and "this dashboard" in html, (
             "each figure must be labelled with whose number it is")
+
+
+# ---------------------------------------- benchmark: too early vs broken
+
+
+def _perf_with_window(tmp_path, monkeypatch, bar_days, first_activity):
+    """A db whose only activity is one cost row on `first_activity`, and
+    a SPY cache holding exactly `bar_days`."""
+    from catalyst.storage import init_db
+
+    root = tmp_path / "bars"
+    root.mkdir(exist_ok=True)
+    if bar_days is not None:
+        lines = ["date,open,high,low,close,volume"]
+        lines += [f"{d},100,101,99,100,1000" for d in bar_days]
+        (root / "SPY.csv").write_text("\n".join(lines) + "\n")
+    monkeypatch.setenv("CATALYST_BARS", str(root))
+
+    path = str(tmp_path / "p.db")
+    conn = init_db(path)
+    conn.execute("INSERT INTO cost_events VALUES (?,?,?,?,?,?,?,?)",
+                 ("c1", "{}", "claude-sonnet-5", "scheduled", "research",
+                  "194", f"{first_activity}T14:00:00+00:00", None))
+    conn.commit()
+    conn.close()
+    return Db(path)
+
+
+def test_a_weekend_old_account_is_not_reported_as_a_broken_benchmark(
+        tmp_path, monkeypatch):
+    """The owner's case: activity began Sunday 2026-08-09, the cache is
+    full and healthy but ends Friday 2026-08-07, so the window holds no
+    trading day. That is Tuesday's problem, not a fault."""
+    db = _perf_with_window(tmp_path, monkeypatch,
+                           ["2026-08-05", "2026-08-06", "2026-08-07"],
+                           "2026-08-09")
+    perf = queries.performance(db)
+    assert perf.spy_points == []
+    assert perf.spy_window_too_short is True
+    html_out = panels.performance_panel(db, p="perf")
+    assert "No SPY comparison yet, and nothing is wrong" in html_out
+    assert "younger than one trading day" in html_out
+    assert 'id="perf-spy-missing"' not in html_out, (
+        "a healthy cache must not raise the missing-benchmark alarm")
+
+
+def test_a_genuinely_missing_cache_still_raises_the_alarm(tmp_path, monkeypatch):
+    """The distinction has to cut both ways, or it is just a softer
+    message for every failure."""
+    db = _perf_with_window(tmp_path, monkeypatch, None, "2026-08-09")
+    perf = queries.performance(db)
+    assert perf.spy_window_too_short is False
+    html_out = panels.performance_panel(db, p="perf")
+    assert 'id="perf-spy-missing"' in html_out
+    assert "SPY benchmark unavailable" in html_out
+
+
+def test_an_empty_cache_file_is_a_fault_not_a_short_window(tmp_path, monkeypatch):
+    db = _perf_with_window(tmp_path, monkeypatch, [], "2026-08-09")
+    assert queries.performance(db).spy_window_too_short is False
+
+
+def test_once_a_trading_day_lands_in_the_window_the_comparison_appears(
+        tmp_path, monkeypatch):
+    db = _perf_with_window(tmp_path, monkeypatch,
+                           ["2026-08-05", "2026-08-06", "2026-08-07"],
+                           "2026-08-07")
+    perf = queries.performance(db)
+    assert perf.spy_points, "a bar inside the window must produce a series"
+    assert perf.spy_window_too_short is False
+
+
+def test_the_overview_leads_with_the_broker_value(seeded):
+    """Owner request: the account's actual worth at Alpaca is what the
+    page is opened for, so it goes above the comparison panels."""
+    html_out = server.route_overview(Db(seeded), {})
+    assert html_out.index('id="ovval-section"') < html_out.index('id="perf-section"')

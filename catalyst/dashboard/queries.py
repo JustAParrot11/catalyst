@@ -52,6 +52,11 @@ class Performance:
     spy_source: str = ""
     spy_error: str | None = None
     spy_rows: int = 0
+    #: True when the cache is HEALTHY and the bot's own window is simply
+    #: shorter than one trading day - a new account over a weekend, not a
+    #: fault. Kept as a flag rather than sniffed out of spy_error, so the
+    #: page can stop calling a normal Monday morning "unavailable".
+    spy_window_too_short: bool = False
     start_day: date | None = None
     end_day: date | None = None
 
@@ -183,6 +188,11 @@ def performance(db: Db) -> Performance:
     perf.spy_points, perf.spy_source, perf.spy_error, perf.spy_rows = (
         spy_points, source, error, rows,
     )
+    # A cache full of bars with none in a two-day window that happens to
+    # be a weekend is not a broken benchmark. Distinguishing the two is
+    # the whole point: one needs fixing, the other needs Tuesday.
+    perf.spy_window_too_short = bool(
+        not spy_points and rows > 0 and error and "none inside" in error)
     return perf
 
 

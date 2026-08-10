@@ -365,6 +365,25 @@ function saveAll(){
     if (r.ok) { setTimeout(function(){ window.location = PREFIX + '/'; }, 2500); }
   });
 }
+function replaceKey(which){
+  var box = 'r_' + which + '_result';
+  var payload = {which: which};
+  if (which === 'alpaca') {
+    payload.alpaca_key = val('r_alpaca_key');
+    payload.alpaca_secret = val('r_alpaca_secret');
+  } else {
+    payload.anthropic_key = val('r_anthropic_key');
+  }
+  show(box, true, 'Testing the new details before saving anything...');
+  post(PREFIX + '/replace-key', payload).then(function(r){
+    show(box, r.ok, r.message);
+    if (r.ok) {
+      ['r_alpaca_key','r_alpaca_secret','r_anthropic_key'].forEach(function(id){
+        var el = q(id); if (el) { el.value = ''; }
+      });
+    }
+  });
+}
 function saveSettings(ev){
   if (ev && ev.preventDefault) { ev.preventDefault(); }
   show('settings_result', true, 'Saving...');
@@ -535,10 +554,31 @@ def render_configured_page(prefix: str = "", *, budget_usd: str = "5",
         "<h2>Keys</h2>"
         '<div class="note">Your keys are not shown on this page, and never will be. '
         "That is on purpose: anything you can read on a screen can end up in a "
-        "screenshot. If a key stops working, or you replace one at Alpaca or "
-        "Anthropic, use the button below to paste the new value in.</div>"
-        f'<p><a href="{p}/?replace=1"><button type="button">'
-        "Replace my keys</button></a></p>"
+        "screenshot. Each one is replaced on its own below - changing your broker "
+        "details does not mean re-typing anything else.</div>"
+
+        '<fieldset><legend>Broker (Alpaca)</legend>'
+        '<label for="r_alpaca_key">Both boxes together, because Alpaca issues them '
+        "as a pair. Leave them alone to keep the ones you have.</label>"
+        '<input type="password" id="r_alpaca_key" placeholder="new API key ID" '
+        'autocomplete="off">'
+        '<input type="password" id="r_alpaca_secret" placeholder="new secret key" '
+        'autocomplete="off">'
+        '<p><button type="button" onclick="replaceKey(\'alpaca\')">'
+        "Replace the broker keys</button></p>"
+        '<div class="result" id="r_alpaca_result"></div></fieldset>'
+
+        '<fieldset><legend>Research (Anthropic)</legend>'
+        '<label for="r_anthropic_key">The key the bot thinks with. Not the billing '
+        "key above - that one is set in its own box.</label>"
+        '<input type="password" id="r_anthropic_key" placeholder="new Anthropic API '
+        'key" autocomplete="off">'
+        '<p><button type="button" onclick="replaceKey(\'anthropic\')">'
+        "Replace the research key</button></p>"
+        '<div class="result" id="r_anthropic_result"></div></fieldset>'
+
+        '<p class="hint">Changing everything at once is still possible: '
+        f'<a href="{p}/?replace=1">open the full setup form</a>.</p>'
     )
     return _shell("Catalyst setup", inner, prefix)
 
@@ -700,6 +740,9 @@ class SetupApp:
         if route == "/settings" and method == "POST":
             return self._save_settings(self._parse_body(body, headers), cookie)
 
+        if route == "/replace-key" and method == "POST":
+            return self._replace_key(self._parse_body(body, headers), cookie)
+
         if route == "/test/alpaca" and method == "POST":
             data = self._parse_body(body, headers)
             mode = (data.get("account_mode") or "paper").strip().lower()
@@ -736,6 +779,102 @@ class SetupApp:
             return "5", False
         budget = (existing.settings or {}).get("monthly_budget_usd", 5)
         return str(budget), bool(existing.anthropic_admin_key)
+
+    def _replace_key(self, data: dict[str, str],
+                     cookie: list[tuple[str, str]]) -> Response:
+        """Replace ONE credential, leaving the others untouched.
+
+        Replacing an expired Alpaca key used to mean re-pasting the
+        Anthropic key as well, because the only save path demanded all
+        three. Two secrets typed to change one is how a wrong value gets
+        pasted into the wrong box.
+
+        The new value is tested BEFORE anything is written, so a bad
+        paste leaves a working bot working.
+        """
+        which = (data.get("which") or "").strip().lower()
+        if which not in ("alpaca", "anthropic"):
+            return _json(200, {
+                "ok": False,
+                "message": "Nothing was changed: no such key to replace.",
+            }, cookie)
+
+        try:
+            existing = creds.load_credentials(self.credentials_path)
+        except Exception as exc:  # noqa: BLE001
+            return _json(200, {
+                "ok": False,
+                "message": ("Nothing was changed, because the saved details "
+                            "could not be read: " + creds.redact(str(exc))),
+            }, cookie)
+
+        alpaca_key = existing.alpaca_key
+        alpaca_secret = existing.alpaca_secret
+        anthropic_key = existing.anthropic_key
+
+        if which == "alpaca":
+            new_key = (data.get("alpaca_key") or "").strip()
+            new_secret = (data.get("alpaca_secret") or "").strip()
+            if not new_key or not new_secret:
+                return _json(200, {
+                    "ok": False,
+                    "message": ("Nothing was changed. Alpaca issues the key ID "
+                                "and the secret as a pair, so both boxes need "
+                                "filling to change either."),
+                }, cookie)
+            mode = (existing.settings or {}).get("account_mode", "paper")
+            kwargs = ({"base_url": creds.ALPACA_LIVE_BASE_URL}
+                      if mode == "live" else {})
+            ok, message = self.alpaca_tester(new_key, new_secret, **kwargs)
+            if not ok:
+                return _json(200, {
+                    "ok": False,
+                    "message": ("Nothing was changed, because the new Alpaca "
+                                "details did not work - the ones you had are "
+                                "still in place. " + message),
+                }, cookie)
+            alpaca_key, alpaca_secret = new_key, new_secret
+            changed = "broker keys"
+        else:
+            new_key = (data.get("anthropic_key") or "").strip()
+            if not new_key:
+                return _json(200, {
+                    "ok": False,
+                    "message": ("Nothing was changed. Paste the new Anthropic "
+                                "key into the box first."),
+                }, cookie)
+            ok, message = self.anthropic_tester(new_key)
+            if not ok:
+                return _json(200, {
+                    "ok": False,
+                    "message": ("Nothing was changed, because the new Anthropic "
+                                "key did not work - the one you had is still in "
+                                "place. " + message),
+                }, cookie)
+            anthropic_key = new_key
+            changed = "research key"
+
+        try:
+            creds.save_credentials(
+                alpaca_key, alpaca_secret, anthropic_key,
+                None,                       # keep this machine's access code
+                anthropic_admin_key=None,   # keep the billing key
+                settings=None,              # keep budget and account mode
+                path=self.credentials_path,
+            )
+        except creds.CredentialError as exc:
+            return _json(200, {
+                "ok": False,
+                "message": "Nothing was changed. " + str(exc),
+            }, cookie)
+
+        return _json(200, {
+            "ok": True,
+            "message": (f"Saved: the {changed} are replaced and were tested "
+                        "before anything was written. Nothing else changed - "
+                        "your other keys, budget and account choice are as "
+                        "they were."),
+        }, cookie)
 
     def _save_settings(self, data: dict[str, str],
                        cookie: list[tuple[str, str]]) -> Response:

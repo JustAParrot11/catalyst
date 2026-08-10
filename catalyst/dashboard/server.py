@@ -121,9 +121,13 @@ def render_page(title: str, body: str, active: str, path: str,
 
 
 def route_overview(db: Db, params: dict) -> str:
+    # Broker value FIRST. What the account is actually worth at Alpaca is
+    # the one number the owner opens this page for; it used to sit below
+    # a performance panel that leads with a comparison unavailable in the
+    # account's first days.
     body = (
-        panels.performance_panel(db, p="perf")
-        + panels.value_reconciliation_panel(db, p="ovval")
+        panels.value_reconciliation_panel(db, p="ovval")
+        + panels.performance_panel(db, p="perf")
         + panels.funnel_panel(db, p="funnel")
         + panels.cost_panel(db, p="ovcost", compact=True)
         + panels.alerts_panel(db, p="alerts")

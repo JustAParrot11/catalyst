@@ -25,6 +25,7 @@ from catalyst.dashboard.render import (
     esc,
     json_pretty,
     meter,
+    note,
     ok,
     pill,
     pre,
@@ -59,8 +60,13 @@ def performance_panel(db: Db, p: str = "perf") -> str:
         )
         bot_text = (f"bot index {perf.bot_index:.2f} "
                     f"(= {dollars(perf.net_equity_cents)} on a $1,000 start)")
-        spy_text = (f"SPY index {perf.spy_index:.2f}" if perf.spy_index is not None
-                    else "SPY index unavailable, see the benchmark note below")
+        if perf.spy_index is not None:
+            spy_text = f"SPY index {perf.spy_index:.2f}"
+        elif perf.spy_window_too_short:
+            spy_text = ("no SPY comparison yet - the account is younger than "
+                        "one trading day")
+        else:
+            spy_text = "SPY index unavailable, see the benchmark note below"
         out.append(prov(f"{bot_text} vs {spy_text}."))
     else:
         out.append(
@@ -77,7 +83,9 @@ def performance_panel(db: Db, p: str = "perf") -> str:
         # `(None or 0) >= 0` read as "ahead of SPY" and wore a green
         # badge beside the word "n/a" (caught by rendering it).
         if excess_v is None:
-            state, word = "idle", "no benchmark to compare against"
+            state, word = "idle", ("too early to compare - needs a trading day"
+                                   if perf.spy_window_too_short
+                                   else "no benchmark to compare against")
         elif excess_v >= 0:
             state, word = "good", "ahead of SPY"
         else:
@@ -201,12 +209,29 @@ def performance_panel(db: Db, p: str = "perf") -> str:
             "not - a like-for-like exposure-matched comparison needs a daily "
             "position-value series the schema does not record yet."
         ))
+    elif perf.spy_window_too_short:
+        # Healthy cache, window shorter than one trading day. An alarm
+        # here taught the owner to distrust a working benchmark.
+        out.append(note(
+            f'<b id="{p}-spy-early">No SPY comparison yet, and nothing is '
+            "wrong.</b> The benchmark cache is healthy - "
+            f"{perf.spy_rows} daily closes are loaded from "
+            f"<code>{esc(perf.spy_source or 'the local bar cache')}</code> - but "
+            f"the bot's own history so far ({esc(perf.start_day)} to "
+            f"{esc(perf.end_day)}) does not yet contain a completed trading "
+            "day to index against. A weekend or a first Monday looks exactly "
+            "like this. It fills in on its own once the market has closed on "
+            "a day the bot was running. Raw reason: "
+            f"<code>{esc(perf.spy_error or 'unknown')}</code>."
+        ))
     else:
         out.append(alarm(
             f'<b id="{p}-spy-missing">SPY benchmark unavailable.</b> source tried: '
             f"<code>{esc(perf.spy_source or 'local bar cache')}</code>; rows usable: "
             f"{perf.spy_rows}. Raw reason: <code>{esc(perf.spy_error or 'unknown')}</code>. "
-            "This is why the excess figure above reads unavailable rather than 0."
+            "This is why the excess figure above reads unavailable rather than 0. "
+            "The bot refreshes this cache once a day from Alpaca; if this "
+            "persists, the Maintenance page shows whether Alpaca is reachable."
         ))
     out.append(prov(
         "Missing on purpose rather than invented: the T-bill comparison the brief "

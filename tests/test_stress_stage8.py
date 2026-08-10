@@ -1228,3 +1228,86 @@ class TestSettingsAreChangeableAfterSetup:
                           json.dumps({"monthly_budget_usd": "25"}).encode(),
                           {"content-type": "application/json"})
         assert resp.status == 403
+
+
+class TestKeysAreReplacedOneAtATime:
+    """Owner request 2026-08-10: "If I want to change the alpaca key i
+    dont want to have to re-enter claude keys aswell." Two secrets typed
+    to change one is how a value ends up pasted into the wrong box."""
+
+    def _configured(self, tmp_path):
+        app = _app(tmp_path)
+        app.admin_tester = lambda k: (True, "ok")
+        _post_save(app, _body(anthropic_admin_key="sk-ant-admin01-" + "q" * 40))
+        return app
+
+    def _replace(self, app, **payload):
+        return json.loads(app.handle(
+            "POST", "/replace-key", json.dumps(payload).encode(),
+            {"content-type": "application/json"}).body)
+
+    def test_replacing_alpaca_leaves_every_other_credential_alone(self, tmp_path):
+        app = self._configured(tmp_path)
+        before = creds.load_credentials(str(tmp_path / "creds.json"))
+        r = self._replace(app, which="alpaca", alpaca_key="PKNEWNEWNEWNEWNEWNEW",
+                          alpaca_secret="brandnewsecretbrandnewsecret")
+        assert r["ok"], r
+        after = creds.load_credentials(str(tmp_path / "creds.json"))
+        assert after.alpaca_key == "PKNEWNEWNEWNEWNEWNEW"
+        assert after.alpaca_secret == "brandnewsecretbrandnewsecret"
+        assert after.anthropic_key == before.anthropic_key
+        assert after.anthropic_admin_key == before.anthropic_admin_key
+        assert after.settings == before.settings
+        assert after.dashboard_token == before.dashboard_token
+
+    def test_replacing_anthropic_leaves_the_broker_alone(self, tmp_path):
+        app = self._configured(tmp_path)
+        before = creds.load_credentials(str(tmp_path / "creds.json"))
+        r = self._replace(app, which="anthropic",
+                          anthropic_key="sk-ant-brandnewbrandnewbrandnew")
+        assert r["ok"], r
+        after = creds.load_credentials(str(tmp_path / "creds.json"))
+        assert after.anthropic_key == "sk-ant-brandnewbrandnewbrandnew"
+        assert after.alpaca_key == before.alpaca_key
+        assert after.alpaca_secret == before.alpaca_secret
+        assert after.anthropic_admin_key == before.anthropic_admin_key
+
+    def test_a_key_that_does_not_work_leaves_the_working_one_in_place(self, tmp_path):
+        app = self._configured(tmp_path)
+        before = creds.load_credentials(str(tmp_path / "creds.json"))
+        app.alpaca_tester = lambda k, s, **kw: (False, "Alpaca said 403")
+        r = self._replace(app, which="alpaca", alpaca_key="PKBADBADBADBADBADBAD",
+                          alpaca_secret="badbadbadbadbadbadbad")
+        assert not r["ok"]
+        assert "still in place" in r["message"]
+        after = creds.load_credentials(str(tmp_path / "creds.json"))
+        assert after.alpaca_key == before.alpaca_key
+        assert after.alpaca_secret == before.alpaca_secret
+
+    def test_half_a_broker_pair_is_refused(self, tmp_path):
+        app = self._configured(tmp_path)
+        r = self._replace(app, which="alpaca", alpaca_key="PKONLYTHEKEYNOSECRET")
+        assert not r["ok"]
+        assert "pair" in r["message"]
+
+    def test_an_unknown_key_name_changes_nothing(self, tmp_path):
+        app = self._configured(tmp_path)
+        assert not self._replace(app, which="dashboard_token",
+                                 anthropic_key="x")["ok"]
+
+    def test_replacing_a_key_needs_the_access_code(self, tmp_path):
+        app = self._configured(tmp_path)
+        app.require_token = True
+        app._stored_token = lambda: "the-code"
+        resp = app.handle("POST", "/replace-key",
+                          json.dumps({"which": "anthropic",
+                                      "anthropic_key": "sk-ant-x"}).encode(),
+                          {"content-type": "application/json"})
+        assert resp.status == 403
+
+    def test_the_page_offers_each_key_its_own_button(self, tmp_path):
+        app = self._configured(tmp_path)
+        page = app.handle("GET", "/", b"", {}).body.decode()
+        assert "replaceKey('alpaca')" in page
+        assert "replaceKey('anthropic')" in page
+        assert "does not mean re-typing anything else" in page
