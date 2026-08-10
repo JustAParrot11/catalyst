@@ -115,6 +115,57 @@ def _anthropic_transport(api_key: str):
     return transport
 
 
+def _maybe_reconcile_yesterday(db_file: str) -> None:
+    """Nightly bill check: compare the local ledger against Anthropic's
+    Cost API for the most recent CLOSED day, once per day, when the
+    owner supplied an admin key. Read-only against the API; a
+    discrepancy pauses scheduled spend until a human acknowledges it
+    (cost.tracker.reconcile_day). Failures are logged, never fatal."""
+    import sqlite3
+    from datetime import datetime, timedelta, timezone
+    from functools import partial
+
+    from catalyst.setup.credentials import load_credentials
+
+    try:
+        creds = load_credentials()
+    except Exception:  # noqa: BLE001
+        return
+    if not creds.anthropic_admin_key:
+        return
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date()
+    conn = sqlite3.connect(db_file)
+    try:
+        done = conn.execute(
+            "SELECT 1 FROM cost_reconciliation_events WHERE target_date = ?",
+            (yesterday.isoformat(),)).fetchone()
+        if done:
+            return
+        from catalyst.cost.cost_api import fetch_cost_api_day
+        from catalyst.cost.tracker import reconcile_day
+
+        result = reconcile_day(
+            yesterday, conn,
+            partial(fetch_cost_api_day,
+                    admin_key=creds.anthropic_admin_key))
+        if result.action_taken != "none":
+            _log.warning(
+                "Nightly bill check for %s: ledger %sc vs Anthropic %sc - "
+                "action %s. Scheduled spending is paused until the "
+                "discrepancy is acknowledged on the cost page.",
+                yesterday, result.local_total_cents,
+                result.cost_api_total_cents, result.action_taken)
+        else:
+            _log.info("Nightly bill check for %s: ledger matches "
+                      "Anthropic's records (%sc).", yesterday,
+                      result.cost_api_total_cents)
+    except Exception:  # noqa: BLE001 - the check must never kill trading
+        _log.exception("The nightly bill check failed; it will retry on "
+                       "the next cycle. Trading is unaffected.")
+    finally:
+        conn.close()
+
+
 def _run_one_cycle(db_file: str):
     """Wire the live dependencies and run exactly one cycle. Thin by
     design: every piece here is constructed, none is decided."""
@@ -206,6 +257,7 @@ def main(argv: list[str] | None = None) -> int:
             announced_ready = True
 
         try:
+            _maybe_reconcile_yesterday(path)
             report = _run_one_cycle(path)
             if report.kill_switch.tripped:
                 _log.warning("Kill switch tripped: %s. New entries are "

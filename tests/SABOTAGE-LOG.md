@@ -615,3 +615,6 @@ change kept from this session is the strengthened assertion block in
   to-live both sabotaged and caught (test_account_mode.py docstring).
 - Stage-8 stress pass: 7 further sabotage entries at the bottom of
   tests/test_stress_stage8.py.
+- cost_api adapter: bucket-flattening removed (records=buckets) and
+  missing-amount refusal removed (unreadable record priced as zero):
+  both caught by test_cost_api_adapter. Restored, green.

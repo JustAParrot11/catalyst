@@ -298,11 +298,15 @@ class Credentials:
     dashboard_token: str
     settings: dict = field(default_factory=dict)
     saved_at: str = ""
+    anthropic_admin_key: str = ""       # OPTIONAL: read-only Cost API
+                                        # reconciliation; blank = the
+                                        # nightly bill check is off
 
     def __repr__(self) -> str:
         return (
             f"Credentials(alpaca_key='{REDACTED}', alpaca_secret='{REDACTED}', "
             f"anthropic_key='{REDACTED}', dashboard_token='{REDACTED}', "
+            f"anthropic_admin_key='{REDACTED}', "
             f"settings={self.settings!r}, saved_at={self.saved_at!r})"
         )
 
@@ -316,10 +320,12 @@ class Credentials:
             "alpaca_secret": bool(self.alpaca_secret),
             "anthropic_key": bool(self.anthropic_key),
             "dashboard_token": bool(self.dashboard_token),
+            "anthropic_admin_key": bool(self.anthropic_admin_key),
         }
 
 
-_SECRET_FIELDS = ("alpaca_key", "alpaca_secret", "anthropic_key", "dashboard_token")
+_SECRET_FIELDS = ("alpaca_key", "alpaca_secret", "anthropic_key",
+                  "dashboard_token", "anthropic_admin_key")
 
 
 def _read_raw(path: Path) -> dict:
@@ -356,6 +362,7 @@ def save_credentials(
     anthropic_key: str,
     dashboard_token: str | None = None,
     *,
+    anthropic_admin_key: str | None = None,
     settings: dict | None = None,
     path: str | os.PathLike[str] | None = None,
 ) -> Path:
@@ -368,7 +375,8 @@ def save_credentials(
     Existing settings are merged, not replaced: saving new API keys must
     not silently reset a budget the owner set earlier.
     """
-    for value in (alpaca_key, alpaca_secret, anthropic_key, dashboard_token):
+    for value in (alpaca_key, alpaca_secret, anthropic_key, dashboard_token,
+                  anthropic_admin_key):
         remember_secret(value)
 
     alpaca_key = (alpaca_key or "").strip()
@@ -403,6 +411,11 @@ def save_credentials(
         token = generate_dashboard_token()
     remember_secret(token)
 
+    # None keeps an existing admin key; an explicit value replaces it
+    admin = ((anthropic_admin_key or "").strip()
+             if anthropic_admin_key is not None
+             else str(existing.get("anthropic_admin_key") or "").strip())
+
     merged_settings = dict(existing.get("settings") or {})
     merged_settings.update(settings or {})
 
@@ -414,6 +427,7 @@ def save_credentials(
         "alpaca_key": alpaca_key,
         "alpaca_secret": alpaca_secret,
         "anthropic_key": anthropic_key,
+        "anthropic_admin_key": admin,
         "dashboard_token": token,
         "settings": merged_settings,
     }
@@ -448,6 +462,7 @@ def load_credentials(path: str | os.PathLike[str] | None = None) -> Credentials:
         dashboard_token=str(data.get("dashboard_token") or ""),
         settings=dict(data.get("settings") or {}),
         saved_at=str(data.get("saved_at") or ""),
+        anthropic_admin_key=str(data.get("anthropic_admin_key") or ""),
     )
     for name in _SECRET_FIELDS:
         remember_secret(getattr(creds, name))
@@ -711,3 +726,31 @@ def _cli(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(_cli())
+
+
+def test_admin_key(key: str, *, transport: "Transport | None" = None,
+                   ) -> tuple[bool, str]:
+    """Read-only ping of the Cost API (one bucket). Never calls anything
+    that could modify limits or settings."""
+    remember_secret(key)
+    key = (key or "").strip()
+    if not key:
+        return False, ("Enter the Anthropic ADMIN key (it starts sk-ant-admin) "
+                       "then press Test again.")
+    import httpx as _httpx
+    try:
+        with _httpx.Client(transport=transport, timeout=20.0) as client:
+            resp = client.get(
+                "https://api.anthropic.com/v1/organizations/cost_report",
+                headers={"x-api-key": key,
+                         "anthropic-version": "2023-06-01"},
+                params={"starting_at": "2026-08-01T00:00:00Z",
+                        "ending_at": "2026-08-02T00:00:00Z", "limit": 1})
+    except Exception as exc:  # noqa: BLE001
+        return False, redact(f"Could not reach the Anthropic Cost API: {exc}")
+    if resp.status_code == 200:
+        return True, ("The admin key works: the nightly bill check can read "
+                      "your organization's real API costs.")
+    return False, redact(
+        f"Anthropic refused this admin key (error {resp.status_code}). "
+        f"It said: {resp.text[:300]}")
