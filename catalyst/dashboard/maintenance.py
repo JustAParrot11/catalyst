@@ -194,13 +194,26 @@ def passive_checks(db) -> list[Check]:
             "Refreshed once a day. Weekends and holidays make a gap of "
             "up to four days normal; longer means the refresh is "
             "failing and the comparison against the S&P will stall."))
-    except Exception as exc:  # noqa: BLE001
+    except KeyError:
+        # NOT an error: `data/` is gitignored, so every fresh install
+        # starts with no bar file and the refresher fills it on the
+        # first cycle. Reporting this as a fault - with a raw exception
+        # beside it - made a brand-new, perfectly healthy install look
+        # broken, and tripped the upgrade's own test gate on the owner's
+        # server (2026-08-10).
+        out.append(Check(
+            "S&P benchmark data", "The bot itself", UNKNOWN,
+            "not fetched yet",
+            "Downloaded automatically on the first cycle after start-up, "
+            "free with your Alpaca subscription. If it is still empty an "
+            "hour after the bot started, the download is failing and the "
+            "comparison against the S&P has nothing to draw against."))
+    except Exception as exc:  # noqa: BLE001 - a genuinely odd failure
         out.append(Check(
             "S&P benchmark data", "The bot itself", WARN,
-            "no benchmark data cached yet",
-            "It is fetched on the first cycle after start-up. If this "
-            "persists, the performance chart has nothing to compare "
-            "against.", raw=repr(exc)))
+            "benchmark data could not be read",
+            "The file exists but could not be parsed. The raw error is "
+            "beside this row.", raw=repr(exc)))
     return out
 
 

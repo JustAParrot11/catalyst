@@ -66,6 +66,12 @@ def pytest_configure(config):
     os.environ.setdefault("CATALYST_DB", os.path.join(sandbox, "catalyst.db"))
     os.environ.setdefault("CATALYST_CREDENTIALS",
                           os.path.join(sandbox, "credentials.json"))
+    # The bar cache too. data/ is gitignored, so whether it exists is a
+    # property of the MACHINE, not of the code - and a test whose result
+    # depends on that is not a test. One did: it passed on a dev box
+    # that had run scripts/fetch_history.py and failed on the owner's
+    # server, which failed the upgrade gate and rolled the release back.
+    os.environ["CATALYST_BARS"] = os.path.join(sandbox, "bars")
 
 
 def pytest_unconfigure(config):

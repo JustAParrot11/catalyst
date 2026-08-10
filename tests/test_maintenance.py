@@ -180,8 +180,44 @@ class TestQueriesActuallyRun:
     checks were useless. Nothing here may report a query error."""
 
     def test_no_passive_check_reports_a_query_error(self, db):
+        """Only a genuine fault may carry a raw error. A fresh install
+        with nothing fetched yet must produce none - this assertion
+        originally treated 'no bars downloaded yet' as a failure, which
+        passed on a machine that had run fetch_history and failed on a
+        real server, rolling back the owner's upgrade."""
         for c in maintenance.passive_checks(db):
-            assert not c.raw, f"{c.name} query failed: {c.raw}"
+            assert not c.raw, f"{c.name} reported an error: {c.raw}"
+
+    def test_a_missing_bar_cache_is_not_reported_as_a_fault(
+            self, db, tmp_path, monkeypatch):
+        """data/ is gitignored, so EVERY fresh install starts with no
+        benchmark file. That is 'not set up yet', never a problem."""
+        monkeypatch.setenv("CATALYST_BARS", str(tmp_path / "definitely-absent"))
+        check = next(c for c in maintenance.passive_checks(db)
+                     if c.name == "S&P benchmark data")
+        assert check.state == "unknown"
+        assert not check.raw
+        assert "not fetched yet" in check.summary
+
+    def test_a_populated_bar_cache_reads_as_online(
+            self, db, tmp_path, monkeypatch):
+        from datetime import date, timedelta
+        from decimal import Decimal
+
+        from catalyst.backtest.data import Bar, BarCache
+
+        root = tmp_path / "bars"
+        today = date.today()
+        BarCache(str(root)).write_bars("SPY", [
+            Bar(day=today - timedelta(days=i), open=Decimal("1"),
+                high=Decimal("1"), low=Decimal("1"), close=Decimal("1"),
+                volume=Decimal("1"))
+            for i in range(3)])
+        monkeypatch.setenv("CATALYST_BARS", str(root))
+        check = next(c for c in maintenance.passive_checks(db)
+                     if c.name == "S&P benchmark data")
+        assert check.state == "ok"
+        assert "3 daily bars" in check.summary
 
     def test_element_ids_are_unique_across_both_tables(self, db):
         """Both tables started their row numbering at zero, so the raw
