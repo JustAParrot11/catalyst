@@ -111,6 +111,52 @@ why, and exactly what it is spending.
 The upgrade command backs up the database first, runs the full test
 suite after, and puts everything back the way it was if anything fails.
 
+## If the page will not open
+
+Catalyst writes a reason to its log every time. Read it with:
+
+```
+sudo journalctl -u catalyst -n 50 --no-pager
+```
+
+**"Could not open the setup page on 0.0.0.0:8000"** — something else on
+the server is already using port 8000. The bot itself is fine and still
+trading; only the web page is affected. Find the culprit:
+
+```
+sudo ss -ltnp | grep :8000
+```
+
+If the answer mentions `catalyst`, you have a second copy running — stop
+the extra one, or just reboot the server; the copy started by
+`systemctl` is the one to keep. If it is some other program, either stop
+that program or move Catalyst to another port:
+
+```
+sudo systemctl edit catalyst
+```
+
+Add these three lines, save, then restart:
+
+```
+[Service]
+Environment=CATALYST_PORT=8001
+```
+
+```
+sudo systemctl restart catalyst
+```
+
+**"Another Catalyst is already running on this machine"** — that is not
+a fault. A second copy noticed the first and is deliberately not
+trading, so two bots can never place the same order twice. It stays
+running and takes over by itself if the first one stops. Nothing to do.
+
+**The page times out with no error in the log** — the server is
+answering but your provider's firewall is blocking the port. Their
+control panel will have a firewall page where you can allow port 8000
+for your own address.
+
 ## Two things worth knowing
 
 - **It starts on practice money and stays there** until you make a
