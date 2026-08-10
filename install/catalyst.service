@@ -1,0 +1,57 @@
+# Catalyst trading bot - systemd unit template.
+#
+# This file is a TEMPLATE. install.sh substitutes every double-underscore
+# placeholder below for the paths it actually used and writes the result to
+# /etc/systemd/system/catalyst.service. Do not edit the installed copy by
+# hand - re-run install.sh instead, which is safe to run twice.
+
+[Unit]
+Description=Catalyst autonomous trading bot
+Documentation=https://github.com/catalyst
+# The bot's first act is to reach Alpaca and Anthropic, so it waits for
+# real network configuration, not merely for the network stack to exist.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=__GROUP__
+WorkingDirectory=__STATE_DIR__
+
+# Everything the bot needs to find its own state. Nothing secret is
+# here: credentials live in the file below, mode 0600, owned by the
+# service user - never in the environment, where `systemctl show` would
+# print them.
+Environment=CATALYST_DB=__DB__
+Environment=CATALYST_CREDENTIALS=__CREDENTIALS__
+Environment=CATALYST_SERVICE_USER=__USER__
+Environment=CATALYST_BIND=0.0.0.0
+Environment=CATALYST_PORT=__PORT__
+Environment=PYTHONUNBUFFERED=1
+
+ExecStart=__VENV_PYTHON__ -m catalyst.orchestrator.scheduler
+
+# Unattended means it has to come back by itself. on-failure rather than
+# always: a clean exit(0) is a deliberate stop and should stay stopped.
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=30s
+
+# This process handles money unattended on a machine nobody logs into.
+# It needs exactly two writable directories and no privileges at all.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=__STATE_DIR__ __ETC_DIR__
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=catalyst
+
+[Install]
+WantedBy=multi-user.target
