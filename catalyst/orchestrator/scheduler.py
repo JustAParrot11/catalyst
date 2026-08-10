@@ -76,11 +76,21 @@ def start_setup_server() -> threading.Thread | None:
         server = make_dash_server(host, port, db_path(),
                                   setup_app=SetupApp(path_prefix="/setup"))
     except OSError as exc:
+        # Actionable, because the owner is not a developer (owner report
+        # 2026-08-10: the old message named no command and no culprit).
+        # The dangerous case - another Catalyst - is caught earlier by
+        # the instance lock in main(), so by here it is another program.
         _log.error(
-            "Could not open the setup page on %s:%s (%s). Nothing else is affected, "
-            "but the browser setup form will not answer until this is fixed - the "
-            "usual cause is another program already using that port.",
-            host, port, exc,
+            "Could not open the setup page on %s:%s (%s).\n"
+            "  What this means: the bot is fine and keeps trading, but the web "
+            "page will not answer until port %s is free.\n"
+            "  To find what is using it, run:  sudo ss -ltnp | grep :%s\n"
+            "  Then either stop that program, or give Catalyst a different port "
+            "with:  sudo systemctl edit catalyst   and add\n"
+            "      [Service]\n"
+            "      Environment=CATALYST_PORT=8001\n"
+            "  followed by:  sudo systemctl restart catalyst",
+            host, port, exc, port, port,
         )
         return None
 
@@ -272,6 +282,25 @@ def main(argv: list[str] | None = None) -> int:
         configured = credentials_exist()
         _log.info("Self-test passed. Credentials %s.",
                   "are set" if configured else "not entered yet")
+        return 0
+
+    # ONE Catalyst per machine, taken BEFORE anything can trade (owner
+    # report 2026-08-10). Two schedulers on one Alpaca account duplicate
+    # every order and double the intended exposure; the only symptom was
+    # a line about the web page. Exit 0, not a failure: a duplicate that
+    # stands down is behaving correctly, and a non-zero exit would have
+    # systemd restart it every 10s forever.
+    from catalyst.orchestrator import instance_lock
+
+    if instance_lock.acquire() is None:
+        _log.error(
+            "Catalyst is already running on this machine (process %s), so this "
+            "copy is stopping now. Two copies would place every order twice and "
+            "take double the intended position. Nothing is wrong with the copy "
+            "that is already running - its page is on port %s. To see it:  "
+            "sudo systemctl status catalyst",
+            instance_lock.holder_pid(),
+            os.environ.get("CATALYST_PORT", "8000"))
         return 0
 
     for sig in (signal.SIGTERM, signal.SIGINT):
