@@ -320,6 +320,60 @@ class TestPortClashIsExplained:
             os.environ.pop("CATALYST_PORT", None)
 
 
+class TestSuiteNeverTouchesProductionPaths:
+    """Found on the owner's live server 2026-08-10. upgrade.sh runs this
+    suite as ROOT; a test called scheduler.main() without overriding
+    CATALYST_LOCK, so the run created /var/lib/catalyst/catalyst.lock
+    owned by root:root. The service user could then never open it, the
+    guard failed open on every start, and a real duplicate Catalyst went
+    undetected. The suite broke the machine it was proving healthy."""
+
+    def test_default_lock_path_is_redirected_away_from_var_lib(self):
+        assert not il.lock_path().startswith("/var/lib/catalyst"), (
+            "conftest must redirect CATALYST_LOCK into a temp dir - "
+            "otherwise a root-run suite writes to the live install")
+
+    def test_no_production_lock_file_is_created_by_the_suite(self):
+        """The direct assertion: after this suite has run scheduler.main()
+        in-process several times, the production path must be untouched.
+        Skipped when a real install already owns the file."""
+        import subprocess as _sp
+        probe = (
+            "import os,sys;"
+            "sys.path.insert(0, %r);" % os.getcwd() +
+            "os.environ.pop('CATALYST_LOCK', None);"
+            "from catalyst.orchestrator import instance_lock as il;"
+            "print(il.DEFAULT_LOCK_PATH)")
+        out = _sp.run([sys.executable, "-c", probe], capture_output=True,
+                      text=True, timeout=60)
+        default = out.stdout.strip()
+        assert default == "/var/lib/catalyst/catalyst.lock"
+        # this test process must NOT be pointed there
+        assert os.environ.get("CATALYST_LOCK", "") != default
+
+    def test_failure_reason_is_printed_beside_the_warning(
+            self, tmp_path, monkeypatch, caplog):
+        """House rule 3: the original warning named no cause, so the
+        owner's root-owned-file failure was undiagnosable from the log."""
+        import errno as _errno
+        import fcntl
+        import logging
+
+        def broken(fd, flags):
+            raise OSError(_errno.EACCES, "Permission denied")
+
+        monkeypatch.setattr(fcntl, "flock", broken)
+        monkeypatch.setattr(il, "_held", None)
+        monkeypatch.setattr(il, "_held_path", None)
+        with caplog.at_level(logging.WARNING):
+            assert il.acquire(str(tmp_path / "l.lock")) is not None
+        assert "Permission denied" in caplog.text
+        # the concrete exception class, not a bare "OSError" - Python
+        # raises the PermissionError subclass for EACCES
+        assert "PermissionError" in caplog.text
+        assert "uid" in caplog.text        # and who owns it vs who we are
+
+
 @pytest.mark.parametrize("name", ["acquire"])
 def test_lock_module_is_offline_and_tiny(name):
     """This guard sits in front of all trading; it must stay boring."""
