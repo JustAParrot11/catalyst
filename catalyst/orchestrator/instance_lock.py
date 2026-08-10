@@ -54,8 +54,8 @@ def acquire(path: str | None = None) -> IO | None:
         if parent:
             os.makedirs(parent, mode=0o700, exist_ok=True)
         handle = open(target, "a+")
-    except OSError:
-        return _fail_open(target)
+    except OSError as exc:
+        return _fail_open(target, exc)
     try:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
@@ -67,7 +67,7 @@ def acquire(path: str | None = None) -> IO | None:
         # this module promises to fail open, and stop the bot for good.
         if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
             return None      # genuinely held by another process
-        return _fail_open(target)
+        return _fail_open(target, exc)
     try:
         handle.seek(0)
         handle.truncate()
@@ -80,14 +80,29 @@ def acquire(path: str | None = None) -> IO | None:
     return handle
 
 
-def _fail_open(target: str):
-    """The guard could not run. Trading must not stop for that."""
+def _fail_open(target: str, exc: BaseException | None = None):
+    """The guard could not run. Trading must not stop for that - but the
+    REASON must be printed beside it (house rule 3). The first version
+    of this warning named no cause, and the owner's real failure (a
+    root-owned lock file left by the test suite) could not be diagnosed
+    from the log at all - it cost a round trip to find."""
     import logging
+    owner = ""
+    try:
+        st = os.stat(target)
+        owner = (f" The lock file exists, owned by uid {st.st_uid}, mode "
+                 f"{st.st_mode & 0o777:o}; this process runs as uid "
+                 f"{os.geteuid()}. If those differ, fix it with:  sudo chown "
+                 f"$(stat -c %U {os.path.dirname(target)}) {target}")
+    except OSError:
+        pass
     logging.getLogger("catalyst.scheduler").warning(
-        "Could not use the duplicate-instance lock at %s, so this copy "
-        "cannot check whether another Catalyst is already running. It "
-        "will carry on. If you ever see two sets of orders, stop every "
-        "copy and start just one.", target)
+        "Could not use the duplicate-instance lock at %s (%s: %s), so this "
+        "copy cannot check whether another Catalyst is already running. It "
+        "will carry on trading.%s If you ever see two sets of orders, stop "
+        "every copy and start just one.",
+        target, type(exc).__name__ if exc else "unknown",
+        exc if exc else "no reason captured", owner)
     return _NULL_LOCK
 
 

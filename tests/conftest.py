@@ -5,10 +5,23 @@
    install is a broken suite (data-engineer's brief; CLAUDE.md).
 2. NO CREDENTIALS. Alpaca/Anthropic env vars are stripped for the whole
    session so a test cannot accidentally use or leak them.
+3. NO PRODUCTION PATHS. Every default that points at /var/lib/catalyst
+   or /etc/catalyst is redirected into a temp directory for the whole
+   session.
+
+Rule 3 exists because it was violated, on the owner's live server
+(2026-08-10). upgrade.sh runs the suite as ROOT; a test called
+scheduler.main() without overriding CATALYST_LOCK, so the run created
+/var/lib/catalyst/catalyst.lock owned by root:root. The service user
+then could not open it, the duplicate-instance guard failed open on
+every start, and the owner's real duplicate Catalyst went undetected.
+A test suite that writes to production paths can break the machine it
+is meant to be proving healthy.
 """
 
 import os
 import socket
+import tempfile
 
 import pytest
 
@@ -44,9 +57,22 @@ def pytest_configure(config):
         if var.startswith(("ALPACA", "APCA", "ANTHROPIC")):
             os.environ.pop(var)
 
+    # Rule 3: no test may touch the installed system's own files, even
+    # when run as root by upgrade.sh. Set for the whole session so a
+    # test that forgets to override a path still cannot reach /var/lib.
+    config._catalyst_tmp = tempfile.TemporaryDirectory(prefix="catalyst-tests-")
+    sandbox = config._catalyst_tmp.name
+    os.environ["CATALYST_LOCK"] = os.path.join(sandbox, "catalyst.lock")
+    os.environ.setdefault("CATALYST_DB", os.path.join(sandbox, "catalyst.db"))
+    os.environ.setdefault("CATALYST_CREDENTIALS",
+                          os.path.join(sandbox, "credentials.json"))
+
 
 def pytest_unconfigure(config):
     socket.socket = _REAL_SOCKET
+    tmp = getattr(config, "_catalyst_tmp", None)
+    if tmp is not None:
+        tmp.cleanup()
 
 
 @pytest.fixture

@@ -423,6 +423,17 @@ if [ "${TEST_RC}" -ne 0 ]; then
 fi
 ok "every test passed ($(grep -Eo '[0-9]+ passed' "${TEST_LOG}" | tail -n 1 || echo 'see test log'))"
 
+# Belt and braces: the tests run as root, so anything they touched in
+# the service's own folders would be left root-owned and unusable by the
+# service user. That happened once for real - a root-owned lock file
+# silently disabled the duplicate-instance guard on every start
+# (2026-08-10). The suite no longer writes there at all; this hands the
+# folders back regardless, and repairs installs already broken by it.
+if [ -d "${CATALYST_STATE_DIR}" ]; then
+  run chown -R "${CATALYST_SERVICE_USER}:${CATALYST_SERVICE_USER}" \
+      "${CATALYST_STATE_DIR}" || true
+fi
+
 # --------------------------------------------------------------------------
 phase "Restarting Catalyst and checking it came back"
 # --------------------------------------------------------------------------
