@@ -288,9 +288,41 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # quieter, and to stderr
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
+    def _delegate_setup(self, method: str, body: bytes = b"") -> bool:
+        """Route /setup* to the mounted SetupApp (stage 7). Returns True
+        when the request was handled."""
+        app = getattr(self, "setup_app", None)
+        if app is None or not self.path.startswith("/setup"):
+            return False
+        headers = {k.lower(): v for k, v in self.headers.items()}
+        resp = app.handle(method, self.path, body, headers)
+        payload = resp.body
+        self.send_response(resp.status)
+        self.send_header("Content-Type", resp.content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        for name, value in resp.headers:
+            self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(payload)
+        return True
+
     def do_GET(self):
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
+        if self._delegate_setup("GET"):
+            return
+        app = getattr(self, "setup_app", None)
+        if (app is not None and parsed.path == "/"
+                and not app._is_configured()):
+            # first run: the owner's link must land on the credential
+            # form, not an empty dashboard (stress stage-8 E2)
+            self.send_response(302)
+            query = f"?{parsed.query}" if parsed.query else ""
+            self.send_header("Location", f"/setup{query}")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         db = Db(self.db_file or db_path())
         try:
             if parsed.path == "/health":
@@ -322,6 +354,11 @@ class Handler(BaseHTTPRequestHandler):
         self.do_GET()
 
     def do_POST(self):
+        if self.path.startswith("/setup"):
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length) if length else b""
+            if self._delegate_setup("POST", body):
+                return
         parsed = urlparse(self.path)
         length = int(self.headers.get("Content-Length") or 0)
         raw_body = self.rfile.read(length).decode("utf-8") if length else ""
@@ -349,23 +386,28 @@ class Handler(BaseHTTPRequestHandler):
                 db.close()
             return self._send_html(400, body)
 
-        if parsed.path == "/setup":
-            # STAGE 7 MOUNT POINT: the real credential write lands here.
-            return self._send_json(501, {
-                "error": "not implemented",
-                "detail": "Stage 7 (integration-engineer) owns the credential setup "
-                          "flow. This route exists as the agreed mount point; it "
-                          "deliberately does not accept or store credentials yet.",
-                "mount_point": panels.SETUP_MOUNT_POINT,
-                "build_hash": BUILD_HASH,
-            })
-
+        if parsed.path.startswith("/setup"):
+            if getattr(self, "setup_app", None) is None:
+                # mount point exists but nothing is mounted (running the
+                # dashboard standalone): say so honestly
+                return self._send_json(501, {
+                    "error": "not implemented",
+                    "detail": "No setup app is mounted on this server. The "
+                              "installed service mounts stage 7's SetupApp "
+                              "here (catalyst.orchestrator.scheduler).",
+                    "mount_point": panels.SETUP_MOUNT_POINT,
+                    "build_hash": BUILD_HASH,
+                })
+            # handled in do_POST via _delegate_setup before we get here
         return self._send_json(404, {"error": f"no POST route {parsed.path}"})
 
 
 def make_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT,
-                db_file: str | None = None) -> ThreadingHTTPServer:
-    handler = type("BoundHandler", (Handler,), {"db_file": db_file or db_path()})
+                db_file: str | None = None,
+                setup_app=None) -> ThreadingHTTPServer:
+    handler = type("BoundHandler", (Handler,),
+                   {"db_file": db_file or db_path(),
+                    "setup_app": setup_app})
     return ThreadingHTTPServer((host, port), handler)
 
 

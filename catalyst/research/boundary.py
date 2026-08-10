@@ -66,6 +66,8 @@ class CostContext:
     governor_profit_share: Decimal      # live adaptive value, always passed
     cycle_id: str
     kind: Literal["scheduled", "manual"]
+    owner_monthly_cap_cents: Decimal | None = None  # setup-page budget;
+                                        # only ever LOWERS the cap (E1)
 
 
 # A transport is a callable taking the full Messages API payload dict
@@ -116,7 +118,9 @@ def investigate(
             kind=cost_context.kind, component="research")
         decision = authorize(estimate, conn,
                              cost_context.governor_profit_share,
-                             cycle_id=cost_context.cycle_id)
+                             cycle_id=cost_context.cycle_id,
+                             owner_monthly_cap_cents=(
+                                 cost_context.owner_monthly_cap_cents))
         if not decision.authorized:
             return None
         try:

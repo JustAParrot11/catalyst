@@ -362,7 +362,10 @@ def _protective_duties_broker(*, open_orders, on_delete=None, on_post=None):
         method = request.method
         url = str(request.url)
         if method == "GET" and "/v2/positions" in url:
-            return httpx.Response(200, json=[])
+            # the broker really holds what these fixtures seed locally -
+            # the E3 ghost check (a filled local position the broker
+            # does not hold blocks entries) is exercised by its own test
+            return httpx.Response(200, json=[{"symbol": "T", "qty": "2"}])
         if method == "DELETE" and "/v2/orders/" in url:
             oid = url.rsplit("/", 1)[1]
             cancelled.append(oid)

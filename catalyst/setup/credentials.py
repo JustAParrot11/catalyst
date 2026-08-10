@@ -29,6 +29,7 @@ import os
 import re
 import secrets
 import tempfile
+import traceback
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -104,6 +105,31 @@ def redact(text: Any) -> str:
     return out
 
 
+def _is_exc_info(value) -> bool:
+    """A real (type, value, tb) triple. `exc_info=True` is normally
+    resolved before the record exists, but a hand-built LogRecord can
+    still carry the bare flag - and format_exception(*True) would drop
+    the whole record."""
+    return isinstance(value, tuple) and len(value) == 3 and value[0] is not None
+
+
+def _redacted_value(value):
+    """Redact one log argument, preserving its type unless redaction had
+    something to remove. Numbers pass through untouched so %d/%f keep
+    working; anything else is judged on the string that would reach the
+    log."""
+    if isinstance(value, str):
+        return redact(value)
+    if value is None or isinstance(value, (int, float, complex)):
+        return value
+    try:
+        rendered = str(value)
+    except Exception:            # a __str__ that raises is the caller's
+        return value             # problem, not a leak this filter can fix
+    cleaned = redact(rendered)
+    return cleaned if cleaned != rendered else value
+
+
 class RedactingFilter(logging.Filter):
     """Attach to any logger and no secret can pass through it.
 
@@ -114,27 +140,42 @@ class RedactingFilter(logging.Filter):
     """
 
     def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
-        # Redact STRINGS only: a secret is a string, an int is not - and
-        # coercing numeric args to str breaks any %d/%f format elsewhere
-        # in the process (this filter sits on the ROOT logger; it broke
-        # unrelated trading code during the stage-5/7 merge dry-run).
+        # Numbers keep their TYPE so %d/%f keep working anywhere in the
+        # process (this filter sits on the ROOT logger; coercing every
+        # arg to str broke unrelated trading code during the stage-5/7
+        # merge dry-run). Everything else is redacted through its
+        # rendered form, because that rendered form is what reaches the
+        # log: bytes, a dict, or any object whose __str__ carries a key
+        # (stage-8 stress: `log.info("payload %s", (KEY, 1))` leaked).
         # And a logging filter must never raise into trading code: on
         # any internal error the record is DROPPED, not passed through
         # unredacted - fail closed for secrecy, open for logging.
         try:
             if isinstance(record.msg, str):
                 record.msg = redact(record.msg)
+            else:
+                record.msg = _redacted_value(record.msg)
             if record.args:
                 if isinstance(record.args, dict):
-                    record.args = {
-                        k: (redact(v) if isinstance(v, str) else v)
-                        for k, v in record.args.items()}
+                    record.args = {k: _redacted_value(v)
+                                   for k, v in record.args.items()}
                 else:
-                    record.args = tuple(
-                        (redact(a) if isinstance(a, str) else a)
-                        for a in record.args)
+                    record.args = tuple(_redacted_value(a)
+                                        for a in record.args)
+            # exc_info is turned into text by the HANDLER's formatter,
+            # which runs AFTER every filter - so redacting exc_text alone
+            # never saw a traceback at all, and every `log.exception(...)`
+            # whose exception message held a key went to the journal in
+            # clear (stage-8 stress). Formatting it here, into the field
+            # the formatter reuses, is what closes that (Formatter.format
+            # honours a pre-set record.exc_text).
+            if record.exc_text is None and _is_exc_info(record.exc_info):
+                record.exc_text = "".join(
+                    traceback.format_exception(*record.exc_info)).rstrip()
             if record.exc_text:
                 record.exc_text = redact(record.exc_text)
+            if record.stack_info:
+                record.stack_info = redact(record.stack_info)
             return True
         except Exception:
             return False

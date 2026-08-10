@@ -55,7 +55,13 @@ def authorize(
     governor_profit_share: Decimal,
     as_of: date | None = None,
     cycle_id: str | None = None,
+    owner_monthly_cap_cents: Decimal | None = None,
 ) -> GovernorDecision:
+    """owner_monthly_cap_cents is the number the owner typed into the
+    setup page ("the bot will not go past it"). It can only ever LOWER
+    the scheduled cap - an owner figure above the hard clamp changes
+    nothing (stress stage-8 E1: the field was collected and read by
+    nobody, which made the setup page's promise false)."""
     as_of = as_of or datetime.now(timezone.utc).date()
     spent = month_to_date_cents(estimate.kind, conn, as_of)
 
@@ -80,6 +86,10 @@ def authorize(
         )
         cap = min(uncapped, GOVERNOR_MAX_CAP_CENTS)
         reason_suffix = "_hard_capped" if uncapped > GOVERNOR_MAX_CAP_CENTS else ""
+        if owner_monthly_cap_cents is not None \
+                and owner_monthly_cap_cents < cap:
+            cap = max(owner_monthly_cap_cents, Decimal("0"))
+            reason_suffix = "_owner_capped"
         would_be = spent + estimate.estimated_cents
         if would_be > cap:
             decision = GovernorDecision(

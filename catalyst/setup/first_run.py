@@ -28,6 +28,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import math
 import urllib.parse
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -536,14 +537,18 @@ class SetupApp:
         budget_raw = (data.get("monthly_budget_usd") or "5").strip()
         try:
             budget = float(budget_raw)
-            if budget < 0:
+            # float() accepts "nan" and "inf". NaN then passes `< 0`
+            # because every comparison with NaN is False, so it would be
+            # stored as a spending limit that no comparison can ever
+            # exceed (stage-8 stress).
+            if not math.isfinite(budget) or budget < 0:
                 raise ValueError
         except ValueError:
             return _json(200, {
                 "ok": False,
                 "message": ("Nothing was saved. The monthly research budget must be a "
-                            f"plain number of dollars - \"{html.escape(budget_raw)}\" "
-                            "is not one. Try 5."),
+                            f"plain number of dollars between 0 and 100 - "
+                            f"\"{html.escape(budget_raw)}\" is not one. Try 5."),
             }, cookie)
 
         account_mode = (data.get("account_mode") or "paper").strip().lower()

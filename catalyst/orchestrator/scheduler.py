@@ -62,12 +62,19 @@ def start_setup_server() -> threading.Thread | None:
     taken: a bot that refuses to trade because its web page could not
     bind is the wrong trade-off.
     """
-    from catalyst.setup.first_run import DEFAULT_BIND, DEFAULT_PORT, SetupApp, make_server
+    from catalyst.setup.first_run import DEFAULT_BIND, DEFAULT_PORT, SetupApp
 
     host = os.environ.get("CATALYST_BIND", DEFAULT_BIND)
     port = int(os.environ.get("CATALYST_PORT", DEFAULT_PORT))
     try:
-        server = make_server(SetupApp(), host, port)
+        # The full dashboard IS the service's web face (BUILD-BRIEF calls
+        # it not optional; stress stage-8 E2 found only the setup form was
+        # served). SetupApp mounts at /setup; an unconfigured system's
+        # "/" redirects there so install.sh's printed link still lands on
+        # the form.
+        from catalyst.dashboard.server import make_server as make_dash_server
+        server = make_dash_server(host, port, db_path(),
+                                  setup_app=SetupApp(path_prefix="/setup"))
     except OSError as exc:
         _log.error(
             "Could not open the setup page on %s:%s (%s). Nothing else is affected, "
@@ -135,9 +142,14 @@ def _run_one_cycle(db_file: str):
 
     conn = sqlite3.connect(db_file)
     try:
+        from decimal import Decimal as _D
+        budget = (creds.settings or {}).get("monthly_budget_usd")
+        owner_cap = (_D(str(budget)) * 100).quantize(_D("1")) \
+            if budget is not None else None
         return run_cycle(conn, broker, transport, feed,
                          build_candidates, cluster,
-                         account_mode=account_mode)
+                         account_mode=account_mode,
+                         owner_monthly_cap_cents=owner_cap)
     finally:
         conn.close()
         broker.close()
