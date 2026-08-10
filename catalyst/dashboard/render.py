@@ -103,6 +103,13 @@ _CSS = """
   --step-4:      #1c5cab;
   --step-5:      #104281;
   --header:      #17171a;
+  --rail:        #14161c;
+  --rail-line:   #23262f;
+  --rail-ink:    #e7e8ec;
+  --rail-muted:  #939aab;
+  --rail-hover:  rgba(255,255,255,.06);
+  --rail-active: rgba(66,133,214,.20);
+  --focus-ring:  #2a78d6;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -127,28 +134,97 @@ _CSS = """
     --step-4:    #6da7ec;
     --step-5:    #9ec5f4;
     --header:    #000000;
+    --rail:      #0a0b0e;
+    --rail-line: #1d1f26;
+    --rail-ink:  #e7e8ec;
+    --rail-muted: #8b91a1;
+    --rail-hover: rgba(255,255,255,.07);
+    --rail-active: rgba(57,135,229,.24);
+    --focus-ring: #6da7ec;
   }
 }
 * { box-sizing: border-box; }
-body { font: 14.5px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+body { font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
        margin: 0; color: var(--ink); background: var(--page);
        -webkit-font-smoothing: antialiased; }
+/* Figures align in columns everywhere. On a page whose whole job is
+   comparing numbers, proportional digits make the eye do arithmetic it
+   should not have to. */
+.tile-value, .funnel-n, td.num, th.num, .rail-value, .big,
+.mono { font-variant-numeric: tabular-nums; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+/* --- shell: fixed sidebar, scrolling content ------------------------ */
+.skip { position: absolute; left: -9999px; }
+.skip:focus { left: 8px; top: 8px; z-index: 50; background: var(--surface);
+              color: var(--ink); padding: 8px 12px; border-radius: 6px;
+              border: 1px solid var(--focus-ring); }
+.shell { display: grid; grid-template-columns: 232px minmax(0, 1fr);
+         min-height: 100vh; }
+.sidebar { background: var(--rail); border-right: 1px solid var(--rail-line);
+           padding: 14px 10px; position: sticky; top: 0; height: 100vh;
+           overflow-y: auto; display: flex; flex-direction: column; gap: 14px; }
+.brand { display: flex; align-items: center; gap: 8px; color: var(--rail-ink);
+         text-decoration: none; font-weight: 650; font-size: 14px;
+         letter-spacing: .02em; padding: 4px 8px 0 8px; }
+.brand-mark { color: var(--series-1); font-size: 11px; }
+.nav-group { margin-bottom: 2px; }
+.nav-group-title { font-size: 10px; text-transform: uppercase;
+                   letter-spacing: .12em; color: var(--rail-muted);
+                   margin: 0 0 4px 8px; font-weight: 600; }
+.sidebar nav a { display: block; text-decoration: none; padding: 6px 8px;
+                 border-radius: 6px; color: var(--rail-ink); margin-bottom: 1px;
+                 border-left: 2px solid transparent; }
+.sidebar nav a:hover { background: var(--rail-hover); }
+.sidebar nav a.active { background: var(--rail-active);
+                        border-left-color: var(--series-1); }
+.nav-label { display: block; font-size: 13px; font-weight: 550; }
+.nav-hint { display: block; font-size: 10.5px; color: var(--rail-muted);
+            line-height: 1.35; }
+.sidebar nav a.active .nav-hint { color: var(--rail-ink); opacity: .75; }
+.sidebar-foot { margin-top: auto; font-size: 10.5px; color: var(--rail-muted);
+                padding: 0 8px; line-height: 1.5; }
+.sidebar-foot code { font-size: 10px; }
+.content { min-width: 0; display: flex; flex-direction: column; }
+.content > header { background: var(--surface);
+                    border-bottom: 1px solid var(--hairline);
+                    padding: 14px 22px 0 22px; position: sticky; top: 0;
+                    z-index: 10; }
+.titlebar h1 { font-size: 19px; margin: 0; letter-spacing: -.015em;
+               font-weight: 650; }
+.subtitle { margin: 2px 0 0 0; color: var(--muted); font-size: 12.5px; }
+
+/* --- status rail: the facts you must never navigate for -------------- */
+.rail { display: flex; flex-wrap: wrap; gap: 0; margin: 12px -22px 0 -22px;
+        border-top: 1px solid var(--hairline); }
+.rail-item { display: flex; align-items: baseline; gap: 7px;
+             padding: 8px 16px; border-right: 1px solid var(--hairline);
+             font-size: 12px; }
+.rail-dot { font-size: 9px; line-height: 1; }
+.rail-good .rail-dot { color: var(--good); }
+.rail-warn .rail-dot { color: var(--warning); }
+.rail-crit .rail-dot { color: var(--critical); }
+.rail-idle .rail-dot { color: var(--muted); }
+.rail-label { color: var(--muted); text-transform: uppercase;
+              letter-spacing: .06em; font-size: 10px; }
+.rail-value { font-weight: 650; font-size: 13px; }
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; }
+  .sidebar { position: static; height: auto; flex-direction: row;
+             flex-wrap: wrap; align-items: center; gap: 6px; }
+  .sidebar nav { display: flex; flex-wrap: wrap; gap: 4px; width: 100%; }
+  .nav-group { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+  .nav-group-title { margin: 0 4px 0 0; }
+  .nav-hint, .sidebar-foot { display: none; }
+  .content > header { position: static; }
+}
 /* Measure. Prose set the full width of a 1180px page runs to ~170
    characters a line, which is roughly twice what the eye tracks
    comfortably; the return sweep is where re-reading the same line comes
    from. Tables, charts and tile rows are exempt - they are not prose. */
 p, li, .prov, .caveat, .alarm, .ok, .empty, summary { max-width: 82ch; }
-header { background: var(--header); color: #fff; padding: 12px 20px;
-         position: sticky; top: 0; z-index: 20;
-         box-shadow: 0 1px 0 rgba(0,0,0,.25); }
-header h1 { font-size: 15px; margin: 0 0 8px 0; font-weight: 600;
-            letter-spacing: .01em; }
-nav { display: flex; flex-wrap: wrap; gap: 2px; }
-nav a { color: rgba(255,255,255,.72); text-decoration: none; font-size: 13px;
-        padding: 4px 9px; border-radius: 5px; }
-nav a:hover { background: rgba(255,255,255,.10); color: #fff; }
-nav a.active { color: #fff; background: rgba(255,255,255,.16); font-weight: 600; }
-main { padding: 18px 20px 48px 20px; max-width: 1180px; }
+main { padding: 20px 22px 48px 22px; max-width: 1240px; }
+:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 section { background: var(--surface); border: 1px solid var(--hairline);
           border-radius: 10px; padding: 16px 18px; margin-bottom: 18px; }
 section > h2 { font-size: 12px; margin: 0 0 12px 0; text-transform: uppercase;
@@ -205,7 +281,9 @@ pre { background: #14140f; color: #e8e8e0; padding: 10px; overflow-x: auto;
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 details { margin: 7px 0; }
 summary { cursor: pointer; font-size: 13px; color: var(--series-1); }
-footer { color: var(--muted); font-size: 12px; padding: 12px 20px 28px 20px; }
+footer { color: var(--muted); font-size: 11.5px;
+         padding: 12px 22px 26px 22px; margin-top: auto;
+         border-top: 1px solid var(--hairline); }
 
 /* Funnel: an ordinal ramp, darkening as candidates survive each stage. */
 .funnel-row { display: flex; align-items: center; gap: 12px; margin: 5px 0; }
@@ -230,6 +308,16 @@ button { background: var(--series-1); color: #fff; border-color: transparent;
 .tag { display: inline-block; background: var(--surface-2);
        border: 1px solid var(--hairline); border-radius: 5px; padding: 1px 7px;
        font-size: 12px; margin-right: 4px; }
+
+.gauge { margin: 4px 0 14px 0; max-width: 560px; }
+.gauge-title { font-size: 12px; font-weight: 650; margin: 0 0 5px 0;
+               font-variant-numeric: tabular-nums; }
+.gauge-track { position: relative; height: 10px; border-radius: 5px;
+               background: var(--surface-2); border: 1px solid var(--hairline); }
+.gauge-fill { position: absolute; left: 0; top: 0; bottom: 0;
+              border-radius: 5px 0 0 5px; background: var(--series-1); }
+.gauge-mark { position: absolute; top: -4px; bottom: -4px; width: 2px;
+              background: var(--critical); }
 
 /* Budget meter: spend against the cap, with a pace marker. Answers
    "am I on track to breach?" - which a month-to-date total alone
@@ -264,17 +352,30 @@ button { background: var(--series-1); color: #fff; border-color: transparent;
 }
 """
 
-NAV = [
-    ("/", "Overview"),
-    ("/performance", "Performance vs S&P"),
-    ("/funnel", "Funnel"),
-    ("/costs", "Cost"),
-    ("/decisions", "Decisions"),
-    ("/refusals", "Refusals"),
-    ("/logs", "Logs"),
-    ("/maintenance", "Maintenance"),
-    ("/setup", "Setup"),
+#: Navigation grouped by what the reader came to do, not by which
+#: module produced the page. A flat row of nine links makes the reader
+#: scan all nine every time; three short labelled groups make the choice
+#: at most three-then-three.
+NAV_GROUPS = [
+    ("Monitor", [
+        ("/", "Overview", "Everything at a glance"),
+        ("/performance", "Performance", "Account value against the S&P"),
+        ("/funnel", "Pipeline", "Raw filings through to orders"),
+    ]),
+    ("Investigate", [
+        ("/decisions", "Decisions", "Why each trade was taken or declined"),
+        ("/refusals", "Refusals", "What declined candidates went on to do"),
+        ("/logs", "Logs", "Searchable event log"),
+    ]),
+    ("Operate", [
+        ("/costs", "Cost & budget", "Spend against the cap, and the bill"),
+        ("/maintenance", "Maintenance", "Is everything communicating"),
+        ("/setup", "Settings", "Keys, account mode, spending limit"),
+    ]),
 ]
+
+#: Flat form, kept because tests and older callers index it by href.
+NAV = [(href, label) for _, items in NAV_GROUPS for href, label, _ in items]
 
 
 def esc(value) -> str:
@@ -286,11 +387,38 @@ def raw(value) -> str:
     return esc(redact(value))
 
 
-def page(title: str, body: str, active: str, db_path: str, notes: str = "") -> str:
-    links = "".join(
-        f'<a href="{esc(href)}" class="{"active" if href == active else ""}">{esc(label)}</a>'
-        for href, label in NAV
-    )
+def status_rail(items: list) -> str:
+    """The always-visible state strip, in the manner of a trading
+    terminal: the handful of facts you must not have to navigate for.
+    `items` are (label, value_html, state) triples; state is one of
+    good/warn/crit/idle and drives a marker, never colour alone."""
+    cells = []
+    for label, value, state in items:
+        glyph = _PILL_GLYPH.get(state, _PILL_GLYPH["idle"])
+        cells.append(
+            f'<span class="rail-item rail-{esc(state)}">'
+            f'<span class="rail-dot" aria-hidden="true">{glyph}</span>'
+            f'<span class="rail-label">{esc(label)}</span>'
+            f'<span class="rail-value">{value}</span></span>')
+    return f'<div class="rail" role="status">{"".join(cells)}</div>'
+
+
+def page(title: str, body: str, active: str, db_path: str, notes: str = "",
+         rail: str = "", subtitle: str = "") -> str:
+    groups = []
+    for group_name, items in NAV_GROUPS:
+        parts = []
+        for href, label, hint in items:
+            on = href == active
+            current = ' aria-current="page"' if on else ""
+            parts.append(
+                f'<a href="{esc(href)}" class="{"active" if on else ""}"{current}>'
+                f'<span class="nav-label">{esc(label)}</span>'
+                f'<span class="nav-hint">{esc(hint)}</span></a>')
+        links = "".join(parts)
+        groups.append(
+            f'<div class="nav-group"><p class="nav-group-title">'
+            f"{esc(group_name)}</p>{links}</div>")
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
     return (
         "<!doctype html>\n<html lang='en'><head><meta charset='utf-8'>"
@@ -298,12 +426,26 @@ def page(title: str, body: str, active: str, db_path: str, notes: str = "") -> s
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
         f"<meta name='build-hash' content='{esc(BUILD_HASH)}'>"
         f"<style>{_CSS}</style></head><body>"
-        f"<header><h1>catalyst - {esc(title)}</h1><nav>{links}</nav></header>"
-        f"<main>{body}</main>"
-        f"<footer>build <code>{esc(BUILD_HASH)}</code> &middot; rendered "
-        f"{esc(generated)} &middot; db <code>{esc(db_path)}</code> &middot; "
+        '<a class="skip" href="#main">Skip to content</a>'
+        '<div class="shell">'
+        '<aside class="sidebar">'
+        '<a class="brand" href="/"><span class="brand-mark" aria-hidden="true">'
+        "&#9679;</span>catalyst</a>"
+        f'<nav aria-label="Sections">{"".join(groups)}</nav>'
+        f'<p class="sidebar-foot">build <code>{esc(BUILD_HASH)}</code><br>'
+        f"{esc(generated)}</p>"
+        "</aside>"
+        '<div class="content">'
+        f'<header><div class="titlebar"><h1>{esc(title)}</h1>'
+        + (f'<p class="subtitle">{esc(subtitle)}</p>' if subtitle else "")
+        + "</div>"
+        + (rail or "")
+        + "</header>"
+        f'<main id="main">{body}</main>'
+        f"<footer>db <code>{esc(db_path)}</code> &middot; "
         "served no-store; if <code>/health</code> reports a different build hash "
         f"you are looking at a cached page. {notes}</footer>"
+        "</div></div>"
         "</body></html>"
     )
 

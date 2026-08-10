@@ -72,8 +72,15 @@ def performance_panel(db: Db, p: str = "perf") -> str:
     # because a bare figure on this page is not allowed to exist.
     if perf.bot_points:
         excess_v = perf.excess_pp
-        state, word = (("good", "ahead of SPY") if (excess_v or 0) >= 0
-                       else ("crit", "behind SPY"))
+        # None means the BENCHMARK is missing, not that we are level.
+        # `(None or 0) >= 0` read as "ahead of SPY" and wore a green
+        # badge beside the word "n/a" (caught by rendering it).
+        if excess_v is None:
+            state, word = "idle", "no benchmark to compare against"
+        elif excess_v >= 0:
+            state, word = "good", "ahead of SPY"
+        else:
+            state, word = "crit", "behind SPY"
         headline_tile = (f'<span class="{"pos" if (excess_v or 0) >= 0 else "neg"}">'
                          f"{esc(signed_pp(excess_v))}</span>")
         headline_sub = f"{pill(state, word)} exposure-matched, net of API spend"
@@ -939,8 +946,9 @@ def _narrative_what_happened(t: queries.Trace, p: str) -> str:
     return "".join(out)
 
 
-def _narrative_evidence(t: queries.Trace, p: str) -> str:
-    out = ["<h3>5. Evidence chain</h3>"]
+def _narrative_evidence(t: queries.Trace, p: str, db_for_graph=None,
+                        ticker: str = "") -> str:
+    out = ["<h3>5. Evidence the decision was built on</h3>"]
     ev = t.evidence
     if not ev.available:
         out.append(f'<div class="empty" id="{p}-evidence-missing">{esc(ev.reason)}</div>')
@@ -954,6 +962,71 @@ def _narrative_evidence(t: queries.Trace, p: str) -> str:
         ))
         return "".join(out)
     cols = ev.columns
+    # The mindmap FIRST, then the verbatim table beneath it. The picture
+    # answers "what is this built on"; the table is what you read when
+    # you need the exact wording of a claim. Columns are still
+    # feature-detected - the diagram degrades to the table alone rather
+    # than guessing a column that is not there.
+    label_of = lambda d, keys: next(  # noqa: E731
+        (str(d[k]) for k in keys if d.get(k) not in (None, "")), "")
+    # Named rows where the graph tables allow it; the generic scan is
+    # the fallback, so a database without stage 5a still renders.
+    named = queries.evidence_graph(db_for_graph, ticker) if db_for_graph else None
+    graph_rows = named.rows if (named and named.rows) else res.rows
+    # THE COMPANY IS THE CENTRE. An assertion may point either way -
+    # "CEO bought shares of GBFH" has the company as the OBJECT - so the
+    # branch is whichever endpoint is not the company. Reading the
+    # object blindly put a random LLC in the middle and drew the company
+    # four times around the rim (caught by rendering it).
+    centre = ticker or t.candidate_id
+    for r in graph_rows:
+        d = dict(r)
+        if str(d.get("subject_kind") or "") == "company":
+            centre = label_of(d, ("subject_label",)) or centre
+            break
+        if str(d.get("object_kind") or "") == "company":
+            centre = label_of(d, ("object_label",)) or centre
+            break
+
+    branches, seen = [], set()
+    for r in graph_rows:
+        d = dict(r)
+        subj = label_of(d, ("subject_label", "subject", "subject_entity_id"))
+        obj = label_of(d, ("object_label", "object", "object_entity_id"))
+        predicate = label_of(d, ("predicate", "relation", "edge", "kind"))
+        if obj == centre and subj:
+            node, kind = subj, label_of(d, ("subject_kind",))
+        elif subj == centre and obj:
+            node, kind = obj, label_of(d, ("object_kind",))
+        elif d.get("object_date") and subj == centre:
+            node, kind = str(d["object_date"]), "event"
+        else:
+            node, kind = obj or subj, label_of(d, ("object_kind", "subject_kind"))
+        if not node or node == centre:
+            continue
+        key = (predicate, node)
+        if key in seen:
+            continue
+        seen.add(key)
+        branches.append((
+            predicate or "linked to", node, kind or "entity",
+            label_of(d, ("reliability", "confidence", "strength")),
+            label_of(d, ("source_ref", "source_class", "source")),
+        ))
+        if len(branches) >= 12:
+            break
+    if branches:
+        out.append('<div class="chart-wrap">' + charts.mindmap(
+            esc(centre), [(esc(a), esc(b), esc(c), esc(dd), esc(e))
+                          for a, b, c, dd, e in branches],
+            chart_id=f"{p}-mindmap") + "</div>")
+        out.append(prov(
+            "Every box is a fact the bot linked to this candidate, and every "
+            "line is one recorded assertion - hover a line for its source and "
+            "how it was established. A solid line was filed with a regulator; "
+            "dashed was reported; dotted was inferred. Layout is fixed by the "
+            "order the assertions were recorded, so the same evidence always "
+            "draws the same picture."))
     source_col = next((c for c in cols if "source" in c or "class" in c), None)
     rel_col = next((c for c in cols if "reliab" in c or "confid" in c or "strength" in c), None)
     rows = []
@@ -975,6 +1048,36 @@ def _narrative_evidence(t: queries.Trace, p: str) -> str:
     return "".join(out)
 
 
+def _cents(dollars_value) -> Decimal | None:
+    """notional_usd is stored in DOLLARS; dollars() takes CENTS."""
+    try:
+        return Decimal(str(dollars_value)) * 100
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _conviction_gauge(value: float, p: str) -> str:
+    """Where the model's conviction sat, and where the floor was.
+
+    The number alone ("0.71") means nothing without the threshold it had
+    to clear, which is the entire reason a trade happened or did not.
+    """
+    floor = 0.60          # display only - the live floor is adaptive
+    pct = max(0.0, min(1.0, value)) * 100
+    return (
+        f'<div class="gauge" id="{p}-conviction">'
+        f'<p class="gauge-title">Conviction {value:.2f}</p>'
+        f'<div class="gauge-track">'
+        f'<span class="gauge-fill" style="width:{pct:.1f}%"></span>'
+        f'<span class="gauge-mark" style="left:{floor * 100:.0f}%"></span>'
+        "</div>"
+        f'<p class="prov">The marker is the conviction floor the candidate had '
+        f"to clear ({floor:.2f} at the time of writing; it is an adaptive "
+        "parameter and moves on scored outcomes). Left of the marker means "
+        "the model was not confident enough for the code to size anything.</p>"
+        "</div>")
+
+
 def trace_page(db: Db, candidate_id: str, p: str = "tr") -> str:
     t = queries.decision_trace(db, candidate_id)
     if not t.candidate_q.rows:
@@ -982,7 +1085,43 @@ def trace_page(db: Db, candidate_id: str, p: str = "tr") -> str:
                        empty_block(f"{p}-empty", t.candidate_q,
                                    meaning=f"no candidate with id {candidate_id!r}"))
     c = dict(t.candidate_q.rows[0])
+
+    # --- dossier header: the verdict, before the reasoning behind it.
+    view = dict(t.view_q.rows[0]) if t.view_q.rows else {}
+    decision = dict(t.decisions_q.rows[0]) if t.decisions_q.rows else {}
+    action = str(decision.get("action") or "").lower()
+    verdict_state, verdict_word = {
+        "trade": ("good", "traded"),
+        "skip": ("idle", "declined"),
+    }.get(action, ("idle", "no risk decision recorded"))
+    conviction = view.get("conviction")
+    try:
+        conviction_f = float(conviction) if conviction is not None else None
+    except (TypeError, ValueError):
+        conviction_f = None
+    direction = str(view.get("direction") or "&mdash;")
+    closed = dict(t.closed_q.rows[0]) if t.closed_q.rows else {}
+
+    header = [tiles(f"{p}-tiles", [
+        ("Verdict", esc(action or "&mdash;").upper() or "&mdash;",
+         f"{pill(verdict_state, verdict_word)} "
+         + esc(str(decision.get("at") or "no timestamp"))),
+        ("Model view", esc(direction),
+         (f"conviction {conviction_f:.2f}" if conviction_f is not None
+          else "no view recorded") + " - the model proposes, code disposes"),
+        ("Size the code chose",
+         dollars(_cents(decision.get("notional_usd"))) if decision.get("notional_usd")
+         else "&mdash;",
+         "set by the risk engine, never by the model"),
+        ("Outcome",
+         dollars(closed.get("realized_pnl_cents")) if closed else "open / none",
+         esc(str(closed.get("exit_reason") or "no exit recorded"))),
+    ])]
+    if conviction_f is not None:
+        header.append(_conviction_gauge(conviction_f, p))
+
     body = [
+        "".join(header),
         f"<p class='prov' id='{p}-intro'>A single decision, start to finish. Someone "
         "who was not there should be able to read this page and understand why the "
         "trade was made or declined.</p>"
@@ -991,7 +1130,8 @@ def trace_page(db: Db, candidate_id: str, p: str = "tr") -> str:
     body.append(_narrative_what_it_concluded(t, p))
     body.append(_narrative_what_risk_did(t, p))
     body.append(_narrative_what_happened(t, p))
-    body.append(_narrative_evidence(t, p))
+    body.append(_narrative_evidence(t, p, db_for_graph=db,
+                                   ticker=str(c.get('ticker') or '')))
     if t.refusal_q.rows:
         rows = [[esc(r["refused_at"]), esc(r["price_at_refusal"]),
                  esc(r["scored_at"] or "not scored yet"),

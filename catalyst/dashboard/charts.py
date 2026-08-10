@@ -353,3 +353,127 @@ def labels_outside_viewbox(svg: str) -> list[str]:
         if x0 < vx or y0 < vy or x1 > vx + vw or y1 > vy + vh:
             bad.append(f"{content!r} box=({x0:.1f},{y0:.1f},{x1:.1f},{y1:.1f})")
     return bad
+
+
+# --------------------------------------------------------------------------
+# Evidence mindmap
+# --------------------------------------------------------------------------
+
+#: Reliability drives the EDGE, because it is a property of the link
+#: (how the claim was sourced), not of the thing at either end.
+_RELIABILITY_DASH = {
+    "filed": "", "exchange": "", "primary": "",
+    "reported": "5 3", "secondary": "5 3",
+    "inferred": "2 4", "model": "2 4",
+}
+
+
+def _wrap(text: str, width: int) -> list:
+    words, lines, cur = str(text).split(), [], ""
+    for w in words:
+        if cur and len(cur) + 1 + len(w) > width:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = f"{cur} {w}".strip()
+    if cur:
+        lines.append(cur)
+    return lines[:3] or [""]
+
+
+def mindmap(
+    centre_label: str,
+    branches: list,              # [(predicate, node_label, kind, reliability, source)]
+    *,
+    chart_id: str,
+    width: int = 900,
+    max_branches: int = 12,
+) -> str:
+    """A radial node-link view of the evidence behind one candidate.
+
+    Deterministic layout by design: nodes are placed on a circle in the
+    order given, so the same evidence always draws the same picture and
+    two screenshots of one candidate can be compared. No physics, no
+    animation, no JavaScript - this page cannot load any.
+
+    Long labels are WRAPPED rather than clipped, and the node box is
+    sized from the wrapped text, so a label can never overflow its own
+    box (the same lesson index_chart records about axis labels).
+    """
+    shown = branches[:max_branches]
+    if not shown:
+        raise ValueError("mindmap needs at least one branch; use placeholder()")
+
+    import math
+
+    n = len(shown)
+    rows = max(_wrap(b[1], 22) for b in shown)
+    node_h = 20 + 13 * max(len(_wrap(b[1], 22)) for b in shown)
+    radius_x = width / 2 - 105
+    radius_y = max(150.0, 34.0 * n / 2)
+    height = int(2 * radius_y + node_h + 90)
+    cx, cy = width / 2, height / 2
+
+    out = [
+        f'<svg id="{chart_id}" class="chart" viewBox="0 0 {width} {height}" '
+        f'width="100%" height="{height}" role="img" '
+        f'aria-label="Evidence linked to {centre_label}: '
+        f'{n} connected facts" xmlns="http://www.w3.org/2000/svg">',
+        f'<rect x="0" y="0" width="{width}" height="{height}" '
+        f'fill="var(--surface)" stroke="var(--hairline)"/>',
+    ]
+
+    # Edges first, so nodes paint over them.
+    positions = []
+    for i, (predicate, label, kind, reliability, source) in enumerate(shown):
+        angle = -math.pi / 2 + (2 * math.pi * i / n)
+        nx = cx + radius_x * math.cos(angle)
+        ny = cy + radius_y * math.sin(angle)
+        positions.append((nx, ny))
+        dash = _RELIABILITY_DASH.get((reliability or "").lower(), "2 4")
+        dash_attr = f' stroke-dasharray="{dash}"' if dash else ""
+        out.append(
+            f'<line x1="{cx:.1f}" y1="{cy:.1f}" x2="{nx:.1f}" y2="{ny:.1f}" '
+            f'stroke="var(--baseline)" stroke-width="1.5"{dash_attr}>'
+            f"<title>{predicate} ({reliability or 'unrecorded'} - "
+            f"{source or 'no source recorded'})</title></line>")
+        # Predicate label at the midpoint of the edge.
+        mx, my = (cx + nx) / 2, (cy + ny) / 2
+        out.append(
+            f'<text x="{mx:.1f}" y="{my - 3:.1f}" font-size="{FONT_SIZE - 1}" '
+            f'text-anchor="middle" fill="var(--muted)">{predicate}</text>')
+
+    # Branch nodes.
+    for (nx, ny), (predicate, label, kind, reliability, source) in zip(
+            positions, shown):
+        lines = _wrap(label, 22)
+        box_w = max(len(ln) for ln in lines) * CHAR_W + 22
+        box_h = 16 + 13 * len(lines)
+        x, y = nx - box_w / 2, ny - box_h / 2
+        out.append(
+            f'<rect x="{x:.1f}" y="{y:.1f}" width="{box_w:.1f}" '
+            f'height="{box_h:.1f}" rx="6" fill="var(--surface-2)" '
+            f'stroke="var(--hairline)"><title>{kind or "entity"}: {label}'
+            f"</title></rect>")
+        for j, ln in enumerate(lines):
+            out.append(
+                f'<text x="{nx:.1f}" y="{y + 15 + 13 * j:.1f}" '
+                f'font-size="{FONT_SIZE}" text-anchor="middle" '
+                f'fill="var(--ink-2)">{ln}</text>')
+
+    # The candidate, last and largest.
+    clines = _wrap(centre_label, 20)
+    cw = max(len(ln) for ln in clines) * CHAR_W + 30
+    ch = 20 + 14 * len(clines)
+    out.append(
+        f'<rect x="{cx - cw / 2:.1f}" y="{cy - ch / 2:.1f}" width="{cw:.1f}" '
+        f'height="{ch:.1f}" rx="8" fill="var(--step-3)" '
+        f'stroke="var(--step-5)" stroke-width="2"/>')
+    for j, ln in enumerate(clines):
+        out.append(
+            f'<text x="{cx:.1f}" y="{cy - ch / 2 + 18 + 14 * j:.1f}" '
+            f'font-size="{FONT_SIZE + 1}" text-anchor="middle" '
+            f'fill="#ffffff">{ln}</text>')
+
+    out.append("</svg>")
+    return "\n".join(out)
