@@ -314,8 +314,20 @@ def replay_detailed(
             if Decimal(str(view.conviction)) < cfg.conviction_floor:
                 skips.append(SkipRecord(cand.id, day, "below_conviction_floor"))
                 continue
-            if i + 1 > last_idx:
-                skips.append(SkipRecord(cand.id, day, "range_ended_before_entry"))
+            if i + 1 >= last_idx:
+                # i+1 > last_idx: the signal fired on the last session, so
+                #   there is no session left to enter in at all.
+                # i+1 == last_idx: the entry would open on the FINAL session,
+                #   with no later session to exit in. The only fill allowed
+                #   that day is the open — the same price the forced
+                #   end-of-range exit uses — so opening would book a
+                #   zero-information round trip whose only content is two
+                #   cost haircuts, and (before this guard) the position
+                #   survived the replay and tripped the end-of-range
+                #   assertion below. Skip it instead, and say why.
+                reason = ("range_ended_before_entry" if i + 1 > last_idx
+                          else "range_end_no_entry")
+                skips.append(SkipRecord(cand.id, day, reason))
                 continue
             entries_at.setdefault(i + 1, []).append((cand, view))
 

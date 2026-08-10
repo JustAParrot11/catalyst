@@ -70,17 +70,12 @@ def grade(name, signal_fn, universe, cache, conn, *, api_monthly="8",
                   "per_side_cost_pct": Decimal(cost_bps) / Decimal(10000)}
     for tag, rng in ranges:
         cfg = ReplayConfig(**cfg_kwargs)
-        # WORKAROUND for a harness edge case (reported to backtest-engineer):
-        # a signal on the second-to-last session queues its entry for the
-        # LAST session; entries run after that day's exits, so the position
-        # survives the replay and trips the end-of-range assertion. A trade
-        # entered on the final session could never complete a round trip
-        # anyway, so dropping those candidates loses nothing.
-        cal = [b.day for b in cache.load_bars(cfg.benchmark_symbol)
-               if rng[0] <= b.day <= rng[1]]
-        u = [c for c in universe if c.catalyst_date <= cal[-3]]
+        # (A workaround that pre-filtered candidates near the range end
+        # used to live here; the harness now skips final-session entries
+        # itself with reason "range_end_no_entry" — see
+        # tests/test_backtest.py::test_entry_queued_for_final_session_is_skipped_not_opened.)
         detail = replay_detailed(
-            signal_fn, u, rng, cache=cache, config=cfg,
+            signal_fn, universe, rng, cache=cache, config=cfg,
             strategy_name=f"{name}|{tag}|api{api_monthly}|c{cost_bps}bp")
         show(f"{tag} api=${api_monthly}/mo cost={cost_bps}bp/side", detail)
         persist_result(conn, detail.result, mode="structural")
