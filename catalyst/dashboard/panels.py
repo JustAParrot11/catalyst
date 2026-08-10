@@ -1293,6 +1293,175 @@ def _conviction_gauge(value: float, p: str) -> str:
         "</div>")
 
 
+def _spider_groups(t, c, db, ticker: str) -> list:
+    """The three arms of the decision, each built from what is actually
+    recorded. An arm with nothing in it is dropped rather than drawn
+    empty - a branch to nowhere reads as a fact the bot had and did not
+    use, which is the opposite of true.
+    """
+    view = dict(t.view_q.rows[0]) if t.view_q.rows else {}
+    decision = dict(t.decisions_q.rows[0]) if t.decisions_q.rows else {}
+
+    # 1. WHAT IT SAW - sources, plus the evidence graph if it has one.
+    seen = []
+    for r in t.raw_events_q.rows[:4]:
+        d = dict(r)
+        seen.append((str(d.get("source") or "source"),
+                     f"fetched {d.get('fetched_at') or 'unknown'}"))
+    ev = queries.evidence_graph(db, ticker) if ticker else None
+    for r in (ev.rows if ev else [])[:4]:
+        d = dict(r)
+        # Whichever END IS NOT THE COMPANY is the interesting one. An
+        # assertion can point either way - "the CFO bought shares of
+        # GBFH" has the company as the OBJECT - so reading object_label
+        # first drops exactly the assertions that name a person.
+        subj = str(d.get("subject_label") or "").strip()
+        obj = str(d.get("object_label") or "").strip()
+        label = subj if obj == ticker else obj
+        if not label:
+            label = str(d.get("object_date") or "").strip()
+        if label and label != ticker:
+            seen.append((label, str(d.get("predicate") or "linked to")))
+    if c.get("catalyst_type"):
+        seen.append((str(c["catalyst_type"]).replace("_", " "), "catalyst type"))
+
+    # 2. WHAT IT CONCLUDED - the model's view, in the model's terms.
+    concluded = []
+    if view:
+        if view.get("direction"):
+            concluded.append((str(view["direction"]), "direction"))
+        if view.get("conviction") is not None:
+            concluded.append((f"conviction {view['conviction']}", "0 to 1"))
+        if view.get("expected_holding_days") is not None:
+            concluded.append(
+                (f"hold {view['expected_holding_days']} days", "expected"))
+        priced = view.get("priced_in")
+        if priced is not None:
+            concluded.append(("already priced in" if int(priced or 0)
+                              else "not priced in", "model's judgement"))
+
+    # 3. WHAT THE CODE DID - the risk engine, and every limit that bound.
+    did = []
+    if decision:
+        did.append((str(decision.get("action") or "no action"), "risk engine"))
+        if decision.get("notional_usd"):
+            did.append((f"${decision['notional_usd']}", "size the code chose"))
+        if decision.get("stop_price"):
+            did.append((f"stop {decision['stop_price']}", "resting at the broker"))
+        if decision.get("planned_exit_date"):
+            did.append(
+                (f"exit by {decision['planned_exit_date']}", "hard date"))
+    limits = t.limits_by_decision.get(decision.get("id"))
+    for r in (limits.rows if limits else []):
+        d = dict(r)
+        if int(d.get("binding") or 0):
+            did.append((str(d.get("rule_name") or "limit"), "this one bound"))
+    for reason in (jload(decision.get("skip_reasons"), []) or [])[:3]:
+        did.append((str(reason).replace("_", " "), "why it stopped"))
+
+    return [("What it saw", seen[:6]),
+            ("What it concluded", concluded[:5]),
+            ("What the code did", did[:6])]
+
+
+def trace_simple(db: Db, candidate_id: str, p: str = "trs") -> str:
+    """The decision in one picture and one paragraph.
+
+    The full dossier is the record; this is the read. Someone opening a
+    trade for the first time should get the shape of it - what was seen,
+    what was concluded, what the code then did - before meeting a single
+    table.
+    """
+    t = queries.decision_trace(db, candidate_id)
+    if not t.candidate_q.rows:
+        return section(f"{p}-section", "Decision",
+                       empty_block(f"{p}-empty", t.candidate_q,
+                                   meaning=f"no candidate with id {candidate_id!r}"))
+    c = dict(t.candidate_q.rows[0])
+    ticker = str(c.get("ticker") or "")
+    view = dict(t.view_q.rows[0]) if t.view_q.rows else {}
+    decision = dict(t.decisions_q.rows[0]) if t.decisions_q.rows else {}
+    closed = dict(t.closed_q.rows[0]) if t.closed_q.rows else {}
+    action = str(decision.get("action") or "").lower()
+
+    verdict = {"trade": "TRADED", "skip": "DECLINED"}.get(
+        action, "NO RISK DECISION YET")
+    out = [_view_switch(candidate_id, "simple", p)]
+
+    # The sentence first. If a reader takes one thing from this page,
+    # it should be a sentence, not a diagram.
+    who = ticker or candidate_id
+    if action == "trade":
+        story = (f"The bot traded {who}. The model read it as "
+                 f"{view.get('direction') or 'a directional bet'} with conviction "
+                 f"{view.get('conviction', 'unrecorded')}, and the risk engine - "
+                 f"not the model - chose a size of "
+                 f"{dollars(_cents(decision.get('notional_usd'))) if decision.get('notional_usd') else 'an unrecorded amount'}.")
+    elif action == "skip":
+        reasons = jload(decision.get("skip_reasons"), []) or []
+        story = (f"The bot declined {who}. "
+                 + ("It stopped on: " + ", ".join(
+                     str(r).replace("_", " ") for r in reasons[:3]) + "."
+                    if reasons else
+                    "No skip reason was recorded, which is itself a gap worth "
+                    "chasing - a refusal should always carry its reason."))
+    else:
+        story = (f"{who} reached the risk engine but no decision is recorded "
+                 "against it yet.")
+    if closed:
+        story += (f" It closed for {dollars(closed.get('realized_pnl_cents'))} "
+                  f"({closed.get('exit_reason') or 'no exit reason recorded'}).")
+    out.append(f'<p class="lede-line" id="{p}-story">{esc(story)}</p>')
+
+    groups = _spider_groups(t, c, db, ticker)
+    if any(leaves for _, leaves in groups):
+        out.append('<div class="chart-wrap">' + charts.decision_spider(
+            esc(who), esc(verdict),
+            [(esc(label), [(esc(a), esc(b)) for a, b in leaves])
+             for label, leaves in groups],
+            chart_id=f"{p}-spider") + "</div>")
+        out.append('<p class="prov"><span class="key key-1"></span>what it saw '
+                   '<span class="key key-2"></span>what it concluded '
+                   '<span class="key key-3"></span>what the code did</p>')
+        out.append(prov(
+            "Every box is something actually recorded against this candidate - "
+            "nothing here is inferred for the picture. Hover a line for the "
+            "detail behind it. The three arms are the whole architecture: the "
+            "model proposes on the middle arm, deterministic code disposes on "
+            "the right one, and it can only ever narrow what the model asked "
+            "for."))
+    else:
+        out.append(note(
+            f'<b id="{p}-nothing">Nothing is recorded against this candidate '
+            "yet</b> beyond its own row - no sources, no model view, no risk "
+            "decision. The full view below shows each of those queries and "
+            "what it returned."))
+    out.append(f'<p class="prov"><a href="/decision?candidate_id='
+               f'{esc(candidate_id)}&amp;view=full">Open the full record</a> for '
+               "the prompt, every tool call, each limit that bound, and the "
+               "fills.</p>")
+    return section(f"{p}-section", f"Decision: {esc(who)}", "".join(out))
+
+
+def _view_switch(candidate_id: str, active: str, p: str) -> str:
+    """Simple and full, as a visible pair - not a hidden preference.
+
+    Both links carry the candidate id, so a bookmarked or shared URL
+    lands on the same view its sender was looking at.
+    """
+    def one(key: str, label: str, hint: str) -> str:
+        on = " active" if key == active else ""
+        return (f'<a class="switch-opt{on}" href="/decision?candidate_id='
+                f'{esc(candidate_id)}&amp;view={key}"'
+                + (' aria-current="page"' if key == active else "")
+                + f"><b>{esc(label)}</b><span>{esc(hint)}</span></a>")
+    return (f'<div class="switch" id="{p}-switch" role="navigation" '
+            'aria-label="Level of detail">'
+            + one("simple", "Simple", "the decision in one picture")
+            + one("full", "Full record", "every query, prompt and limit")
+            + "</div>")
+
+
 def trace_page(db: Db, candidate_id: str, p: str = "tr") -> str:
     t = queries.decision_trace(db, candidate_id)
     if not t.candidate_q.rows:
@@ -1336,6 +1505,7 @@ def trace_page(db: Db, candidate_id: str, p: str = "tr") -> str:
         header.append(_conviction_gauge(conviction_f, p))
 
     body = [
+        _view_switch(candidate_id, "full", p),
         "".join(header),
         f"<p class='prov' id='{p}-intro'>A single decision, start to finish. Someone "
         "who was not there should be able to read this page and understand why the "

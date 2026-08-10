@@ -1291,3 +1291,137 @@ def test_the_overview_leads_with_the_broker_value(seeded):
     page is opened for, so it goes above the comparison panels."""
     html_out = server.route_overview(Db(seeded), {})
     assert html_out.index('id="ovval-section"') < html_out.index('id="perf-section"')
+
+
+# ------------------------------------------- decisions: simple and full
+
+
+@pytest.fixture
+def rich_decision(tmp_path):
+    """One fully-populated traded candidate: sources, a model view with
+    every field set, a risk decision with every field set, a binding
+    limit, and an evidence graph."""
+    from catalyst.storage import init_db
+
+    path = str(tmp_path / "rich.db")
+    conn = init_db(path)
+    conn.executescript(
+        (Path(__file__).resolve().parent.parent / "catalyst" / "storage"
+         / "schema_graph.sql").read_text())
+    now = datetime.now(timezone.utc)
+    iso = now.isoformat()
+    for src, sid in [("edgar", "acc-1"), ("federal_register", "fr-1")]:
+        conn.execute("INSERT INTO raw_events VALUES (?,?,?,?)", (src, sid, iso, "{}"))
+    conn.execute("INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?,?)",
+                 ("c1", "GBFH", "insider_cluster",
+                  (now + timedelta(days=9)).date().isoformat(), "confirmed",
+                  json.dumps(["acc-1", "fr-1"]), iso, "financials",
+                  json.dumps(["fin"])))
+    conn.execute("INSERT INTO research_views VALUES (?,?,?,?,?,?,?,?)",
+                 ("c1", "long", 0.74, "Cluster of open-market buys.",
+                  "A 10b5-1 plan would kill it.", 14, 0, "Not priced in."))
+    conn.execute("INSERT INTO risk_decisions VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                 ("d1", "c1", "trade", "long", "182.50", "4.1", "39.20",
+                  (now + timedelta(days=14)).date().isoformat(), "[]",
+                  json.dumps({"conviction_floor": 0.6}), iso))
+    conn.execute("INSERT INTO limit_applications VALUES (?,?,?,?,?,?)",
+                 ("d1", "max_loss_per_position", "0.12", "0.10", "hard", 1))
+    conn.execute("INSERT INTO limit_applications VALUES (?,?,?,?,?,?)",
+                 ("d1", "sector_concentration", "0.30", "0.30", "adaptive", 0))
+    for eid, kind, key, name in [
+            ("e1", "company", "company:GBFH", "GBFH"),
+            ("e2", "person", "person:restrepo", "J. Restrepo, CFO"),
+            ("e3", "event", "event:q3", "Q3 earnings, 14 Sep")]:
+        conn.execute("INSERT INTO graph_entities VALUES (?,?,?,?,?)",
+                     (eid, kind, key, name, iso))
+    for i, (s_, pred, o_) in enumerate([("e2", "bought shares of", "e1"),
+                                        ("e1", "reports on", "e3")]):
+        conn.execute("INSERT INTO graph_assertions VALUES (?,?,?,?,?,?,?,?,?)",
+                     (f"a{i}", s_, pred, o_, None, "edgar_filing",
+                      "SEC Form 4", iso, "primary_document"))
+    conn.commit()
+    conn.close()
+    return path
+
+
+@pytest.mark.parametrize("must_appear", [
+    "GBFH",                     # the candidate
+    "edgar",                    # a source it saw
+    "federal_register",
+    "insider cluster",          # the catalyst type
+    "J. Restrepo, CFO",         # an evidence-graph neighbour
+    "Q3 earnings, 14 Sep",
+    "long",                     # the model's direction
+    "conviction 0.74",
+    "hold 14 days",             # expected_holding_days
+    "not priced in",
+    "trade",                    # what the code did
+    "$182.50",
+    "stop 39.20",
+    "max_loss_per_position",    # the limit that BOUND
+])
+def test_every_recorded_field_reaches_the_spider(rich_decision, must_appear):
+    """Each of these is a real column. A wrong column name reads as None
+    and drops the fact silently - which is how two of them were missing
+    the first time this panel was written."""
+    html_out = panels.trace_simple(Db(rich_decision), "c1", p="trs")
+    assert must_appear in html_out, f"{must_appear!r} never reached the page"
+
+
+def test_a_limit_that_did_not_bind_is_not_drawn_as_though_it_did(rich_decision):
+    html_out = panels.trace_simple(Db(rich_decision), "c1", p="trs")
+    assert "sector_concentration" not in html_out
+
+
+def test_the_simple_view_leads_with_a_sentence_not_a_table(rich_decision):
+    html_out = panels.trace_simple(Db(rich_decision), "c1", p="trs")
+    assert "The bot traded GBFH" in html_out
+    assert "the risk engine - not the model - chose a size" in html_out
+    assert html_out.index("trs-story") < html_out.index("trs-spider")
+    assert "<table" not in html_out, "the simple view is the read, not the record"
+
+
+def test_the_spider_groups_the_three_stages_of_the_decision(rich_decision):
+    html_out = panels.trace_simple(Db(rich_decision), "c1", p="trs")
+    for arm in ("What it saw", "What it concluded", "What the code did"):
+        assert arm in html_out, arm
+
+
+def test_identity_is_never_colour_alone(rich_decision):
+    """A light-mode slot is under 3:1 on the surface, so the relief rule
+    applies: every arm is named in text as well as coloured."""
+    html_out = panels.trace_simple(Db(rich_decision), "c1", p="trs")
+    svg = html_out[html_out.index("<svg"):html_out.index("</svg>")]
+    for arm in ("What it saw", "What it concluded", "What the code did"):
+        assert arm in svg, f"{arm} is not labelled inside the diagram"
+
+
+def test_both_views_are_reachable_from_each_other(rich_decision):
+    simple = panels.trace_simple(Db(rich_decision), "c1", p="trs")
+    full = panels.trace_page(Db(rich_decision), "c1", p="tr")
+    assert "view=full" in simple
+    assert "view=simple" in full
+
+
+def test_the_decision_route_defaults_to_simple(rich_decision):
+    db = Db(rich_decision)
+    assert 'id="trs-spider"' in server.route_decision(db, {"candidate_id": ["c1"]})
+    full = server.route_decision(db, {"candidate_id": ["c1"], "view": ["full"]})
+    assert 'id="trs-spider"' not in full
+    assert "1. What the model saw" in full or 'id="tr-tiles"' in full
+
+
+def test_a_candidate_with_nothing_recorded_says_so(bare, tmp_path):
+    from catalyst.storage import init_db
+    path = str(tmp_path / "thin.db")
+    conn = init_db(path)
+    conn.execute("INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?,?)",
+                 ("c9", "NUL", "unknown", "2026-09-01", "estimated", "[]",
+                  _iso(date.today()), "unknown", "[]"))
+    conn.commit()
+    conn.close()
+    html_out = panels.trace_simple(Db(path), "c9", p="trs")
+    # The catalyst type alone is still something, so the diagram draws;
+    # what must never happen is a crash or a blank panel.
+    assert "trs-section" in html_out
+    assert "NUL" in html_out

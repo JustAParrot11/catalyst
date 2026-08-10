@@ -659,3 +659,15 @@ change kept from this session is the strengthened assertion block in
   restored. Cause was a stale .pyc surviving a cp-based restore, not the
   code. Clear __pycache__ after restoring a file by copy, or the next
   run measures the sabotage.
+- Decision spider (2026-08-10). Three sabotages: the two wrong column
+  names restored (expected_hold_days / hard_exit_date - both read as
+  None and dropped their facts silently, which is how they shipped
+  wrong the first time); object_label read before subject_label, which
+  drops every assertion naming a person because the company is the
+  OBJECT of "the CFO bought shares of GBFH"; and non-binding limits
+  drawn as though they bound. All caught by
+  test_every_recorded_field_reaches_the_spider and
+  test_a_limit_that_did_not_bind_is_not_drawn_as_though_it_did.
+  Layout was checked by SCREENSHOT, not by reasoning - the first render
+  had three boxes overlapping in the top arm, fixed with a deterministic
+  radius stagger and re-rendered.

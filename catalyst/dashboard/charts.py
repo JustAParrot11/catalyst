@@ -477,3 +477,152 @@ def mindmap(
 
     out.append("</svg>")
     return "\n".join(out)
+
+
+# --------------------------------------------------------------------------
+# Decision spider: the whole decision as one picture
+# --------------------------------------------------------------------------
+
+#: Three groups, three categorical slots. A spider is an ALL-PAIRS form -
+#: any node can end up beside any other - and the reference palette caps
+#: all-pairs categorical sets at three slots. Validated in both modes:
+#: worst CVD dE 9.2 light / 9.4 dark, worst normal-vision dE 24.0 / 20.9.
+#: Aqua is under 3:1 on the light surface, so the relief rule applies and
+#: every node carries a visible text label - identity is never colour alone.
+SPIDER_SLOTS = ("var(--series-1)", "var(--series-2)", "var(--series-3)")
+
+
+def decision_spider(
+    centre_label: str,
+    verdict: str,
+    groups: list,          # [(group_label, [(leaf_label, detail), ...]), ...]
+    *,
+    chart_id: str,
+    width: int = 940,
+) -> str:
+    """One decision as a spider: candidate, its branches, their facts.
+
+    The flat mindmap answers "what evidence exists". This answers the
+    bigger question - what did the bot SEE, CONCLUDE and DO - by giving
+    each of those its own arm rather than mixing them on one ring, so
+    the shape of the decision is readable before any of the words are.
+
+    Deterministic: arms are placed by their position in `groups` and
+    leaves by their order within an arm, so the same decision always
+    draws the same picture and two screenshots can be compared. No
+    physics, no animation, no JavaScript - this page cannot load any.
+    """
+    import math
+
+    groups = [(label, leaves) for label, leaves in groups if leaves][:3]
+    if not groups:
+        raise ValueError("decision_spider needs at least one populated group")
+
+    n_groups = len(groups)
+    max_leaves = max(len(leaves) for _, leaves in groups)
+    height = int(max(430, 250 + 74 * max_leaves))
+    cx, cy = width / 2, height / 2
+    hub_r = min(width, height) * 0.21
+    leaf_r = min(width / 2 - 118, height / 2 - 52)
+    #: Adjacent leaves in one wedge are wide boxes at the same radius, so
+    #: they collide the moment an arm carries more than three (caught by
+    #: rendering it: "J. Restrepo, CFO" sat on top of two neighbours).
+    #: Alternating the radius separates them without moving any label off
+    #: its own spoke, and stays deterministic.
+    STAGGER = 26.0
+
+    out = [
+        f'<svg id="{chart_id}" class="chart" viewBox="0 0 {width} {height}" '
+        f'width="100%" height="{height}" role="img" xmlns="http://www.w3.org/2000/svg" '
+        f'aria-label="Decision for {centre_label}: {verdict}. '
+        + "; ".join(f"{label} has {len(leaves)} point(s)"
+                    for label, leaves in groups) + '">',
+        f'<rect x="0" y="0" width="{width}" height="{height}" '
+        f'fill="var(--surface)" stroke="var(--hairline)"/>',
+    ]
+
+    # Arms are spread over the full circle, each arm's leaves fanned
+    # inside its own wedge so two groups never interleave.
+    for gi, (glabel, leaves) in enumerate(groups):
+        colour = SPIDER_SLOTS[gi % len(SPIDER_SLOTS)]
+        arm_angle = -math.pi / 2 + (2 * math.pi * gi / n_groups)
+        hx = cx + hub_r * math.cos(arm_angle)
+        hy = cy + hub_r * math.sin(arm_angle)
+
+        wedge = (2 * math.pi / n_groups) * 0.78
+        k = len(leaves)
+
+        def place(li: int):
+            offset = 0.0 if k == 1 else (li / (k - 1) - 0.5) * wedge
+            a = arm_angle + offset
+            r = leaf_r - (STAGGER if (k > 3 and li % 2) else 0.0)
+            return cx + r * math.cos(a), cy + r * math.sin(a)
+
+        for li, (leaf_label, detail) in enumerate(leaves):
+            lx, ly = place(li)
+            out.append(
+                f'<line x1="{hx:.1f}" y1="{hy:.1f}" x2="{lx:.1f}" y2="{ly:.1f}" '
+                f'stroke="{colour}" stroke-width="1.4" opacity="0.75">'
+                f"<title>{glabel}: {leaf_label}"
+                + (f" - {detail}" if detail else "") + "</title></line>")
+
+        # Leaf boxes, painted after every line in the arm so they sit on top.
+        for li, (leaf_label, detail) in enumerate(leaves):
+            lx, ly = place(li)
+            lines = _wrap(leaf_label, 20)
+            box_w = max(len(ln) for ln in lines) * CHAR_W + 20
+            box_h = 15 + 13 * len(lines)
+            bx, by = lx - box_w / 2, ly - box_h / 2
+            # A 2px surface ring keeps overlapping marks separable.
+            out.append(
+                f'<rect x="{bx:.1f}" y="{by:.1f}" width="{box_w:.1f}" '
+                f'height="{box_h:.1f}" rx="5" fill="var(--surface-2)" '
+                f'stroke="{colour}" stroke-width="1.4" '
+                f'paint-order="stroke" '
+                f'style="stroke-linejoin:round">'
+                f"<title>{glabel}: {leaf_label}"
+                + (f" - {detail}" if detail else "") + "</title></rect>")
+            for j, ln in enumerate(lines):
+                out.append(
+                    f'<text x="{lx:.1f}" y="{by + 14 + 13 * j:.1f}" '
+                    f'font-size="{FONT_SIZE}" text-anchor="middle" '
+                    f'fill="var(--ink-2)">{ln}</text>')
+
+        # The hub, and its spoke to the centre. Drawn after the leaves so
+        # the arm's label is never buried under a fact.
+        out.append(
+            f'<line x1="{cx:.1f}" y1="{cy:.1f}" x2="{hx:.1f}" y2="{hy:.1f}" '
+            f'stroke="{colour}" stroke-width="2.5"/>')
+        hub_lines = _wrap(glabel, 16)
+        hw = max(len(ln) for ln in hub_lines) * CHAR_W + 22
+        hh = 16 + 13 * len(hub_lines)
+        out.append(
+            f'<rect x="{hx - hw / 2:.1f}" y="{hy - hh / 2:.1f}" width="{hw:.1f}" '
+            f'height="{hh:.1f}" rx="5" fill="{colour}" stroke="var(--surface)" '
+            f'stroke-width="2"/>')
+        for j, ln in enumerate(hub_lines):
+            out.append(
+                f'<text x="{hx:.1f}" y="{hy - hh / 2 + 15 + 13 * j:.1f}" '
+                f'font-size="{FONT_SIZE}" font-weight="700" text-anchor="middle" '
+                f'fill="#ffffff">{ln}</text>')
+
+    # The candidate last and largest: it is what everything else is about.
+    clines = _wrap(centre_label, 14)
+    cw = max(max(len(ln) for ln in clines), len(verdict)) * CHAR_W + 34
+    ch = 22 + 15 * len(clines) + 14
+    out.append(
+        f'<rect x="{cx - cw / 2:.1f}" y="{cy - ch / 2:.1f}" width="{cw:.1f}" '
+        f'height="{ch:.1f}" rx="9" fill="var(--surface-2)" '
+        f'stroke="var(--ink-2)" stroke-width="2"/>')
+    for j, ln in enumerate(clines):
+        out.append(
+            f'<text x="{cx:.1f}" y="{cy - ch / 2 + 20 + 15 * j:.1f}" '
+            f'font-size="{FONT_SIZE + 3}" font-weight="700" text-anchor="middle" '
+            f'fill="var(--ink)">{ln}</text>')
+    out.append(
+        f'<text x="{cx:.1f}" y="{cy - ch / 2 + 20 + 15 * len(clines) + 12:.1f}" '
+        f'font-size="{FONT_SIZE}" text-anchor="middle" '
+        f'fill="var(--muted)">{verdict}</text>')
+
+    out.append("</svg>")
+    return "\n".join(out)

@@ -167,12 +167,17 @@ def route_decisions(db: Db, params: dict) -> str:
 
 def route_decision(db: Db, params: dict) -> str:
     cid = (params.get("candidate_id") or [""])[0]
+    # Simple by default: the full dossier is the record, not the read.
+    # Anyone who needs every query is one click away and the link says so.
+    wants_full = (params.get("view") or ["simple"])[0] == "full"
     if not cid:
         body = section("tr-section", "Decision trace",
                        "<p>Give a candidate_id: <code>/decision?candidate_id=...</code>. "
                        "The <a href='/decisions'>decisions list</a> links to each one.</p>")
-    else:
+    elif wants_full:
         body = panels.trace_page(db, cid, p="tr")
+    else:
+        body = panels.trace_simple(db, cid, p="trs")
     return render_page("Decision trace", body, "/decisions", db.path, db=db)
 
 
