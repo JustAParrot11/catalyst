@@ -33,6 +33,8 @@ from catalyst.cost.tracker import (
     CostApiPage,
     TruncatedCostPageError,
     UnrecognizedUsageFieldError,
+    acknowledge_discrepancy,
+    has_unacknowledged_discrepancy,
     has_unpriced_rows,
     make_usage_components,
     price,
@@ -125,18 +127,33 @@ class TestPricing:
         u = make_usage_components(raw)
         assert price(u, "claude-sonnet-4-6") == Decimal("300")
 
-    def test_unrecognized_billing_field_is_loud(self):
-        # The renamed-field trap must raise, never price at zero.
+    def test_unrecognized_billing_field_refuses_pricing(self):
+        # The renamed-field trap must refuse to price, never price at zero.
+        u = make_usage_components({"input_tokens": 5, "output_megatokens": 1})
         with pytest.raises(UnrecognizedUsageFieldError):
-            make_usage_components({"input_tokens": 5, "output_megatokens": 1})
+            price(u, "claude-sonnet-4-6")
 
-    def test_rates_provenance_not_stale(self):
-        verified = date.fromisoformat(RATES_VERIFIED_ON)
-        age = (TODAY - verified).days
-        assert age <= RATES_MAX_AGE_DAYS, (
-            f"pricing table last verified {age} days ago (max {RATES_MAX_AGE_DAYS}); "
-            "re-verify against the pricing page and update RATES_VERIFIED_ON"
-        )
+    def test_nested_unknown_server_tool_field_refuses_pricing(self):
+        """Audit N2: a new billable request class inside server_tool_use
+        must be loud - web search alone understated a real run by 89%."""
+        u = make_usage_components({
+            "input_tokens": 5,
+            "server_tool_use": {"web_search_requests": 2,
+                                 "code_execution_requests": 500},
+        })
+        with pytest.raises(UnrecognizedUsageFieldError):
+            price(u, "claude-sonnet-4-6")
+
+    def test_rates_provenance_exists_and_is_sane(self):
+        """Audit N5: staleness is a DASHBOARD warning (rates_stale()),
+        not a test failure - a calendar-triggered test failure would
+        block the upgrade path (upgrades roll back on red suites)."""
+        verified = date.fromisoformat(RATES_VERIFIED_ON)  # parses
+        assert verified <= TODAY, "RATES_VERIFIED_ON is in the future"
+        assert RATES_MAX_AGE_DAYS > 0
+        from catalyst.cost.pricing import rates_stale
+        assert rates_stale(as_of=verified + timedelta(days=RATES_MAX_AGE_DAYS + 1))
+        assert not rates_stale(as_of=verified)
 
 
 class TestRecordFirstPriceSecond:
@@ -150,6 +167,19 @@ class TestRecordFirstPriceSecond:
             "SELECT model, priced_cents FROM cost_events"
         ).fetchall()
         assert rows == [("claude-sonnet-4-5-20250929", None)]
+
+    def test_unrecognized_field_still_lands_a_row(self, tmp_db):
+        """Audit N1 regression: the unknown-field guard must never
+        prevent the record. Record first, THEN loud."""
+        with pytest.raises(UnrecognizedUsageFieldError):
+            record_usage({"input_tokens": 100, "cache_read_tokens_v2": 999},
+                         "claude-sonnet-4-6", "scheduled", "research", tmp_db)
+        rows = tmp_db.execute(
+            "SELECT priced_cents, raw_usage_json FROM cost_events"
+        ).fetchall()
+        assert len(rows) == 1 and rows[0][0] is None
+        assert "cache_read_tokens_v2" in rows[0][1]  # verbatim payload kept
+        assert has_unpriced_rows(tmp_db)
 
     def test_unpriced_rows_block_all_authorization(self, tmp_db):
         insert_cost_row(tmp_db, priced=False)
@@ -171,13 +201,31 @@ class TestRecordFirstPriceSecond:
         pricing.MODEL_RATES_CENTS_PER_MTOK["claude-newmodel-x"] = (
             Decimal("100"), Decimal("500"))
         try:
-            changes = reprice_all(tmp_db)
+            outcome = reprice_all(tmp_db)
         finally:
             del pricing.MODEL_RATES_CENTS_PER_MTOK["claude-newmodel-x"]
-        assert len(changes) == 1
-        row_id, old, new = changes[0]
+        assert len(outcome.changes) == 1
+        row_id, old, new = outcome.changes[0]
         assert old is None and new == Decimal("100")
+        assert outcome.still_unpriced == []
         assert not has_unpriced_rows(tmp_db)
+        # F3 residual b: every change logged with old and new
+        log = tmp_db.execute(
+            "SELECT old_cents, new_cents FROM cost_reprice_events").fetchall()
+        assert len(log) == 1
+        assert log[0][0] is None and Decimal(log[0][1]) == Decimal("100")
+
+    def test_reprice_continues_past_still_unknown_models(self, tmp_db):
+        """F3 residual a: one unknown model must not block repricing the
+        rest of history."""
+        with pytest.raises(UnknownModelError):
+            record_usage({"input_tokens": 1_000_000, "output_tokens": 0},
+                         "claude-mystery", "scheduled", "research", tmp_db)
+        insert_cost_row(tmp_db, cents="1", model="claude-sonnet-4-6")
+        outcome = reprice_all(tmp_db)
+        assert [m for _, m in outcome.still_unpriced] == ["claude-mystery"]
+        # the known row got (re)priced from raw '{}' -> 0
+        assert any(new == Decimal("0") for _, _, new in outcome.changes)
 
 
 class TestGovernor:
@@ -265,23 +313,20 @@ class TestReconciliation:
 
     def test_refuses_unclosed_day(self, tmp_db):
         with pytest.raises(ValueError, match="whole days"):
-            reconcile_day(TODAY, "scheduled", "research", tmp_db,
-                          lambda d: clean_page([]))
+            reconcile_day(TODAY, tmp_db, lambda d: clean_page([]))
 
     def test_threshold_fires_at_cap_scale_spend(self, tmp_db):
         """Audit F1: at ~17c/day (the $5 cap's scale), a total ledger
         failure must trip the pause - the old fixed 50c threshold
         mathematically never could."""
         self.seed_local(tmp_db, "17")
-        result = reconcile_day(YESTERDAY, "scheduled", "research", tmp_db,
-                               lambda d: clean_page([]))
+        result = reconcile_day(YESTERDAY, tmp_db, lambda d: clean_page([]))
         assert result.action_taken == "scheduled_paused"
 
     def test_empty_api_day_with_local_spend_never_auto_acks(self, tmp_db):
         """Audit F1/F6: 'the adapter returned nothing' is not agreement."""
         self.seed_local(tmp_db, "3")  # even below the 5c floor
-        result = reconcile_day(YESTERDAY, "scheduled", "research", tmp_db,
-                               lambda d: clean_page([]))
+        result = reconcile_day(YESTERDAY, tmp_db, lambda d: clean_page([]))
         assert result.action_taken == "scheduled_paused"
         row = tmp_db.execute(
             "SELECT acknowledged_by, api_record_count, api_raw_response "
@@ -298,14 +343,13 @@ class TestReconciliation:
                                      "amount": "50"}],
                            has_more=True, raw_response={})
         with pytest.raises(TruncatedCostPageError):
-            reconcile_day(YESTERDAY, "scheduled", "research", tmp_db, lambda d: page)
+            reconcile_day(YESTERDAY, tmp_db, lambda d: page)
 
     def test_clean_match_reconciles_and_records_payload(self, tmp_db):
         self.seed_local(tmp_db, "100")
         result = reconcile_day(
-            YESTERDAY, "scheduled", "research", tmp_db,
-            lambda d: clean_page([{"kind": "scheduled", "component": "research",
-                                   "amount": "100.00"}]),
+            YESTERDAY, tmp_db,
+            lambda d: clean_page([{"amount": "100.00"}]),
         )
         assert result.discrepancy_cents == Decimal("0")
         assert result.action_taken == "none"
@@ -318,10 +362,8 @@ class TestReconciliation:
         """Audit F11, made explicit and deliberate: a mispriced table
         poisons both ledgers, so the pause is global."""
         self.seed_local(tmp_db, "100")
-        reconcile_day(YESTERDAY, "scheduled", "research", tmp_db,
-                      lambda d: clean_page([{"kind": "scheduled",
-                                             "component": "research",
-                                             "amount": "200"}]))
+        reconcile_day(YESTERDAY, tmp_db,
+                      lambda d: clean_page([{"amount": "200"}]))
         for kind in ("scheduled", "manual"):
             d = authorize(
                 CostEstimate(estimated_cents=Decimal("1"), basis="t",
@@ -331,16 +373,60 @@ class TestReconciliation:
             assert not d.authorized
             assert d.reason == "reconciliation_discrepancy_unacknowledged"
 
-    def test_per_kind_comparison_catches_cancelling_errors(self, tmp_db):
+    def test_whole_day_totals_with_local_breakdown_recorded(self, tmp_db):
+        """Audit N3: the Cost API cannot see our scheduled/manual split,
+        so the comparison is whole-day totals; the per-kind LOCAL
+        breakdown is recorded beside it so a kind-level error is still
+        diagnosable from the row."""
         self.seed_local(tmp_db, "100")
-        api_day = [
-            {"kind": "scheduled", "component": "research", "amount": "200"},
-            {"kind": "manual", "component": "research", "amount": "0"},
-        ]
-        result = reconcile_day(YESTERDAY, "scheduled", "research", tmp_db,
-                               lambda d: clean_page(api_day))
-        assert result.discrepancy_cents == Decimal("100")
-        assert result.action_taken == "scheduled_paused"
+        insert_cost_row(tmp_db, kind="manual", component="backtest_judgement",
+                        cents="40",
+                        at=datetime.combine(YESTERDAY, datetime.min.time(), timezone.utc))
+        result = reconcile_day(YESTERDAY, tmp_db,
+                               lambda d: clean_page([{"amount": "140"}]))
+        assert result.discrepancy_cents == Decimal("0")
+        import json as _json
+        breakdown = _json.loads(tmp_db.execute(
+            "SELECT component FROM cost_reconciliation_events").fetchone()[0])
+        assert breakdown == {"scheduled": "100", "manual": "40"}
+
+    def test_cumulative_drift_pauses_even_below_daily_floor(self, tmp_db):
+        """Audit F1 residual: 3c/day divergence passes the daily floor
+        but must accumulate to a pause within the drift window."""
+        for i in range(1, 4):
+            day = TODAY - timedelta(days=i)
+            insert_cost_row(tmp_db, cents="17",
+                            at=datetime.combine(day, datetime.min.time(), timezone.utc))
+        results = []
+        for i in (3, 2, 1):
+            day = TODAY - timedelta(days=i)
+            results.append(reconcile_day(day, tmp_db,
+                                         lambda d: clean_page([{"amount": "14"}])))
+        assert results[0].action_taken == "none"                # 3c drift, under floor
+        assert results[1].action_taken == "scheduled_paused"    # 6c cumulative > 5c floor
+        assert results[1].cumulative_drift_cents == Decimal("6")
+
+    def test_truncated_page_writes_paused_row_before_raising(self, tmp_db):
+        """Audit F4 second gap: the refusal must be on the record."""
+        self.seed_local(tmp_db)
+        page = CostApiPage(records=[{"amount": "50"}], has_more=True,
+                           raw_response={"has_more": True})
+        with pytest.raises(TruncatedCostPageError):
+            reconcile_day(YESTERDAY, tmp_db, lambda d: page)
+        assert has_unacknowledged_discrepancy(tmp_db)
+
+    def test_acknowledge_requires_human_and_clears_pause(self, tmp_db):
+        """Audit F11 residual: a human path out of the pause exists."""
+        self.seed_local(tmp_db, "3")
+        reconcile_day(YESTERDAY, tmp_db, lambda d: clean_page([]))
+        assert has_unacknowledged_discrepancy(tmp_db)
+        event_id = tmp_db.execute(
+            "SELECT id FROM cost_reconciliation_events WHERE acknowledged_at IS NULL"
+        ).fetchone()[0]
+        with pytest.raises(ValueError):
+            acknowledge_discrepancy(tmp_db, event_id, "auto")
+        acknowledge_discrepancy(tmp_db, event_id, "owner@example")
+        assert not has_unacknowledged_discrepancy(tmp_db)
 
 
 class TestLedger:

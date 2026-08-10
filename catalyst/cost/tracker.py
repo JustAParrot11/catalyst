@@ -5,19 +5,29 @@ dollar figure, and it reads every UsageComponents field - there is no
 code path that prices from input_tokens/output_tokens alone
 (ARCHITECTURE.md section 3.2; TRAPS.md cache-token trap).
 
-Audit-driven invariants (cost-auditor, stage 3):
-- RECORD FIRST, PRICE SECOND (F2): a billed call whose model is unknown
-  still lands a cost_events row (priced_cents NULL) and the governor
-  blocks all further spend while any unpriced row exists. The loudness
-  arrives beside the record, not instead of it.
-- The model is stored on every row (F3), so history is genuinely
-  repriceable; reprice_all() exists and is tested.
-- The reconciliation threshold is relative with an absolute floor (F1),
-  an empty API response for a day with local spend is its own paused
-  outcome, and every reconciliation row carries the verbatim API
-  payload beside it (F6, house rule 3).
-- The Cost API adapter returns a structured page (F4); reconcile_day
-  REFUSES to compare a truncated page.
+Audit-driven invariants (cost-auditor, stage 3, two rounds):
+- RECORD FIRST, ALWAYS (F2, N1): a billed call lands a cost_events row
+  before ANY error can raise - unknown model AND unrecognized usage
+  fields both record the verbatim payload with priced_cents NULL, then
+  raise. The governor blocks all spend while unpriced rows exist.
+- The unknown-field guard recurses into nested billing objects (N2):
+  a new key inside server_tool_use or cache_creation is loud, never a
+  silently-unbilled request class.
+- reconcile_day compares WHOLE-DAY totals (N3): the Cost API cannot see
+  this project's internal scheduled/manual split, so the comparison is
+  local-day-total vs API-day-total, with the per-kind local breakdown
+  recorded beside it. Per-kind pricing errors still cannot hide - they
+  move the total.
+- Cumulative drift tracking (F1 residual): small daily divergences that
+  each pass the floor accumulate; the trailing signed drift pauses
+  spend when it exceeds the floor even if no single day did.
+- A truncated page writes its paused reconciliation row BEFORE raising
+  (F4): the refusal is on the record, not just in the traceback.
+- reprice_all is transactional (F8), continues past unknown models
+  collecting them, and logs every change to cost_reprice_events (F3
+  residuals).
+- acknowledge_discrepancy() exists (F11 residual): a human path to
+  clear a pause, recorded with who and when.
 """
 
 import json
@@ -41,27 +51,66 @@ from catalyst.research.schema import UsageComponents
 
 _MTOK = Decimal("1000000")
 
-# Usage-object keys the parser understands. An unrecognized token-ish key
-# is the renamed-field trap arriving (TRAPS.md) - make_usage_components
-# raises rather than silently pricing it at zero.
-_KNOWN_USAGE_KEYS = {
+_KNOWN_TOP_KEYS = {
     "input_tokens", "output_tokens",
     "cache_creation_input_tokens", "cache_read_input_tokens",
     "cache_creation", "server_tool_use", "service_tier",
 }
+_KNOWN_SERVER_TOOL_KEYS = {"web_search_requests"}
+_KNOWN_CACHE_CREATION_KEYS = {"ephemeral_1h_input_tokens", "ephemeral_5m_input_tokens"}
 
 
 class UnrecognizedUsageFieldError(ValueError):
     pass
 
 
+def _find_unknown_fields(raw_usage: dict) -> list[str]:
+    """Token/billing-shaped keys the parser does not understand, at the
+    top level AND inside known nested billing objects (audit N2)."""
+    unknown = [
+        k for k in raw_usage
+        if k not in _KNOWN_TOP_KEYS and ("token" in k or "cache" in k or "search" in k)
+    ]
+    nested = raw_usage.get("server_tool_use") or {}
+    unknown += [f"server_tool_use.{k}" for k in nested
+                if k not in _KNOWN_SERVER_TOOL_KEYS]
+    cache_nested = raw_usage.get("cache_creation") or {}
+    unknown += [f"cache_creation.{k}" for k in cache_nested
+                if k not in _KNOWN_CACHE_CREATION_KEYS]
+    return sorted(unknown)
+
+
+def make_usage_components(raw_usage: dict) -> UsageComponents:
+    """Parse a raw Anthropic usage object LENIENTLY, keeping it verbatim
+    in .raw. Never raises: unknown fields are detected by callers via
+    _find_unknown_fields so the row can be RECORDED before anything is
+    loud (audit N1 - the guard must never prevent the record)."""
+    server_tool_use = raw_usage.get("server_tool_use") or {}
+    return UsageComponents(
+        input_tokens=int(raw_usage.get("input_tokens", 0)),
+        output_tokens=int(raw_usage.get("output_tokens", 0)),
+        cache_creation_input_tokens=int(raw_usage.get("cache_creation_input_tokens", 0)),
+        cache_read_input_tokens=int(raw_usage.get("cache_read_input_tokens", 0)),
+        web_search_requests=int(server_tool_use.get("web_search_requests", 0)),
+        raw=raw_usage,
+    )
+
+
 def price(usage: UsageComponents, model: str) -> Decimal:
-    """Cents, as Decimal. Reads ALL usage fields, always.
+    """Cents, as Decimal. Reads ALL usage fields, always. Refuses to
+    price a usage object carrying unrecognized billing fields - pricing
+    a payload we do not fully understand understates it silently.
 
     Interface note: ARCHITECTURE section 3.2 wrote price(usage) alone;
     pricing requires the model's rate, so `model` is an explicit second
     parameter - recorded as an interface amendment in the stage-3 PR.
     """
+    unknown = _find_unknown_fields(usage.raw)
+    if unknown:
+        raise UnrecognizedUsageFieldError(
+            f"Usage object carries unrecognized billing fields {unknown}; "
+            "update cost/tracker.py before pricing (TRAPS.md renamed-field trap)."
+        )
     if model not in MODEL_RATES_CENTS_PER_MTOK:
         raise UnknownModelError(
             f"No pricing for model {model!r}. Add it to pricing.py - "
@@ -69,8 +118,6 @@ def price(usage: UsageComponents, model: str) -> Decimal:
         )
     input_rate, output_rate = MODEL_RATES_CENTS_PER_MTOK[model]
 
-    # 1h-TTL cache writes bill at 2x, 5m at 1.25x (audit F3 follow-up).
-    # The nested cache_creation breakdown, when present, is authoritative.
     cache_1h = 0
     cache_5m = usage.cache_creation_input_tokens
     nested = usage.raw.get("cache_creation")
@@ -91,32 +138,6 @@ def price(usage: UsageComponents, model: str) -> Decimal:
     web_search_cents = Decimal(usage.web_search_requests) * WEB_SEARCH_CENTS_PER_QUERY
 
     return input_cents + output_cents + cache_write_cents + cache_read_cents + web_search_cents
-
-
-def make_usage_components(raw_usage: dict) -> UsageComponents:
-    """Parse a raw Anthropic usage object, keeping it verbatim in .raw.
-
-    Raises UnrecognizedUsageFieldError on a token-shaped key it does not
-    understand - a renamed billing field must be loud, never zero.
-    """
-    unknown = {
-        k for k in raw_usage
-        if k not in _KNOWN_USAGE_KEYS and ("token" in k or "cache" in k or "search" in k)
-    }
-    if unknown:
-        raise UnrecognizedUsageFieldError(
-            f"Usage object carries unrecognized billing fields {sorted(unknown)}; "
-            "update cost/tracker.py before pricing (TRAPS.md renamed-field trap)."
-        )
-    server_tool_use = raw_usage.get("server_tool_use") or {}
-    return UsageComponents(
-        input_tokens=int(raw_usage.get("input_tokens", 0)),
-        output_tokens=int(raw_usage.get("output_tokens", 0)),
-        cache_creation_input_tokens=int(raw_usage.get("cache_creation_input_tokens", 0)),
-        cache_read_input_tokens=int(raw_usage.get("cache_read_input_tokens", 0)),
-        web_search_requests=int(server_tool_use.get("web_search_requests", 0)),
-        raw=raw_usage,
-    )
 
 
 def record(event: CostEvent, model: str, conn: sqlite3.Connection) -> None:
@@ -147,18 +168,19 @@ def record_usage(
     conn: sqlite3.Connection,
     api_call_id: str | None = None,
 ) -> CostEvent:
-    """RECORD FIRST, PRICE SECOND (audit F2).
+    """RECORD FIRST, ALWAYS (audit F2 + N1).
 
     The row lands unconditionally - money was already spent by the time
-    this runs. Pricing failure leaves priced_cents NULL, which
-    has_unpriced_rows() surfaces and the governor treats as blocking.
+    this runs. Both pricing failure modes (unknown model, unrecognized
+    usage fields) leave priced_cents NULL and raise AFTER the record is
+    safely on disk; has_unpriced_rows() then blocks the governor.
     """
-    usage = make_usage_components(raw_usage)
+    usage = make_usage_components(raw_usage)  # lenient - never raises
     priced = None
     pricing_error = None
     try:
         priced = price(usage, model)
-    except UnknownModelError as exc:
+    except (UnknownModelError, UnrecognizedUsageFieldError) as exc:
         pricing_error = exc
 
     event = CostEvent(
@@ -177,41 +199,67 @@ def record_usage(
 
 
 def has_unpriced_rows(conn: sqlite3.Connection) -> bool:
-    """True while any cost_events row has NULL priced_cents - the ledger
-    has holes and the governor must not authorize on top of them."""
     return conn.execute(
         "SELECT COUNT(*) FROM cost_events WHERE priced_cents IS NULL"
     ).fetchone()[0] > 0
 
 
-def reprice_all(conn: sqlite3.Connection) -> list[tuple[str, Decimal | None, Decimal]]:
-    """Reprice every row from its verbatim raw usage + stored model
-    against the CURRENT pricing table. Returns (id, old, new) for every
-    row whose price changed or was previously NULL. This is the recovery
-    path the verbatim storage exists for (audit F3) - now real, and
-    tested."""
-    changes = []
+@dataclass(frozen=True)
+class RepriceOutcome:
+    changes: list[tuple[str, Decimal | None, Decimal]]
+    still_unpriced: list[tuple[str, str]]   # (row_id, model) price() still refuses
+
+
+def reprice_all(conn: sqlite3.Connection) -> RepriceOutcome:
+    """Reprice every row from its verbatim raw usage + stored model.
+
+    Transactional (audit F8): all-or-nothing commit, explicit rollback
+    on unexpected failure - no half-repriced ledger can survive.
+    Continues past rows price() still refuses (F3 residual a),
+    collecting them for the caller. Every change is logged to
+    cost_reprice_events with old and new (F3 residual b - every
+    adjustment carries its evidence, CLAUDE.md)."""
+    changes: list[tuple[str, Decimal | None, Decimal]] = []
+    still_unpriced: list[tuple[str, str]] = []
     rows = conn.execute(
         "SELECT id, raw_usage_json, model, priced_cents FROM cost_events"
     ).fetchall()
-    for row_id, raw_json, model, old in rows:
-        usage = make_usage_components(json.loads(raw_json))
-        new = price(usage, model)  # raises loudly if model STILL unknown
-        old_dec = Decimal(old) if old is not None else None
-        if old_dec != new:
-            changes.append((row_id, old_dec, new))
-            conn.execute(
-                "UPDATE cost_events SET priced_cents = ? WHERE id = ?",
-                (str(new), row_id),
-            )
-    conn.commit()
-    return changes
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        for row_id, raw_json, model, old in rows:
+            usage = make_usage_components(json.loads(raw_json))
+            try:
+                new = price(usage, model)
+            except (UnknownModelError, UnrecognizedUsageFieldError):
+                still_unpriced.append((row_id, model))
+                continue
+            old_dec = Decimal(old) if old is not None else None
+            if old_dec != new:
+                changes.append((row_id, old_dec, new))
+                conn.execute(
+                    "UPDATE cost_events SET priced_cents = ? WHERE id = ?",
+                    (str(new), row_id),
+                )
+                conn.execute(
+                    "INSERT INTO cost_reprice_events (id, cost_event_id, old_cents, new_cents, repriced_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (str(uuid.uuid4()), row_id,
+                     str(old_dec) if old_dec is not None else None,
+                     str(new), now),
+                )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return RepriceOutcome(changes=changes, still_unpriced=still_unpriced)
 
 
 @dataclass(frozen=True)
 class CostApiPage:
     """Structured Cost API day result (audit F4). A truncated page is
-    detectable and reconcile_day refuses to compare against one."""
+    detectable, and the production adapter MUST pass an explicit page
+    limit (TRAPS.md) - fetch_cost_api_full_day below is the reference
+    adapter shape stage 5 implements against."""
 
     records: list[dict]
     has_more: bool
@@ -221,19 +269,19 @@ class CostApiPage:
 @dataclass(frozen=True)
 class ReconciliationResult:
     target_date: date
-    kind: str
-    component: str
     local_total_cents: Decimal
     cost_api_total_cents: Decimal
     discrepancy_cents: Decimal
+    cumulative_drift_cents: Decimal
     action_taken: str
 
 
-# Relative threshold with an absolute floor (audit F1): at $5/month
-# (~17c/day) a fixed 50c threshold could never fire. 10% of the larger
-# side, floored at 5c, fires on any meaningful divergence at any scale.
 RECONCILE_REL_THRESHOLD = Decimal("0.10")
 RECONCILE_FLOOR_CENTS = Decimal("5")
+# F1 residual: a systematic sub-floor daily divergence accumulates; the
+# trailing signed drift over this many closed days must also stay under
+# the floor or spend pauses.
+DRIFT_WINDOW_DAYS = 30
 
 
 class TruncatedCostPageError(RuntimeError):
@@ -242,18 +290,15 @@ class TruncatedCostPageError(RuntimeError):
 
 def reconcile_day(
     target_date: date,
-    kind: Literal["scheduled", "manual"],
-    component: str,
     conn: sqlite3.Connection,
     fetch_cost_api_day: Callable[[date], CostApiPage],
 ) -> ReconciliationResult:
-    """Compare the local ledger against the Cost API for ONE closed day.
-
-    The adapter must drain within-day pagination itself (explicit page
-    limit per TRAPS.md); if it still reports has_more, we REFUSE to
-    compare - a truncated reference figure reconciling "clean" is worse
-    than no reconciliation (audit F4).
-    """
+    """Compare the local ledger against the Cost API for ONE closed day,
+    WHOLE-DAY totals (audit N3: the Cost API cannot see this project's
+    internal scheduled/manual split, so per-kind API filtering would
+    match nothing real; per-kind local breakdowns are recorded beside
+    the comparison instead - a per-kind pricing error still moves the
+    total and still trips the threshold)."""
     if target_date >= datetime.now(timezone.utc).date():
         raise ValueError(
             f"reconcile_day({target_date}) called for a day that has not closed. "
@@ -261,64 +306,100 @@ def reconcile_day(
         )
 
     rows = conn.execute(
-        "SELECT priced_cents FROM cost_events "
-        "WHERE kind = ? AND component = ? AND date(priced_at) = ? AND priced_cents IS NOT NULL",
-        (kind, component, target_date.isoformat()),
+        "SELECT kind, priced_cents FROM cost_events "
+        "WHERE date(priced_at) = ? AND priced_cents IS NOT NULL",
+        (target_date.isoformat(),),
     ).fetchall()
-    local_total = sum((Decimal(r[0]) for r in rows), Decimal("0"))
+    local_total = sum((Decimal(r[1]) for r in rows), Decimal("0"))
+    by_kind = {}
+    for kind, cents in rows:
+        by_kind[kind] = by_kind.get(kind, Decimal("0")) + Decimal(cents)
 
     page = fetch_cost_api_day(target_date)
+
+    def _insert_row(api_total, discrepancy, threshold, drift, action, auto_ack):
+        conn.execute(
+            "INSERT INTO cost_reconciliation_events "
+            "(id, target_date, kind, component, local_total_cents, cost_api_total_cents, "
+            " discrepancy_cents, threshold_cents, api_raw_response, api_record_count, "
+            " action_taken, acknowledged_by, acknowledged_at, reconciled_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (str(uuid.uuid4()), target_date.isoformat(),
+             "all", json.dumps({k: str(v) for k, v in by_kind.items()}),
+             str(local_total), str(api_total), str(discrepancy), str(threshold),
+             json.dumps(page.raw_response, sort_keys=True), len(page.records),
+             action,
+             "auto" if auto_ack else None,
+             datetime.now(timezone.utc).isoformat() if auto_ack else None,
+             datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+
     if page.has_more:
+        # The refusal itself is on the record BEFORE the raise (audit F4):
+        # a caller that logs-and-continues still leaves a paused row behind.
+        _insert_row(Decimal("0"), Decimal("0"), Decimal("0"), Decimal("0"),
+                    "scheduled_paused", auto_ack=False)
         raise TruncatedCostPageError(
             f"Cost API page for {target_date} reports has_more=True; refusing to "
-            "compare against a truncated reference. Raise the adapter's page limit."
+            "compare against a truncated reference. The adapter must drain "
+            "pagination with an explicit page limit (TRAPS.md)."
         )
-    api_total = sum(
-        (Decimal(str(rec["amount"])) for rec in page.records
-         if rec.get("kind") == kind and rec.get("component") == component),
-        Decimal("0"),
-    )
 
-    discrepancy = (local_total - api_total).copy_abs()
+    api_total = sum((Decimal(str(rec["amount"])) for rec in page.records), Decimal("0"))
+    signed = local_total - api_total
+    discrepancy = signed.copy_abs()
     threshold = max(RECONCILE_FLOOR_CENTS,
                     RECONCILE_REL_THRESHOLD * max(local_total, api_total))
 
-    # An empty API day against non-zero local spend is its own paused
-    # outcome (audit F1): "the adapter returned nothing" must never
-    # auto-acknowledge as agreement.
+    drift = signed + _trailing_signed_drift(conn, target_date)
     suspicious_empty = (not page.records) and local_total > 0
-    paused = discrepancy > threshold or suspicious_empty
+    paused = (discrepancy > threshold
+              or suspicious_empty
+              or drift.copy_abs() > RECONCILE_FLOOR_CENTS)
     action = "scheduled_paused" if paused else "none"
-
-    conn.execute(
-        "INSERT INTO cost_reconciliation_events "
-        "(id, target_date, kind, component, local_total_cents, cost_api_total_cents, "
-        " discrepancy_cents, threshold_cents, api_raw_response, api_record_count, "
-        " action_taken, acknowledged_by, acknowledged_at, reconciled_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (str(uuid.uuid4()), target_date.isoformat(), kind, component,
-         str(local_total), str(api_total), str(discrepancy), str(threshold),
-         json.dumps(page.raw_response, sort_keys=True), len(page.records),
-         action,
-         None if paused else "auto",
-         None if paused else datetime.now(timezone.utc).isoformat(),
-         datetime.now(timezone.utc).isoformat()),
-    )
-    conn.commit()
+    _insert_row(api_total, discrepancy, threshold, drift, action, auto_ack=not paused)
 
     return ReconciliationResult(
-        target_date=target_date, kind=kind, component=component,
+        target_date=target_date,
         local_total_cents=local_total, cost_api_total_cents=api_total,
-        discrepancy_cents=discrepancy, action_taken=action,
+        discrepancy_cents=discrepancy, cumulative_drift_cents=drift,
+        action_taken=action,
     )
+
+
+def _trailing_signed_drift(conn: sqlite3.Connection, before: date) -> Decimal:
+    """Sum of signed (local - api) over the trailing DRIFT_WINDOW_DAYS of
+    already-reconciled days strictly before `before`."""
+    rows = conn.execute(
+        "SELECT local_total_cents, cost_api_total_cents FROM cost_reconciliation_events "
+        "WHERE target_date < ? ORDER BY target_date DESC LIMIT ?",
+        (before.isoformat(), DRIFT_WINDOW_DAYS),
+    ).fetchall()
+    return sum((Decimal(l) - Decimal(a) for l, a in rows), Decimal("0"))
 
 
 def has_unacknowledged_discrepancy(conn: sqlite3.Connection) -> bool:
     """True while any reconciliation event that paused spend remains
-    unacknowledged. Pauses ALL new spend authorization, both kinds - a
-    mispriced table poisons both ledgers, so the pause is deliberately
-    global (audit F11, made explicit)."""
+    unacknowledged. Pauses ALL new spend authorization, both kinds -
+    deliberately global (audit F11)."""
     return conn.execute(
         "SELECT COUNT(*) FROM cost_reconciliation_events "
         "WHERE action_taken = 'scheduled_paused' AND acknowledged_at IS NULL"
     ).fetchone()[0] > 0
+
+
+def acknowledge_discrepancy(conn: sqlite3.Connection, event_id: str, acknowledged_by: str) -> None:
+    """The human path out of a pause (audit F11 residual). Records who
+    and when; the dashboard exposes this, never auto-invoked."""
+    if not acknowledged_by or acknowledged_by == "auto":
+        raise ValueError("acknowledge_discrepancy requires a human identifier")
+    cur = conn.execute(
+        "UPDATE cost_reconciliation_events "
+        "SET acknowledged_by = ?, acknowledged_at = ? "
+        "WHERE id = ? AND acknowledged_at IS NULL",
+        (acknowledged_by, datetime.now(timezone.utc).isoformat(), event_id),
+    )
+    conn.commit()
+    if cur.rowcount == 0:
+        raise ValueError(f"no unacknowledged reconciliation event {event_id!r}")

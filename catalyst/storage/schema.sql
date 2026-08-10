@@ -206,6 +206,14 @@ CREATE TABLE IF NOT EXISTS cost_governor_events (
     at             TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS cost_reprice_events (
+    id            TEXT PRIMARY KEY,
+    cost_event_id TEXT NOT NULL REFERENCES cost_events(id),
+    old_cents     TEXT,                  -- NULL = was unpriced
+    new_cents     TEXT NOT NULL,
+    repriced_at   TEXT NOT NULL          -- every adjustment logged (CLAUDE.md)
+);
+
 CREATE TABLE IF NOT EXISTS cost_reconciliation_events (
     id                   TEXT PRIMARY KEY,
     target_date          TEXT NOT NULL,

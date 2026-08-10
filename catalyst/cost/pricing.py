@@ -36,3 +36,14 @@ class UnknownModelError(ValueError):
     """Pricing an unknown model must be a loud failure, never a silent
     zero - a renamed model quietly pricing itself at nothing is exactly
     the TRAPS.md failure class this module exists to prevent."""
+
+
+def rates_stale(as_of=None):
+    """Dashboard warning, deliberately NOT a test failure (audit N5):
+    a stale pricing table must be loud on the dashboard without blocking
+    the upgrade path."""
+    from datetime import date, datetime, timezone
+
+    as_of = as_of or datetime.now(timezone.utc).date()
+    verified = date.fromisoformat(RATES_VERIFIED_ON)
+    return (as_of - verified).days > RATES_MAX_AGE_DAYS
