@@ -161,6 +161,14 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
         report.errors.append(f"reconcile: {exc}")
         return report          # cannot trust local state; stop the cycle
 
+    # score refusals whose counterfactual window has elapsed (the
+    # feedback loop; failures leave rows unscored for the next cycle)
+    try:
+        from catalyst.risk.refusal_tracker import score_due_refusals
+        score_due_refusals(broker, conn, now)
+    except BrokerError as exc:
+        report.errors.append(f"refusal_scoring: {exc}")
+
     # ---- 3. session stop duties + hard-date exits
     open_rows = _open_position_dicts(conn, now)
     if open_rows:

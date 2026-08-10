@@ -583,3 +583,6 @@ change kept from this session is the strengthened assertion block in
 - cycle.py kill-switch early return removed: caught by
   test_broker_down_trips_and_stops_everything. Restored (with cache
   clear), green.
+- refusal_tracker.py evidence sign flipped (profitable refusals would
+  RAISE the conviction floor): caught by
+  test_profitable_refusals_push_floor_down. Restored, green.
