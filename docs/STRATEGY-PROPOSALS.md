@@ -48,12 +48,20 @@ pre-registered kill conditions.
 
 ---
 
-## 1. What I could not verify, and why
+## 1. What was verified, what wasn't, and how
 
-I attempted to confirm that the free data sources below actually respond,
-because naming an endpoint is not the same as checking one. Every request was
-refused by this session's egress policy before it left the machine. Raw
-failure record, printed beside the zero per CLAUDE.md house rule 3:
+**Updated 2026-08-10.** This section originally reported that every source
+below was `[UNVERIFIED]`, because this session's egress policy returned a
+403 on every attempt at the time this document was first drafted. That
+policy was subsequently opened, and a second pass confirmed four of the
+five government/market sources against live requests, plus the Alpaca
+paper account itself. The original failure record is kept below for the
+record, followed by what changed.
+
+**Original failure record** (raw response printed beside the zero per
+CLAUDE.md house rule 3 — kept, not deleted, because "it failed, then it
+was fixed" is itself useful history for whoever configures the next
+environment):
 
 ```
 curl: (56) CONNECT tunnel failed, response 403      www.federalregister.gov:443
@@ -66,36 +74,57 @@ http://127.0.0.1:45399/__agentproxy/status ->
   "detail": "gateway answered 403 to CONNECT (policy denial or upstream failure)"
 ```
 
-Per `/root/.ccr/README.md`, a 403 from the gateway is an organisation policy
-denial and must be reported rather than retried or routed around. So it is
-reported here, and it has a consequence for the reader: **every data source
-in §5 is marked `[UNVERIFIED]`, including the four BUILD-BRIEF.md already
-lists as "verified working."** They may well work — data-engineer should
-confirm each from the VPS, where egress is presumably open — but they are not
-confirmed *by me*, and this document does not pretend otherwise.
+**Confirmed working, 2026-08-10, via live requests (not documentation):**
 
-This matters more than it looks. Three of the five candidates below depend on
-a source's *latency* and *point-in-time fidelity* (when a filing becomes
-visible, whether a record can be retrieved as it stood on a past date), and
-those properties cannot be inferred from documentation. They are the first
-thing data-engineer should measure, because a candidate can die on them
-before any price data is touched.
+| Source | Result | What was actually checked |
+|---|---|---|
+| `www.federalregister.gov` API | `200`, real document JSON | Basic reachability and response shape only |
+| `clinicaltrials.gov` API v2 (`/api/v2/studies`) | `200`, real study records | Basic reachability and response shape only — **not** the versioned-history capability D depends on (§D.6 below is still open) |
+| `api.fda.gov` (openFDA) | `200`, real drug approval records | Basic reachability and response shape only |
+| `efts.sec.gov` (EDGAR full-text search) | `200`, real filing search hits | Basic reachability and response shape only |
+| Alpaca paper account (`/v2/account`) | `200` | Full field list read — see §2.1 below, now stated as fact rather than estimate |
+| Alpaca market data (`/v2/stocks/{sym}/bars`) | `200`, real OHLCV bars | Both `feed=iex` and `feed=sip` returned distinct, correctly-differentiated data (SIP volume ~15-20x IEX volume on the same bars, as expected for a consolidated-vs-single-exchange comparison) — **this account has SIP access, not just IEX** (§B.6 below) |
+| Alpaca news (`/v1beta1/news`) | `200`, real Benzinga articles | Basic reachability and response shape only |
+| Alpaca corporate actions | `200` once the correct path/enum was found | See the dedicated note in §5 — the path and type-enum in general circulation were both wrong, and one quantitative claim in TRAPS.md didn't hold up under measurement |
+
+**Still not tested — do not treat these as confirmed:** SEC EDGAR daily/full
+index, `data.sec.gov` submissions/companyfacts/frames (XBRL), SEC Insider
+Transactions Data Sets bulk files, SEC Financial Statement Data Sets bulk
+files, SEC Failure-to-Deliver data, FINRA Reg SHO short volume files, FINRA
+short interest, Nasdaq Trader halts RSS, Treasury FiscalData, and —
+specifically — whether ClinicalTrials.gov v2 exposes *retrievable historical
+versions* of a record (only current-state records were fetched; point-in-time
+replay is D's entire premise and remains unconfirmed). §5's table now
+reflects this precisely, source by source, rather than one blanket tag.
+
+This still matters for the same reason it did before: confirming an endpoint
+responds is not the same as confirming its *latency* and *point-in-time
+fidelity* (when a filing becomes visible, whether a record can be retrieved
+as it stood on a past date) — those weren't and couldn't be established by
+a handful of ad hoc requests, and remain the first thing data-engineer
+should measure with instrumented, repeated calls before any candidate is
+trusted on them.
 
 ---
 
 ## 2. Two structural constraints that reshape every candidate
 
-These were not in the brief, and both change what is buildable. Both are
-`[UNVERIFIED]` against Alpaca specifically and must be confirmed before any
-candidate is graded, because they alter the backtest's rules, not just its
-inputs.
+These were not in the brief. §2.1 is now **confirmed against a live Alpaca
+paper account**, not estimated. §2.2 is still `[EST]` — it follows from
+general Reg T / FINRA settlement rules rather than anything Alpaca-specific,
+and confirming the exact violation count and restriction length needs either
+Alpaca's own account-terms documentation or observing an actual violation,
+neither of which a read-only data pull can establish.
 
-### 2.1 A $1,000 account is a cash account, so short selling is likely unavailable
+### 2.1 A $1,000 account is a cash account, so short selling is unavailable — confirmed
 
 TRAPS.md states the $2,000 minimum equity for margin still applies after the
 PDT retirement, so the account is unleveraged. The consequence that follows,
 which the brief does not draw out: **short selling requires a margin
-account.** A cash account cannot borrow stock. If that holds at Alpaca, then:
+account.** A cash account cannot borrow stock. **Confirmed 2026-08-10** by
+reading the account object directly: `shorting_enabled: false`,
+`multiplier: '1'` (no leverage) on the actual paper account this project
+will trade from. Not inferred, not estimated — read. So:
 
 - Every candidate is **long-only**, or must express bearish views through
   inverse ETFs (crude, decay-prone, and a different instrument with a
@@ -117,8 +146,10 @@ settlement: proceeds from a sale settle T+1, and buying with unsettled
 proceeds and then selling before settlement is a good-faith violation; three
 in twelve months restricts the account to settled cash only for 90 days.
 
-Practical effect on $1,000 `[EST, needs Alpaca confirmation]`: the account can
-turn over roughly **once per day**, not repeatedly. Deploying $900 across
+Practical effect on $1,000 `[EST — general Reg T/FINRA rule, not yet
+confirmed against Alpaca's specific account terms or an observed violation]`:
+the account can turn over roughly **once per day**, not repeatedly. Deploying
+$900 across
 three day trades on Monday leaves that cash unsettled until Tuesday. So the
 sustainable intraday rate is on the order of **20-30 day trades per month**,
 not hundreds — enough to accumulate a sample quickly, but nowhere near
@@ -287,25 +318,44 @@ across at least three independent sources, and for each I have tried to name
 what the join *adds* that no single source provides — because "we use five
 APIs" is not an edge, and a linkage that only adds confirmation adds nothing.
 
-All rows `[UNVERIFIED]` from this sandbox (§1). "Keyless" claims are from
-documentation, not from a successful request.
+Verification status is per-row now, not a single blanket tag (§1). "Keyless"
+claims for rows not yet tested are still from documentation, not a
+successful request.
 
-| Source | What it gives | Keyless? | Role in the linkage |
-|---|---|---|---|
-| SEC EDGAR daily/full index | Every filing, by form type, near real time | Yes, UA required | Event clock for A, C. Filing **acceptance timestamp** is the point-in-time truth, not filing date |
-| SEC EDGAR full-text search (`efts.sec.gov`) | Phrase search across filing bodies | Yes, UA required | Finds PDUFA dates, lockup language, offering terms that no structured feed carries |
-| `data.sec.gov` submissions / companyfacts / frames | Per-company filing history; XBRL fundamentals | Yes, UA required | Supplies the reported earnings number for A's surprise measure without any analyst data |
-| SEC Insider Transactions Data Sets (quarterly Form 3/4/5 flat files) | Historical Form 4 in tabular form | Yes | C's **backtest** universe; the live path needs daily-index + ownership XML |
-| SEC Financial Statement Data Sets (quarterly XBRL extract) | Historical fundamentals, as-filed | Yes | A's backtest universe, avoids restatement look-ahead |
-| SEC Failure-to-Deliver data | Settlement failures per symbol, twice monthly | Yes | Crowding/short-pressure context for B, C |
-| FINRA Reg SHO daily short sale volume (CDN files) | Daily short volume per symbol, posted ~6pm ET | Yes (files); the query API may need credentials | Distinguishes "buyers arriving" from "shorts covering" in A, B, C |
-| FINRA equity short interest | Bi-monthly short interest | Yes | Squeeze/crowding filter |
-| Nasdaq Trader trading halts RSS + halt history | LULD pauses and news halts, live and historical | Yes | B's highest-information event type; also a required backtest realism input |
-| Federal Register API | Scheduled agency actions, advisory committee meetings | Yes | D's forward calendar; C's exclusion filter |
-| ClinicalTrials.gov API v2 | Trial status, completion dates, **record versions** | Yes | D's event clock. Versioned records are what make a point-in-time replay possible at all |
-| openFDA | Approvals, CRLs — retrospective only | Yes | Retrospective is a *defect* for anticipation and an *asset* for D: it is a clean post-event source |
-| Alpaca market data | Bars, quotes, trades, news | Subscription | Price, volume, spread, the reaction measure in every candidate |
-| Treasury FiscalData API | Rates, auctions | Yes | T-bill benchmark for the dashboard's comparison |
+| Source | What it gives | Keyless? | Role in the linkage | Verified? |
+|---|---|---|---|---|
+| SEC EDGAR daily/full index | Every filing, by form type, near real time | Yes, UA required | Event clock for A, C. Filing **acceptance timestamp** is the point-in-time truth, not filing date | Not tested |
+| SEC EDGAR full-text search (`efts.sec.gov`) | Phrase search across filing bodies | Yes, UA required | Finds PDUFA dates, lockup language, offering terms that no structured feed carries | **Confirmed 2026-08-10** — `200`, real filing hits |
+| `data.sec.gov` submissions / companyfacts / frames | Per-company filing history; XBRL fundamentals | Yes, UA required | Supplies the reported earnings number for A's surprise measure without any analyst data | Not tested — A's core dependency, should be first in line for data-engineer |
+| SEC Insider Transactions Data Sets (quarterly Form 3/4/5 flat files) | Historical Form 4 in tabular form | Yes | C's **backtest** universe; the live path needs daily-index + ownership XML | Not tested — C's core dependency |
+| SEC Financial Statement Data Sets (quarterly XBRL extract) | Historical fundamentals, as-filed | Yes | A's backtest universe, avoids restatement look-ahead | Not tested |
+| SEC Failure-to-Deliver data | Settlement failures per symbol, twice monthly | Yes | Crowding/short-pressure context for B, C | Not tested |
+| FINRA Reg SHO daily short sale volume (CDN files) | Daily short volume per symbol, posted ~6pm ET | Yes (files); the query API may need credentials | Distinguishes "buyers arriving" from "shorts covering" in A, B, C | Not tested |
+| FINRA equity short interest | Bi-monthly short interest | Yes | Squeeze/crowding filter | Not tested |
+| Nasdaq Trader trading halts RSS + halt history | LULD pauses and news halts, live and historical | Yes | B's highest-information event type; also a required backtest realism input | Not tested |
+| Federal Register API | Scheduled agency actions, advisory committee meetings | Yes | D's forward calendar; C's exclusion filter | **Confirmed 2026-08-10** — `200`, real document JSON |
+| ClinicalTrials.gov API v2 | Trial status, completion dates, **record versions** | Yes | D's event clock. Versioned records are what make a point-in-time replay possible at all | **Partially confirmed** — basic `/api/v2/studies` access works (`200`, real records); the **versioned-history capability itself was not tested** and D cannot be trusted until it is (§D.6) |
+| openFDA | Approvals, CRLs — retrospective only | Yes | Retrospective is a *defect* for anticipation and an *asset* for D: it is a clean post-event source | **Confirmed 2026-08-10** — `200`, real approval records |
+| Alpaca market data | Bars, quotes, trades, news | Subscription | Price, volume, spread, the reaction measure in every candidate | **Confirmed 2026-08-10** — bars and news both `200` with real data; **both `feed=iex` and `feed=sip` work**, and SIP returns genuinely higher (consolidated-tape) volume, so this account is not IEX-limited (resolves the §B.6 concern below) |
+| Alpaca corporate actions | Dividends, mergers, splits, and other structural events | Subscription | Not currently used by any candidate below, but relevant to data-engineer's implementation | **Confirmed 2026-08-10, with two corrections to how this feed is documented elsewhere** — see the note immediately below the table |
+| Treasury FiscalData API | Rates, auctions | Yes | T-bill benchmark for the dashboard's comparison | Not tested |
+
+**Correction to TRAPS.md's corporate-actions description**, found while
+verifying: the endpoint is `/v1/corporate-actions` — **`/v2/corporate-actions`
+returns a 404**, which is easy to hit if you extrapolate from the `/v2/`
+prefix every other Alpaca data endpoint uses. `types=merger` is not a valid
+filter value; the real enum (readable from the API's own 400 error body) is
+`forward_split`, `reverse_split`, `stock_dividend`, `spin_off`,
+`cash_merger`, `stock_merger`, `stock_and_cash_merger`, `unit_split`,
+`cash_dividend`, `redemption`, `name_change`, `worthless_removal`,
+`rights_distribution`, `contract_adjustment`, `partial_call`,
+`reorganization`. TRAPS.md's "~98% dividends" holds directionally (1000+
+`cash_dividend` records in a 39-day window, more pages beyond that) but
+**"roughly one usable name a day" does not hold as measured** —
+`cash_merger`+`stock_merger`+`stock_and_cash_merger` together averaged
+**~2.2/day** over 2026-07-01–2026-08-09, before any liquidity or materiality
+filtering a real strategy would apply. TRAPS.md has been annotated with this
+finding directly.
 
 **What the joins actually add, candidate by candidate** — this is the part
 that has to justify itself, not the list above:
@@ -552,8 +602,13 @@ that cost should be counted against it:
 - **Data:** minute bars (ideally quotes) for a multi-year gap universe. If
   Alpaca's historical minute data does not extend far enough, or the free
   tier is IEX-only rather than consolidated SIP, **the gap and volume
-  measures are distorted and the backtest is invalid**. `[UNVERIFIED — this
-  is the first thing to check, before any modelling work]`
+  measures are distorted and the backtest is invalid**. **Partially resolved
+  2026-08-10**: this account has confirmed `feed=sip` access (consolidated
+  volume, not IEX-only) for recent daily bars, so the account tier is not the
+  IEX-only risk this bullet warned about. **Still open**: whether that same
+  access extends to *minute-level* bars over a *multi-year* window — only a
+  handful of recent daily bars were pulled. That remains the first thing to
+  check before any modelling work.
 - **Sample:** ≥400 trades (σ/μ ≈ 7.5, §3.2). Achievable from history.
 - **Date range:** ≥3 years including a high-volatility regime; gap strategies
   behave very differently across VIX regimes and a single-regime grade would
@@ -811,9 +866,14 @@ the account more than by anything about the strategy.
   wholly retrospective. Replaying either naively imports look-ahead bias that
   would make this candidate look excellent and be worthless. The harness must
   use ClinicalTrials.gov's versioned record history, and must treat openFDA
-  as available only at its own publication lag. `[UNVERIFIED — that the v2
-  API exposes retrievable historical versions is from documentation, not from
-  a request I was able to make]`
+  as available only at its own publication lag. **Partially resolved
+  2026-08-10**: basic `/api/v2/studies` access is confirmed live (`200`,
+  real records) and openFDA access is confirmed live (`200`, real approval
+  records). **Still open and still the load-bearing question**: whether the
+  v2 API exposes *retrievable historical versions* of a record — only
+  current-state records were fetched, and that is still from documentation,
+  not from a request that actually pulled a version history. This is the
+  single most important thing left to check before trusting D at all.
 - **Pessimistic cost assumptions requested:** far side of NBBO plus 0.25%;
   floor of 1.0% round trip; no entry before the second open after the
   resolution 8-K; assume a 20% chance of a follow-on adverse binary inside
@@ -1161,7 +1221,7 @@ a rationalisation:
 | E matches or beats A/B/C/D net of costs | **Run E, stop paying for data linkage.** The complexity would have failed to justify itself, and that is a legitimate outcome |
 | A's drift survives realistic costs at n≥300 | **Promote A** — it has the deepest literature and the most tradeable universe |
 | D yields <120 events in 7 years | **Drop D** as standalone; keep post-event resolution as an overlay input to C |
-| Alpaca confirms shorting is available at $1,000 | Re-grade B and D long/short; both may improve materially |
+| ~~Alpaca confirms shorting is available at $1,000~~ | **Resolved 2026-08-10, negative**: `shorting_enabled: false` on the actual account. Every candidate stays long-only; this row is settled, not hypothetical |
 | Alpaca historical minute data is IEX-only or too short | **B becomes ungradeable**, therefore unbuildable. Decisive, and cheap to check first |
 | ClinicalTrials.gov v2 has no retrievable point-in-time versions | **D becomes ungradeable** without look-ahead bias |
 | Measured adverse gaps come in far below the estimates in §6 of each candidate | All position sizes rise, all break-evens fall, and the previous build's "un-sizeable" conclusion needs revisiting on evidence |
@@ -1171,16 +1231,29 @@ a rationalisation:
 
 ## 12. Open items this document does not resolve
 
-- **Every data source is `[UNVERIFIED]`** (§1). data-engineer should confirm
-  each from the VPS and report latency and point-in-time fidelity, not just
-  a 200 response.
-- **Whether shorting is available at $1,000 on Alpaca** (§2.1) — changes the
-  grading of B and D.
+- **Four government sources plus the core Alpaca endpoints are now confirmed
+  live** (§1) — Federal Register, ClinicalTrials.gov v2 (basic access),
+  openFDA, EDGAR full-text search, Alpaca account/bars/news/corporate-actions.
+  **Still genuinely unverified**: everything A and C actually depend on —
+  `data.sec.gov` XBRL (A), SEC Insider Transactions Data Sets (C) — plus
+  FINRA, Nasdaq halts, Failure-to-Deliver, and Treasury FiscalData. None of
+  these were tested. data-engineer should treat A and C's core sources as
+  priority one, not the sources this pass happened to reach first.
+- ~~Whether shorting is available at $1,000 on Alpaca~~ — **resolved,
+  negative** (§2.1): it is not. Every candidate is long-only.
 - **Whether T+1 settlement throttles day trading as described** (§2.2) —
-  changes B's frequency ceiling and therefore its cost arithmetic.
+  still open; this is a general rule, not something a data pull can confirm,
+  and changes B's frequency ceiling and therefore its cost arithmetic.
 - **Whether Alpaca historical minute/quote data supports B's backtest at all**
-  (§B.6) — check before any modelling work; it is potentially decisive and
-  costs an afternoon.
+  (§B.6) — **partially resolved**: this account has SIP (not IEX-only)
+  access for recent daily bars. **Still open**: minute-level granularity over
+  a multi-year window specifically — check before any modelling work, it
+  remains potentially decisive.
+- **Whether ClinicalTrials.gov v2 exposes retrievable historical record
+  versions** (§D.6, new item from this verification pass) — basic access is
+  confirmed but the versioning capability D's entire premise rests on is not.
+  This is now the single most important unresolved question in this
+  document.
 - **`HARD_BOUNDS` values** — a human decision (ARCHITECTURE §12). The 2%-per-
   position figure used throughout §6 is illustrative arithmetic, not a
   proposal.

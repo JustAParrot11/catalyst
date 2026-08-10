@@ -34,6 +34,24 @@ Short list, all learned the hard way. Everything else is your call.
   real fill.
 - The corporate actions feed is ~98% dividends and yields roughly one
   usable name a day.
+  **Correction, verified 2026-08-10 against a live paper account:** the
+  endpoint is `/v1/corporate-actions` — **`/v2/corporate-actions` 404s**,
+  easy to hit by extrapolating from the `/v2/` prefix every other Alpaca
+  data endpoint uses. `types=merger` is not a valid filter; the real enum
+  (readable from the API's own 400 error body) is `forward_split`,
+  `reverse_split`, `stock_dividend`, `spin_off`, `cash_merger`,
+  `stock_merger`, `stock_and_cash_merger`, `unit_split`, `cash_dividend`,
+  `redemption`, `name_change`, `worthless_removal`, `rights_distribution`,
+  `contract_adjustment`, `partial_call`, `reorganization`. The
+  dividend-dominance holds (1000+ `cash_dividend` records in a 39-day
+  window, more pages beyond that). **The "roughly one usable name a day"
+  figure does not hold as measured**: `cash_merger` + `stock_merger` +
+  `stock_and_cash_merger` together averaged ~2.2/day over
+  2026-07-01–2026-08-09, before any liquidity/materiality filtering.
+  Treat "roughly one" as this project's original estimate, not a
+  re-confirmed number — re-measure before sizing anything off it. (The
+  identical line also appears in BUILD-BRIEF.md's traps list; that copy
+  has not been corrected.)
 - An empty symbol list on the news API is treated as a filter, not as
   "everything".
 
