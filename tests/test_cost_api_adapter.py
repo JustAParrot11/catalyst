@@ -11,6 +11,10 @@ Sabotage log (house rule 4):
   'amount' surfaced as CostApiError refusal). Restored, green.
 - missing-amount refusal removed (unreadable record treated as zero):
   caught by test_record_without_amount_refused. Restored, green.
+- top-level allowlist reverted to the old token/cache/search substring
+  heuristic (cost-audit F1: "code_execution_requests" then priced itself
+  at zero): caught by test_novel_top_level_billing_key_refuses.
+  Restored, green.
 """
 
 import json
@@ -118,6 +122,124 @@ class TestReadOnlyGuarantee:
                      "httpx.delete", '"POST"', '"PUT"', '"PATCH"',
                      '"DELETE"'):
             assert verb not in src, f"read-only module contains {verb}"
+
+    def test_default_http_path_issues_only_get(self, monkeypatch):
+        """Behavioral, not textual (cost-audit F5): with every mutating
+        httpx entry point poisoned, the adapter's DEFAULT path (no
+        injected http_get) must still work - proving it never reaches
+        for anything but GET."""
+        import httpx as _httpx
+        calls = []
+
+        def fake_get(url, headers=None, params=None, timeout=None):
+            calls.append(url)
+            return _httpx.Response(200, json=REAL_SHAPE,
+                                   request=_httpx.Request("GET", url))
+
+        def poisoned(*a, **k):
+            raise AssertionError("read-only adapter used a mutating verb")
+
+        monkeypatch.setattr(_httpx, "get", fake_get)
+        for verb in ("post", "put", "patch", "delete", "request", "stream"):
+            monkeypatch.setattr(_httpx, verb, poisoned)
+        page = fetch_cost_api_day(date(2026, 8, 4), admin_key="k")
+        assert len(page.records) == 1 and len(calls) == 1
+
+
+class TestNightlyReconcileWiring:
+    """cost-audit F2/F3/F6: the scheduler hook was untested. These pin
+    closed-days-only, idempotency, the check_failed record on failure,
+    backfill of missed days, and the clean no-admin-key skip."""
+
+    def _run(self, tmp_path, monkeypatch, fetch, admin_key="sk-admin"):
+        from types import SimpleNamespace
+
+        import catalyst.cost.cost_api as cost_api_mod
+        import catalyst.setup.credentials as creds_mod
+        from catalyst.orchestrator.scheduler import _maybe_reconcile_yesterday
+        monkeypatch.setattr(
+            creds_mod, "load_credentials",
+            lambda *a, **k: SimpleNamespace(anthropic_admin_key=admin_key))
+        monkeypatch.setattr(cost_api_mod, "fetch_cost_api_day", fetch)
+        db_file = str(tmp_path / "sched.db")
+        conn = sqlite3.connect(db_file)
+        conn.executescript(open("catalyst/storage/schema.sql").read())
+        conn.close()
+        _maybe_reconcile_yesterday(db_file)
+        return db_file
+
+    @staticmethod
+    def _empty_page(target_date, admin_key=None):
+        from catalyst.cost.tracker import CostApiPage
+        return CostApiPage(records=[], has_more=False,
+                           raw_response={"data": [], "has_more": False})
+
+    def _rows(self, db_file):
+        conn = sqlite3.connect(db_file)
+        rows = conn.execute(
+            "SELECT target_date, action_taken FROM cost_reconciliation_events "
+            "ORDER BY target_date").fetchall()
+        conn.close()
+        return rows
+
+    def test_no_admin_key_skips_cleanly(self, tmp_path, monkeypatch):
+        def explode(*a, **k):
+            raise AssertionError("fetched without an admin key")
+        db_file = self._run(tmp_path, monkeypatch, explode, admin_key="")
+        assert self._rows(db_file) == []
+
+    def test_backfills_oldest_missing_day_one_per_cycle(
+            self, tmp_path, monkeypatch):
+        from datetime import datetime, timedelta, timezone
+
+        from catalyst.orchestrator.scheduler import (
+            RECONCILE_BACKFILL_DAYS, _maybe_reconcile_yesterday,
+        )
+        calls = []
+
+        def fetch(target_date, admin_key=None):
+            calls.append(target_date)
+            return self._empty_page(target_date)
+
+        db_file = self._run(tmp_path, monkeypatch, fetch)
+        today = datetime.now(timezone.utc).date()
+        oldest = today - timedelta(days=RECONCILE_BACKFILL_DAYS)
+        assert calls == [oldest]              # one day per cycle, oldest first
+        for _ in range(RECONCILE_BACKFILL_DAYS * 2):
+            _maybe_reconcile_yesterday(db_file)
+        rows = self._rows(db_file)
+        # fully caught up: every closed day in the window, NEVER today
+        assert len(rows) == RECONCILE_BACKFILL_DAYS
+        assert rows[-1][0] == (today - timedelta(days=1)).isoformat()
+        assert all(d < today.isoformat() for d, _ in rows)
+        # idempotent: reconciled days are not re-fetched
+        n = len(calls)
+        _maybe_reconcile_yesterday(db_file)
+        assert len(calls) == n
+
+    def test_failure_lands_a_check_failed_row_and_retries(
+            self, tmp_path, monkeypatch):
+        from catalyst.orchestrator.scheduler import _maybe_reconcile_yesterday
+        calls = []
+
+        def broken(target_date, admin_key=None):
+            calls.append(target_date)
+            raise CostApiError("cost_report answered HTTP 403",
+                               status_code=403, body="key revoked")
+
+        db_file = self._run(tmp_path, monkeypatch, broken)   # never raises
+        rows = self._rows(db_file)
+        assert len(rows) == 1 and rows[0][1] == "check_failed"
+        conn = sqlite3.connect(db_file)
+        raw = conn.execute(
+            "SELECT api_raw_response FROM cost_reconciliation_events"
+        ).fetchone()[0]
+        conn.close()
+        assert "key revoked" in raw           # house rule 3: raw error beside it
+        # a failed day is retried, not marked done - and not row-spammed
+        _maybe_reconcile_yesterday(db_file)
+        assert len(calls) == 2
+        assert len(self._rows(db_file)) == 1
 
 
 class TestAdminKeyInSetup:
@@ -228,6 +350,48 @@ class TestLiveUsageShape2026_08_10:
                                       "web_search_requests": 2}
         ev2 = record_usage(fetched, "claude-sonnet-5", "manual", "v2", conn)
         assert ev2.priced_cents == expected
+        conn.close()
+
+    def test_novel_top_level_billing_key_refuses(self, tmp_path):
+        """cost-audit F1: the old substring heuristic let a hypothetical
+        new billed key ("code_execution_requests") price itself at ZERO.
+        The top level is an allowlist now - any unrecognized key refuses,
+        after the row is recorded."""
+        import pytest as _pytest
+
+        from catalyst.cost.tracker import (
+            UnrecognizedUsageFieldError, record_usage,
+        )
+        conn = sqlite3.connect(tmp_path / "t.db")
+        conn.executescript(open("catalyst/storage/schema.sql").read())
+        novel = {"input_tokens": 10, "output_tokens": 5,
+                 "code_execution_requests": 400}
+        with _pytest.raises(UnrecognizedUsageFieldError,
+                            match="code_execution_requests"):
+            record_usage(novel, "claude-sonnet-5", "manual", "v", conn)
+        assert conn.execute("SELECT priced_cents FROM cost_events"
+                            ).fetchone()[0] is None
+        conn.close()
+
+    def test_non_standard_service_tier_refuses_to_price(self, tmp_path):
+        """cost-audit F7: batch is discounted and priority is a premium;
+        a non-standard tier must never bill at the standard rate
+        silently. Nothing in this codebase requests those tiers today."""
+        import pytest as _pytest
+
+        from catalyst.cost.tracker import (
+            ServiceTierUnpricedError, record_usage,
+        )
+        conn = sqlite3.connect(tmp_path / "t.db")
+        conn.executescript(open("catalyst/storage/schema.sql").read())
+        for tier in ("batch", "priority"):
+            usage = dict(self.REAL_USAGE)
+            usage["service_tier"] = tier
+            with _pytest.raises(ServiceTierUnpricedError):
+                record_usage(usage, "claude-sonnet-5", "manual", "v", conn)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM cost_events WHERE priced_cents IS NULL"
+        ).fetchone()[0] == 2
         conn.close()
 
     def test_new_key_inside_details_still_refuses(self, tmp_path):

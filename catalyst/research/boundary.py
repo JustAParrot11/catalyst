@@ -51,11 +51,14 @@ MAX_EXPLORATION_TURNS = 2               # pause_turn continuations included
 
 # Pre-call estimates, deliberately pessimistic (the governor compares
 # against these BEFORE the call; an optimistic estimate is a hole in the
-# cap). Basis: sonnet pricing at $3/M in, $15/M out; a research prompt
-# runs ~3k tokens in / ~1.5k out => ~3.2c; up to 3 web searches at $10
-# per 1,000 adds 3c; extraction is prompt + forced tool json, no search.
-EXPLORATION_TURN_ESTIMATE_CENTS = Decimal("8")
-EXTRACTION_TURN_ESTIMATE_CENTS = Decimal("5")
+# cap). Basis: MEASURED, not assumed (cost-audit F4 - the original 8c/5c
+# "pessimistic" figures were 58% under reality). The first live research
+# call (2026-08-10, fixture in tests/test_cost_api_adapter.py) cost
+# 12.63c for exploration: 24k tokens in (web search results are large),
+# 2.3k out, 2 searches at 1c each. 15c covers that with a third search;
+# extraction measured ~1.3c, 8c leaves headroom for a repair turn.
+EXPLORATION_TURN_ESTIMATE_CENTS = Decimal("15")
+EXTRACTION_TURN_ESTIMATE_CENTS = Decimal("8")
 
 
 @dataclass(frozen=True)

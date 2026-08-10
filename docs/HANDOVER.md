@@ -184,5 +184,9 @@ $1,000). The first live researched candidate cost a **measured 18.7¢**
 (24k input tokens, 2.3k output, two web searches at 1¢ each) against
 the 13¢ pessimistic estimate — the difference is web search volume.
 At that measured cost, ~26 researched candidates/month fit the cap;
-the realistic cadence (a few a week) lands well under it. The dashboard
-separates scheduled from manual spend and states the annual hurdle.
+the realistic cadence (a few a week) lands well under it. The governor's
+pre-call estimates were raised to the measured reality plus margin
+(15¢ exploration + 8¢ extraction — the original 8¢+5¢ "pessimistic"
+figures were 44% under what the first live call actually cost). The
+dashboard separates scheduled from manual spend and states the annual
+hurdle.

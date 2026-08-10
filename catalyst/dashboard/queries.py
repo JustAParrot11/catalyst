@@ -360,6 +360,10 @@ class CostPanel:
     base_cap_cents: Decimal
     max_cap_cents: Decimal
     manual_month_cap_cents: Decimal
+    check_failed_q: QueryResult
+    last_reconciled_ok: str | None
+    reconcile_gap_days: int | None
+    admin_key_present: bool
 
 
 def cost_panel(db: Db, as_of: date | None = None) -> CostPanel:
@@ -432,10 +436,34 @@ def cost_panel(db: Db, as_of: date | None = None) -> CostPanel:
     )
     billed_q = db.q(
         "SELECT target_date, cost_api_total_cents FROM cost_reconciliation_events "
-        "WHERE action_taken != 'scheduled_paused' OR acknowledged_at IS NOT NULL "
+        "WHERE action_taken != 'check_failed' "
+        "AND (action_taken != 'scheduled_paused' OR acknowledged_at IS NOT NULL) "
         "ORDER BY target_date DESC LIMIT 60"
     )
     billed_total = sum((_dec(r["cost_api_total_cents"]) for r in billed_q.rows), Decimal("0"))
+
+    # Staleness of the nightly bill check (cost-audit F2): a dark
+    # instrument must be visibly dark. check_failed rows carry the raw
+    # error; the gap is measured against the most recent SUCCESSFUL day.
+    check_failed_q = db.q(
+        "SELECT target_date, api_raw_response FROM cost_reconciliation_events "
+        "WHERE action_taken = 'check_failed' ORDER BY target_date DESC LIMIT 10"
+    )
+    last_ok_q = db.q(
+        "SELECT MAX(target_date) d FROM cost_reconciliation_events "
+        "WHERE action_taken != 'check_failed'"
+    )
+    last_reconciled_ok = last_ok_q.rows[0]["d"] if last_ok_q.rows else None
+    reconcile_gap_days = None
+    if last_reconciled_ok:
+        yesterday = as_of - timedelta(days=1)
+        reconcile_gap_days = (yesterday - date.fromisoformat(last_reconciled_ok)).days
+    admin_key_present = False
+    try:
+        from catalyst.setup.credentials import load_credentials
+        admin_key_present = bool(load_credentials().anthropic_admin_key)
+    except Exception:  # noqa: BLE001 - a bool for display, never fatal
+        pass
 
     return CostPanel(
         as_of=as_of, month_prefix=month, days_elapsed=as_of.day,
@@ -452,6 +480,9 @@ def cost_panel(db: Db, as_of: date | None = None) -> CostPanel:
         rates_stale=rates_stale(as_of), rates_verified_on=RATES_VERIFIED_ON,
         base_cap_cents=gov.BASE_CAP_CENTS, max_cap_cents=gov.GOVERNOR_MAX_CAP_CENTS,
         manual_month_cap_cents=gov.MANUAL_SPEND_CAP_CENTS_PER_MONTH,
+        check_failed_q=check_failed_q, last_reconciled_ok=last_reconciled_ok,
+        reconcile_gap_days=reconcile_gap_days,
+        admin_key_present=admin_key_present,
     )
 
 

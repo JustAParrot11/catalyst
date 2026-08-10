@@ -115,13 +115,27 @@ def _anthropic_transport(api_key: str):
     return transport
 
 
+# How far back the nightly bill check will backfill days missed while
+# the service was down (cost-audit F3: a three-day outage must not
+# permanently lose three days from the drift window).
+RECONCILE_BACKFILL_DAYS = 7
+
+
 def _maybe_reconcile_yesterday(db_file: str) -> None:
     """Nightly bill check: compare the local ledger against Anthropic's
-    Cost API for the most recent CLOSED day, once per day, when the
-    owner supplied an admin key. Read-only against the API; a
-    discrepancy pauses scheduled spend until a human acknowledges it
-    (cost.tracker.reconcile_day). Failures are logged, never fatal."""
+    Cost API for recent CLOSED days, when the owner supplied an admin
+    key. Backfills the oldest unreconciled day in the last
+    RECONCILE_BACKFILL_DAYS, one day per cycle. Read-only against the
+    API; a discrepancy pauses scheduled spend until a human acknowledges
+    it (cost.tracker.reconcile_day). A FAILED check is itself recorded
+    as a check_failed row with the raw error beside it (cost-audit F2:
+    a dark instrument must not look like a healthy one), and is retried
+    on later cycles because check_failed rows do not mark a day done.
+    Never fatal to trading."""
+    import json
     import sqlite3
+    import traceback
+    import uuid
     from datetime import datetime, timedelta, timezone
     from functools import partial
 
@@ -133,35 +147,67 @@ def _maybe_reconcile_yesterday(db_file: str) -> None:
         return
     if not creds.anthropic_admin_key:
         return
-    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date()
+    today = datetime.now(timezone.utc).date()
     conn = sqlite3.connect(db_file)
     try:
-        done = conn.execute(
-            "SELECT 1 FROM cost_reconciliation_events WHERE target_date = ?",
-            (yesterday.isoformat(),)).fetchone()
-        if done:
-            return
         from catalyst.cost.cost_api import fetch_cost_api_day
         from catalyst.cost.tracker import reconcile_day
 
-        result = reconcile_day(
-            yesterday, conn,
-            partial(fetch_cost_api_day,
-                    admin_key=creds.anthropic_admin_key))
-        if result.action_taken != "none":
-            _log.warning(
-                "Nightly bill check for %s: ledger %sc vs Anthropic %sc - "
-                "action %s. Scheduled spending is paused until the "
-                "discrepancy is acknowledged on the cost page.",
-                yesterday, result.local_total_cents,
-                result.cost_api_total_cents, result.action_taken)
-        else:
-            _log.info("Nightly bill check for %s: ledger matches "
-                      "Anthropic's records (%sc).", yesterday,
-                      result.cost_api_total_cents)
-    except Exception:  # noqa: BLE001 - the check must never kill trading
-        _log.exception("The nightly bill check failed; it will retry on "
-                       "the next cycle. Trading is unaffected.")
+        # oldest first, so the drift window accumulates in date order
+        for days_back in range(RECONCILE_BACKFILL_DAYS, 0, -1):
+            day = today - timedelta(days=days_back)
+            done = conn.execute(
+                "SELECT 1 FROM cost_reconciliation_events "
+                "WHERE target_date = ? AND action_taken != 'check_failed'",
+                (day.isoformat(),)).fetchone()
+            if done:
+                continue
+            try:
+                result = reconcile_day(
+                    day, conn,
+                    partial(fetch_cost_api_day,
+                            admin_key=creds.anthropic_admin_key))
+            except Exception as exc:  # noqa: BLE001 - never kill trading
+                _log.exception(
+                    "The nightly bill check for %s failed; recorded as a "
+                    "check_failed row, will retry next cycle. Trading is "
+                    "unaffected.", day)
+                detail = {"check_failed": traceback.format_exc()[-2000:]}
+                raw_body = getattr(exc, "body", None)
+                if raw_body:   # house rule 3: raw upstream beside the failure
+                    detail["raw_upstream_body"] = str(raw_body)[:2000]
+                already = conn.execute(
+                    "SELECT 1 FROM cost_reconciliation_events "
+                    "WHERE target_date = ? AND action_taken = 'check_failed'",
+                    (day.isoformat(),)).fetchone()
+                if not already:
+                    conn.execute(
+                        "INSERT INTO cost_reconciliation_events "
+                        "(id, target_date, kind, component, "
+                        " local_total_cents, cost_api_total_cents, "
+                        " discrepancy_cents, threshold_cents, "
+                        " api_raw_response, api_record_count, action_taken, "
+                        " acknowledged_by, acknowledged_at, reconciled_at) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (str(uuid.uuid4()), day.isoformat(), "all", "{}",
+                         "0", "0", "0", "0",
+                         json.dumps(detail),
+                         0, "check_failed", None, None,
+                         datetime.now(timezone.utc).isoformat()))
+                    conn.commit()
+                return   # a failing key fails for every day; stop here
+            if result.action_taken != "none":
+                _log.warning(
+                    "Nightly bill check for %s: ledger %sc vs Anthropic "
+                    "%sc - action %s. Scheduled spending is paused until "
+                    "the discrepancy is acknowledged on the cost page.",
+                    day, result.local_total_cents,
+                    result.cost_api_total_cents, result.action_taken)
+            else:
+                _log.info("Nightly bill check for %s: ledger matches "
+                          "Anthropic's records (%sc).", day,
+                          result.cost_api_total_cents)
+            return   # one day per cycle; the next cycle takes the next
     finally:
         conn.close()
 

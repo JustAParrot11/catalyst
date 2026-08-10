@@ -54,13 +54,18 @@ _MTOK = Decimal("1000000")
 _KNOWN_TOP_KEYS = {
     "input_tokens", "output_tokens",
     "cache_creation_input_tokens", "cache_read_input_tokens",
-    "cache_creation", "server_tool_use", "service_tier",
+    "cache_creation", "server_tool_use",
     # observed live 2026-08-10: a BREAKDOWN of output_tokens (thinking
     # vs visible), not an additional billable quantity - thinking tokens
     # are billed as output tokens and output_tokens already includes
     # them. The nested check below still flags any NEW key inside it.
     "output_tokens_details",
 }
+# Non-billing metadata the API sends beside the token counts (both
+# observed live 2026-08-10). service_tier is additionally checked at
+# pricing time: any tier other than "standard" changes the rates and
+# refuses to price until a multiplier exists.
+_KNOWN_BENIGN_TOP_KEYS = {"service_tier", "inference_geo"}
 # web_fetch_requests observed live 2026-08-10 (web search implies fetch).
 # Web fetch is NOT metered per-request - the field is an informational
 # counter, zero cost; only tokens are billed for fetched content. Web
@@ -72,6 +77,14 @@ _KNOWN_OUTPUT_DETAIL_KEYS = {"thinking_tokens"}
 
 class UnrecognizedUsageFieldError(ValueError):
     pass
+
+
+class ServiceTierUnpricedError(UnrecognizedUsageFieldError):
+    """A service_tier other than "standard" changes the rates (batch is
+    discounted, priority is a premium). Refusing beats silently billing
+    a non-standard tier at the standard rate (cost-audit F7). Subclasses
+    UnrecognizedUsageFieldError so record-first handling is identical:
+    the row lands unpriced, then this raises, then the governor blocks."""
 
 
 # A usage payload that is not a JSON object at all is wrapped under this
@@ -86,12 +99,15 @@ UNPARSEABLE_USAGE_KEY = "unparseable_usage_object"
 def _find_unknown_fields(raw_usage: dict) -> list[str]:
     """Token/billing-shaped keys the parser does not understand, at the
     top level AND inside known nested billing objects (audit N2)."""
+    # ALLOWLIST, not a substring heuristic (cost-audit F1: under the old
+    # token/cache/search substring check, a hypothetical new billed key
+    # like "code_execution_requests" matched nothing and priced itself
+    # at zero silently - the exact TRAPS.md renamed-field trap). Every
+    # unrecognized top-level key now refuses, same as the nested guards.
     unknown = [
         k for k in raw_usage
-        if k not in _KNOWN_TOP_KEYS and ("token" in k or "cache" in k or "search" in k)
+        if k not in _KNOWN_TOP_KEYS and k not in _KNOWN_BENIGN_TOP_KEYS
     ]
-    if UNPARSEABLE_USAGE_KEY in raw_usage:
-        unknown.append(UNPARSEABLE_USAGE_KEY)
     nested = raw_usage.get("server_tool_use") or {}
     unknown += [f"server_tool_use.{k}" for k in nested
                 if k not in _KNOWN_SERVER_TOOL_KEYS]
@@ -149,6 +165,13 @@ def price(usage: UsageComponents, model: str) -> Decimal:
         raise UnrecognizedUsageFieldError(
             f"Usage object carries unrecognized billing fields {unknown}; "
             "update cost/tracker.py before pricing (TRAPS.md renamed-field trap)."
+        )
+    tier = usage.raw.get("service_tier") if isinstance(usage.raw, dict) else None
+    if tier is not None and tier != "standard":
+        raise ServiceTierUnpricedError(
+            f"service_tier {tier!r} has no pricing multiplier; batch and "
+            "priority tiers change the rate. Add the multiplier to "
+            "cost/pricing.py before pricing this row."
         )
     if model not in MODEL_RATES_CENTS_PER_MTOK:
         raise UnknownModelError(
@@ -412,7 +435,8 @@ def _trailing_signed_drift(conn: sqlite3.Connection, before: date) -> Decimal:
     already-reconciled days strictly before `before`."""
     rows = conn.execute(
         "SELECT local_total_cents, cost_api_total_cents FROM cost_reconciliation_events "
-        "WHERE target_date < ? ORDER BY target_date DESC LIMIT ?",
+        "WHERE target_date < ? AND action_taken != 'check_failed' "
+        "ORDER BY target_date DESC LIMIT ?",
         (before.isoformat(), DRIFT_WINDOW_DAYS),
     ).fetchall()
     return sum((Decimal(l) - Decimal(a) for l, a in rows), Decimal("0"))
