@@ -580,3 +580,6 @@ change kept from this session is the strengthened assertion block in
   reorders identical bytes: same size, same mtime second). Cleared
   __pycache__, suite green. Lesson: verify sabotage restores with a
   cache clear, not a diff alone.
+- cycle.py kill-switch early return removed: caught by
+  test_broker_down_trips_and_stops_everything. Restored (with cache
+  clear), green.
