@@ -17,6 +17,7 @@ the bot stops trading. It only ever refuses when another live process
 demonstrably holds the lock.
 """
 
+import errno
 import os
 from typing import IO
 
@@ -57,9 +58,16 @@ def acquire(path: str | None = None) -> IO | None:
         return _fail_open(target)
     try:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+    except OSError as exc:
         handle.close()
-        return None          # genuinely held by another process
+        # ONLY "would block" means another process holds it (risk review
+        # finding 2). ENOLCK (lock table full, NFS-backed /var/lib),
+        # EINTR, EBADF are the GUARD failing, not a duplicate - reporting
+        # those as "already running" would fail CLOSED in the one place
+        # this module promises to fail open, and stop the bot for good.
+        if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+            return None      # genuinely held by another process
+        return _fail_open(target)
     try:
         handle.seek(0)
         handle.truncate()

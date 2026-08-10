@@ -17,6 +17,15 @@ Sabotage log (house rule 4):
   Restored, green.
 - lock acquired AFTER the first cycle: caught by
   test_lock_is_held_before_any_trading_can_happen. Restored, green.
+- duplicate SERVICE exits instead of standing by (risk review finding
+  1): initially NOT caught - the test read poll() immediately after the
+  log line and raced the exiting process. Rewritten to wait(timeout=8)
+  and expect TimeoutExpired; sabotage then caught. Restored, green.
+- every flock errno treated as "held" (risk review finding 2): caught
+  by test_only_would_block_counts_as_another_instance. Restored, green.
+- _fail_open returning None, i.e. failing CLOSED (risk review finding
+  5 - the previous fail-open test never ran that branch at all):
+  caught by both fail-open tests. Restored, green.
 """
 
 import os
@@ -24,6 +33,7 @@ import socket
 import subprocess
 import sys
 import textwrap
+import time
 
 import pytest
 
@@ -79,12 +89,53 @@ class TestInstanceLock:
         assert first is not None
         assert il.acquire(lock_file) is first     # same lock, not a refusal
 
-    def test_unwritable_lock_path_does_not_block_trading(self, tmp_path):
-        """The guard must fail OPEN on its own errors. Refusing to trade
-        because a lock file could not be created would be the guard
-        causing the outage it exists to prevent."""
-        assert il.acquire(str(tmp_path / "no" / "such" / "dir" / "l.lock")) \
-            is not None
+    def test_guard_failing_on_its_own_errors_does_not_block_trading(
+            self, tmp_path, monkeypatch):
+        """The guard must fail OPEN on its own errors - refusing to trade
+        because the lock broke would be the guard causing the outage it
+        exists to prevent.
+
+        Risk review finding 5: the previous version of this test passed
+        an unwritable-looking path, but acquire() creates missing parent
+        directories, so it took a REAL lock and never ran the fail-open
+        branch at all. It had to break flock itself."""
+        import errno as _errno
+        import fcntl
+
+        def broken_flock(fd, flags):
+            raise OSError(_errno.ENOLCK, "lock table full")
+
+        monkeypatch.setattr(fcntl, "flock", broken_flock)
+        monkeypatch.setattr(il, "_held", None)
+        monkeypatch.setattr(il, "_held_path", None)
+        assert il.acquire(str(tmp_path / "l.lock")) is not None
+
+    def test_only_would_block_counts_as_another_instance(
+            self, tmp_path, monkeypatch):
+        """Risk review finding 2: every flock errno was read as 'another
+        process holds it'. ENOLCK/EINTR are the GUARD failing and must
+        fail open; only EWOULDBLOCK/EAGAIN is a real duplicate."""
+        import errno as _errno
+        import fcntl
+
+        def flock_raising(err):
+            def _f(fd, flags):
+                raise OSError(err, "x")
+            return _f
+
+        for err in (_errno.ENOLCK, _errno.EINTR, _errno.EBADF):
+            monkeypatch.setattr(fcntl, "flock", flock_raising(err))
+            monkeypatch.setattr(il, "_held", None)
+            monkeypatch.setattr(il, "_held_path", None)
+            assert il.acquire(str(tmp_path / "l.lock")) is not None, \
+                f"errno {err} must fail OPEN, not look like a duplicate"
+
+        for err in (_errno.EWOULDBLOCK, _errno.EAGAIN):
+            monkeypatch.setattr(fcntl, "flock", flock_raising(err))
+            monkeypatch.setattr(il, "_held", None)
+            monkeypatch.setattr(il, "_held_path", None)
+            assert il.acquire(str(tmp_path / "l.lock")) is None, \
+                f"errno {err} IS a duplicate and must refuse"
 
 
 class TestSchedulerRefusesToDoubleTrade:
@@ -130,6 +181,102 @@ class TestSchedulerRefusesToDoubleTrade:
         finally:
             proc.kill()
             proc.wait(timeout=30)
+
+    def test_service_stands_by_instead_of_exiting_when_locked_out(
+            self, tmp_path):
+        """Risk review finding 1, the worst one: exiting 0 here would
+        have systemd treat the duplicate as a deliberate stop and leave
+        it down. When the OTHER copy then died, nothing would be running
+        and nothing would restart it - an account with open positions,
+        no re-placed DAY stops and dark kill switches, while systemctl
+        reported success. The service copy must WAIT and take over."""
+        lock_file = str(tmp_path / "catalyst.lock")
+        holder = textwrap.dedent(f"""
+            import sys, time
+            sys.path.insert(0, {os.getcwd()!r})
+            from catalyst.orchestrator import instance_lock as il
+            assert il.acquire({lock_file!r})
+            print("HELD", flush=True)
+            time.sleep(60)
+        """)
+        proc = subprocess.Popen([sys.executable, "-c", holder],
+                                stdout=subprocess.PIPE, text=True)
+        env = dict(os.environ)
+        env.update({
+            "CATALYST_DB": str(tmp_path / "c.db"),
+            "CATALYST_CREDENTIALS": str(tmp_path / "creds.json"),
+            "CATALYST_LOCK": lock_file,
+            "CATALYST_PORT": "8793",
+            "CATALYST_CYCLE_SECONDS": "1",
+        })
+        # no --once: this is the SERVICE path
+        svc = subprocess.Popen(
+            [sys.executable, "-m", "catalyst.orchestrator.scheduler"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            env=env, cwd=os.getcwd())
+        try:
+            assert proc.stdout.readline().strip() == "HELD"
+            deadline = time.time() + 60
+            saw_standby = False
+            while time.time() < deadline:
+                line = svc.stdout.readline()
+                if not line:
+                    break
+                if "will NOT trade" in line:
+                    saw_standby = True
+                    break
+            assert saw_standby, "service copy did not stand by"
+            # and crucially it is STILL ALIVE, not exited. wait() with a
+            # timeout, not poll(): poll() right after the log line races
+            # a process that IS exiting and reads as healthy (caught by
+            # sabotage A - reverting to exit-on-duplicate passed).
+            with pytest.raises(subprocess.TimeoutExpired):
+                svc.wait(timeout=8)
+        finally:
+            proc.kill(); proc.wait(timeout=30)
+            svc.kill(); svc.wait(timeout=30)
+
+    def test_lock_stays_held_while_the_scheduler_runs(self, tmp_path):
+        """Risk review finding 7: the lock survives only because of a
+        module global holding the fd. If that is ever tidied away, GC
+        closes it and the lock frees MID-RUN while trading continues."""
+        env = dict(os.environ)
+        lock_file = str(tmp_path / "catalyst.lock")
+        env.update({
+            "CATALYST_DB": str(tmp_path / "c.db"),
+            "CATALYST_CREDENTIALS": str(tmp_path / "creds.json"),
+            "CATALYST_LOCK": lock_file,
+            "CATALYST_PORT": "8794",
+            "CATALYST_CYCLE_SECONDS": "1",
+        })
+        svc = subprocess.Popen(
+            [sys.executable, "-m", "catalyst.orchestrator.scheduler"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            env=env, cwd=os.getcwd())
+        try:
+            deadline = time.time() + 60
+            started = False
+            while time.time() < deadline:
+                line = svc.stdout.readline()
+                if not line:
+                    break
+                if "Setup page listening" in line or "waiting" in line.lower():
+                    started = True
+                    break
+            assert started, "scheduler never reached its running state"
+            time.sleep(2)             # well into the run, not at startup
+            probe = textwrap.dedent(f"""
+                import sys
+                sys.path.insert(0, {os.getcwd()!r})
+                from catalyst.orchestrator import instance_lock as il
+                print("ACQUIRED" if il.acquire({lock_file!r}) else "REFUSED")
+            """)
+            out = subprocess.run([sys.executable, "-c", probe],
+                                 capture_output=True, text=True, timeout=60)
+            assert out.stdout.strip() == "REFUSED", (
+                "the lock was released while the scheduler was still running")
+        finally:
+            svc.kill(); svc.wait(timeout=30)
 
     def test_single_instance_still_runs_normally(self, tmp_path):
         """The guard must not break the ordinary case: one instance,

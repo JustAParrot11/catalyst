@@ -114,6 +114,31 @@ endpoint), ClinicalTrials.gov v2, Federal Register, openFDA
    **Alpaca paper does not simulate T+1 settlement**, so the settled-
    cash clamp is unverifiable until live. (live verification)
 
+## Known gap: two machines, one Alpaca account
+
+The single-instance lock (`orchestrator/instance_lock.py`) prevents two
+Catalysts on **one machine**. It cannot see a second install on a
+different server pointed at the same Alpaca account, and the existing
+broker reconciliation would not catch the likeliest form of it: both
+machines run the same discovery on the same data, so both buy the
+**same** ticker, and `_broker_positions_agree` compares symbol *sets*,
+never quantities. Each machine then rests its own DAY stop over the
+same shares; whichever triggers second oversells.
+
+Two cheap fixes were identified by the risk review and deliberately
+NOT taken here, because both touch execution/broker code and belong in
+their own reviewed change (house rule 5):
+
+1. compare **quantities** in `_broker_positions_agree`, tolerating
+   pending fills — this also catches the owner trading manually in the
+   same account;
+2. persist a per-install instance id, prefix every `client_order_id`
+   with it, and block on any open broker order carrying an unfamiliar
+   prefix.
+
+Until then the rule is operational: **run exactly one Catalyst against
+one Alpaca account.**
+
 ## Least-confident areas — read before trusting money to this
 
 1. **The edge itself.** See above. Paper-trade until the refusal tracker

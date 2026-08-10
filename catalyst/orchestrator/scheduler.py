@@ -262,6 +262,62 @@ def _run_one_cycle(db_file: str):
         broker.close()
 
 
+LOCK_RETRY_SECONDS = 30
+
+
+def _acquire_lock_or_stand_by(once: bool = False) -> bool:
+    """Take the single-instance lock, WAITING for it if another copy
+    holds it. True when this copy may trade.
+
+    Risk review finding 1: exiting 0 here was the dangerous option.
+    The unit file treats a clean exit as a deliberate stop, so a
+    systemd start that lost the race to a manual copy would stay down -
+    and when that manual copy later died, nothing would be running,
+    nothing would restart it, and systemctl would report success. An
+    account with open positions and no scheduler has no re-placed DAY
+    stops, no hard-exit checks and no kill switches. Standing by costs
+    a log line and self-heals the moment the holder exits.
+    """
+    from catalyst.orchestrator import instance_lock
+
+    # NOTE: the returned handle is intentionally not stored here - the
+    # lock lives as long as instance_lock._held keeps the fd open. Do
+    # not "tidy" that global away: closing the fd frees the lock while
+    # this process keeps trading (risk review finding 7).
+    if instance_lock.acquire() is not None:
+        return True
+
+    port = os.environ.get("CATALYST_PORT", "8000")
+    if once:
+        # A one-off manual/cron run. Nothing is supervising it, so
+        # there is no stay-down hazard - just decline.
+        _log.error(
+            "Catalyst is already running on this machine (process %s), so this "
+            "one-off run is stopping. Two copies would place every order twice. "
+            "The running copy is unaffected; its page is on port %s.",
+            instance_lock.holder_pid(), port)
+        return False
+
+    _log.error(
+        "Another Catalyst is already running on this machine (process %s). This "
+        "copy will NOT trade while that one holds the lock - two copies would "
+        "place every order twice and take double the intended position. It will "
+        "stay up and take over automatically if that copy stops, rechecking "
+        "every %ss. The running copy's page is on port %s.",
+        instance_lock.holder_pid(), LOCK_RETRY_SECONDS, port)
+    while not _stop.is_set():
+        _stop.wait(LOCK_RETRY_SECONDS)
+        if _stop.is_set():
+            break
+        if instance_lock.acquire() is not None:
+            _log.warning(
+                "The other Catalyst has stopped; this copy has taken over and "
+                "is now trading.")
+            return True
+    _log.info("Asked to shut down while waiting for the other copy.")
+    return False
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     configure_logging()
@@ -284,32 +340,23 @@ def main(argv: list[str] | None = None) -> int:
                   "are set" if configured else "not entered yet")
         return 0
 
+    # Registered BEFORE the lock wait below, so a stand-by copy still
+    # answers systemctl stop instead of having to be killed.
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, _handle_signal)
+
+    once = "--once" in args
+
     # ONE Catalyst per machine, taken BEFORE anything can trade (owner
     # report 2026-08-10). Two schedulers on one Alpaca account duplicate
     # every order and double the intended exposure; the only symptom was
-    # a line about the web page. Exit 0, not a failure: a duplicate that
-    # stands down is behaving correctly, and a non-zero exit would have
-    # systemd restart it every 10s forever.
-    from catalyst.orchestrator import instance_lock
-
-    if instance_lock.acquire() is None:
-        _log.error(
-            "Catalyst is already running on this machine (process %s), so this "
-            "copy is stopping now. Two copies would place every order twice and "
-            "take double the intended position. Nothing is wrong with the copy "
-            "that is already running - its page is on port %s. To see it:  "
-            "sudo systemctl status catalyst",
-            instance_lock.holder_pid(),
-            os.environ.get("CATALYST_PORT", "8000"))
+    # a line about the web page.
+    if not _acquire_lock_or_stand_by(once=once):
         return 0
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(sig, _handle_signal)
 
     start_setup_server()
 
     cycle_seconds = int(os.environ.get("CATALYST_CYCLE_SECONDS", DEFAULT_CYCLE_SECONDS))
-    once = "--once" in args
     last_waiting_log = 0.0
     announced_ready = False
 

@@ -147,9 +147,10 @@ Environment=CATALYST_PORT=8001
 sudo systemctl restart catalyst
 ```
 
-**"Catalyst is already running on this machine"** — that is not an
-error. A second copy noticed the first and stood down on purpose, so
-that two bots could never place the same order twice. Nothing to do.
+**"Another Catalyst is already running on this machine"** — that is not
+a fault. A second copy noticed the first and is deliberately not
+trading, so two bots can never place the same order twice. It stays
+running and takes over by itself if the first one stops. Nothing to do.
 
 **The page times out with no error in the log** — the server is
 answering but your provider's firewall is blocking the port. Their
