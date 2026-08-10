@@ -96,6 +96,28 @@ def _assistant_echo(turn) -> dict | None:
     return {"role": "assistant", "content": content}
 
 
+
+def _record_findings(call_id: str, tool_input: dict, conn) -> None:
+    """Persist the evidence links the pass already produced.
+
+    Context, never a gate: the trade decision has been made and paid for
+    by the time this runs, so a malformed finding must cost the graph a
+    row, never cost the candidate its view. The hook is all-or-nothing
+    per batch by design, and that transaction is its own business.
+    """
+    findings = tool_input.get("findings") if isinstance(tool_input, dict) else None
+    if not isinstance(findings, list) or not findings:
+        return
+    try:
+        from catalyst.graph.hooks import research_findings_to_graph
+        research_findings_to_graph(call_id, findings, conn)
+    except Exception:  # noqa: BLE001 - evidence is never worth a skip
+        import logging
+        logging.getLogger("catalyst.research").warning(
+            "Research findings could not be stored in the evidence graph; "
+            "the view itself is unaffected.", exc_info=True)
+
+
 def investigate(
     candidate: Candidate,
     cost_context: CostContext,
@@ -238,7 +260,9 @@ def investigate(
     if early is not None:
         try:
             # finish() persists the view; there is no separate writer.
-            return finish(make_view_from_tool_input(candidate.id, early), None)
+            view = make_view_from_tool_input(candidate.id, early)
+            _record_findings(call_id, early, conn)
+            return finish(view, None)
         except (KeyError, TypeError, ValueError):
             pass          # fall through to the forced extraction turn
 
@@ -285,9 +309,9 @@ def investigate(
                 last_error = "no_tool_call_in_extraction_turn"
             else:
                 try:
-                    return finish(
-                        make_view_from_tool_input(candidate.id, tool_input),
-                        None)
+                    view = make_view_from_tool_input(candidate.id, tool_input)
+                    _record_findings(call_id, tool_input, conn)
+                    return finish(view, None)
                 except (KeyError, TypeError, ValueError) as exc:
                     last_error = f"invalid_view: {type(exc).__name__}: {exc}"
 

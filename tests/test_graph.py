@@ -513,3 +513,102 @@ def test_public_surface_carries_nothing_trade_shaped():
         "predicate", "object_entity_id", "object_kind", "object_label",
         "object_date", "source_class", "source_ref", "asserted_at",
         "reliability"}
+
+
+class TestGraphIsActuallyWired:
+    """The evidence graph was READ but never WRITTEN.
+
+    graph_context_for_candidate (the reader) was wired into the trading
+    cycle at stage 5; research_findings_to_graph (the writer) was called
+    by nothing but its own tests, and the tool schema never asked the
+    model for links. So the graph could only ever stay empty, and the
+    mindmap built on it was a window onto an empty room.
+
+    Findings ride along in a research pass already paid for - the hook's
+    own cost posture - so this adds evidence without adding a call.
+    """
+
+    def _view_with_findings(self, findings):
+        from tests.test_boundary import GOOD_VIEW
+        view = dict(GOOD_VIEW)
+        view["findings"] = findings
+        return {"content": [{"type": "tool_use",
+                             "name": "submit_research_view",
+                             "input": view}],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 100, "output_tokens": 50,
+                          "cache_creation_input_tokens": 0,
+                          "cache_read_input_tokens": 0}}
+
+    def _run(self, db, responses):
+        from decimal import Decimal
+        from tests.test_boundary import candidate, transport_script
+        from catalyst.research.boundary import CostContext, investigate
+        c = candidate()
+        # research_views references candidates, and init_db enforces
+        # foreign keys - the row has to exist before a view can persist.
+        db.execute("INSERT OR IGNORE INTO candidates VALUES (?,?,?,?,?,?,?,?,?)",
+                   (c.id, c.ticker, c.catalyst_type,
+                    c.catalyst_date.isoformat(), c.catalyst_date_confidence,
+                    "[]", c.discovered_at.isoformat(), c.sector, "[]"))
+        db.commit()
+        transport, _ = transport_script(responses)
+        return investigate(c,
+                           CostContext(conn=db,
+                                       governor_profit_share=Decimal("0.10"),
+                                       cycle_id="c", kind="scheduled"),
+                           transport)
+
+    def test_findings_from_a_research_pass_reach_the_graph(self, gdb):
+        findings = [{
+            "subject": {"kind": "person", "canonical_key": "person:cik:1",
+                        "display_name": "Nigro, Gerald J"},
+            "predicate": "bought shares of",
+            "object": {"kind": "company", "canonical_key": "company:TEST",
+                       "display_name": "Test Corp"},
+            "source_class": "edgar_filing",
+            "reliability": "primary_document",
+        }]
+        result = self._run(gdb, [self._view_with_findings(findings)])
+        assert result.parsed_view is not None
+        rows = gdb.execute(
+            "SELECT predicate FROM graph_assertions").fetchall()
+        assert rows, "the research pass produced findings and none were stored"
+        assert rows[0][0] == "bought shares of"
+
+    def test_a_view_without_findings_is_still_perfectly_valid(self, gdb):
+        from tests.test_boundary import GOOD_VIEW
+        plain = {"content": [{"type": "tool_use",
+                              "name": "submit_research_view",
+                              "input": dict(GOOD_VIEW)}],
+                 "stop_reason": "tool_use",
+                 "usage": {"input_tokens": 100, "output_tokens": 50,
+                           "cache_creation_input_tokens": 0,
+                           "cache_read_input_tokens": 0}}
+        result = self._run(gdb, [plain])
+        assert result.parsed_view is not None
+        assert result.skipped_reason is None
+
+    def test_a_malformed_finding_never_costs_the_trade_decision(
+            self, gdb):
+        """The graph is context, not a gate. A bad finding must not turn
+        a valid, already-paid-for view into a skipped candidate."""
+        result = self._run(gdb, [self._view_with_findings(
+            [{"predicate": "missing its subject entirely"}])])
+        assert result.parsed_view is not None
+        assert result.skipped_reason is None
+        assert gdb.execute(
+            "SELECT COUNT(*) FROM graph_assertions").fetchone()[0] == 0
+
+    def test_findings_can_never_become_a_sizing_input(self):
+        """The one rule that is not negotiable. `findings` is evidence;
+        a size-shaped field is still refused."""
+        import pytest as _p
+        from catalyst.research.schema import make_view_from_tool_input
+        from tests.test_boundary import GOOD_VIEW
+        view = make_view_from_tool_input("c1", {**GOOD_VIEW, "findings": []})
+        assert not hasattr(view, "findings"), (
+            "findings must not reach the object the risk engine reads")
+        for sized in ("qty", "notional_usd", "shares"):
+            with _p.raises(ValueError, match="unknown fields"):
+                make_view_from_tool_input("c1", {**GOOD_VIEW, sized: 100})

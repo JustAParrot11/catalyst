@@ -76,14 +76,30 @@ def test_research_view_structurally_cannot_carry_a_size():
 
 
 def test_research_view_tool_schema_matches_dataclass():
-    """The forced tool schema and the dataclass must never drift apart."""
-    from catalyst.research.schema import SUBMIT_RESEARCH_VIEW_TOOL, ResearchView
+    """The forced tool schema and the dataclass must never drift apart.
 
-    schema_fields = set(SUBMIT_RESEARCH_VIEW_TOOL["input_schema"]["properties"])
+    ONE deliberate exception, and the test states it rather than
+    loosening: `findings` is evidence for the graph, not part of the
+    view. It is offered on the tool, is never required, and must NOT
+    exist on the dataclass the risk engine reads - because everything on
+    that object is something sizing is allowed to see, and evidence is
+    not (CLAUDE.md: the model never sizes a position).
+    """
+    from catalyst.research.schema import (
+        _NON_VIEW_FIELDS, SUBMIT_RESEARCH_VIEW_TOOL, ResearchView,
+    )
+
+    schema = SUBMIT_RESEARCH_VIEW_TOOL["input_schema"]
+    schema_fields = set(schema["properties"])
     dataclass_fields = {f.name for f in dataclasses.fields(ResearchView)} - {"candidate_id"}
-    assert schema_fields == dataclass_fields
-    assert SUBMIT_RESEARCH_VIEW_TOOL["input_schema"]["additionalProperties"] is False
-    assert set(SUBMIT_RESEARCH_VIEW_TOOL["input_schema"]["required"]) == schema_fields
+    assert schema_fields - _NON_VIEW_FIELDS == dataclass_fields
+    assert _NON_VIEW_FIELDS <= schema_fields
+    assert not (_NON_VIEW_FIELDS & dataclass_fields), (
+        "a non-view field reached the object sizing reads")
+    assert schema["additionalProperties"] is False
+    assert set(schema["required"]) == dataclass_fields
+    assert not (_NON_VIEW_FIELDS & set(schema["required"])), (
+        "evidence must never be required - a view without it is valid")
 
 
 def test_sizing_signature_cannot_receive_a_research_view():
