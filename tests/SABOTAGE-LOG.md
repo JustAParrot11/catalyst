@@ -682,3 +682,16 @@ change kept from this session is the strengthened assertion block in
   Labels were checked by SCREENSHOT: the first render had every node
   label struck through by the connectors behind it, fixed with a
   paint-order halo and re-rendered.
+- Upgrade reporting (2026-08-10, owner-reported). Three sabotages: the
+  commit dropped from the summary so only the version shows; the
+  "NOTHING CHANGED" branch collapsed back into "Upgrade complete"; and
+  a summary variable losing its default, which under set -u aborts the
+  script at the very end, AFTER the upgrade has happened. All caught.
+  One of these tests was itself wrong first: splitting on "Upgrade
+  complete" and taking [1] truncated at the phrase's SECOND occurrence
+  and hid half the report from the assertions. Fixed to slice from the
+  first occurrence to the end.
+  Both upgrade paths were then run for real against a throwaway git
+  remote: a change on a feature branch reports NOTHING CHANGED with an
+  unmoved commit, and the same change merged to main moves the commit
+  and completes.

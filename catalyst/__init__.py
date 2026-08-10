@@ -5,4 +5,4 @@ code disposes. See docs/ARCHITECTURE.md for the interface contract every
 module in this package implements.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
