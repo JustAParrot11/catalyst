@@ -11,6 +11,7 @@ catch what they claim to catch.
 """
 
 import json
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -815,3 +816,137 @@ class TestOwnerBudgetReconciliation:
         html = self._panel_with_budget(tmp_path, bare, 5)
         assert "has no effect" not in html
         assert "tighter than" not in html
+
+
+class TestEnterpriseShell:
+    """Owner asked for a professional, navigable terminal. These pin the
+    structural promises, not the styling."""
+
+    def test_navigation_is_grouped_not_a_flat_row_of_nine(self):
+        from catalyst.dashboard.render import NAV, NAV_GROUPS
+        assert len(NAV_GROUPS) >= 3
+        assert sum(len(items) for _, items in NAV_GROUPS) == len(NAV)
+        for _, items in NAV_GROUPS:
+            for href, label, hint in items:
+                assert hint, f"{label} has no hint - the group is then just a list"
+
+    def test_active_page_is_marked_for_assistive_tech_too(self):
+        out = server.render_page("Cost", "<p>x</p>", "/costs", "db")
+        assert 'aria-current="page"' in out
+        assert out.count('aria-current="page"') == 1
+
+    def test_shell_has_a_skip_link_and_a_main_landmark(self):
+        out = server.render_page("t", "<p>x</p>", "/", "db")
+        assert 'class="skip"' in out and 'href="#main"' in out
+        assert 'id="main"' in out
+
+    def test_status_rail_states_carry_a_word_and_a_marker(self):
+        from catalyst.dashboard.render import status_rail
+        html = status_rail([("Account", "$1,000.00", "good"),
+                            ("vs S&P", "&mdash;", "idle")])
+        assert "Account" in html and "$1,000.00" in html
+        assert 'aria-hidden="true"' in html      # marker, not colour alone
+        assert 'class="rail-item rail-good"' in html
+
+    def test_the_rail_never_breaks_a_page_when_a_query_fails(
+            self, bare, monkeypatch):
+        """A missing database does not raise - it yields empty results -
+        so force the real failure branch: the rail must say 'unavailable'
+        rather than take the whole page down with it."""
+        def boom(_db):
+            raise RuntimeError("query layer exploded")
+
+        monkeypatch.setattr(queries, "performance", boom)
+        db = Db(bare)
+        out = server.render_page("t", "<p>x</p>", "/", "db", db=db)
+        db.close()
+        assert "unavailable" in out            # said, not crashed
+        assert "<main" in out
+
+    def test_duplicate_id_banner_survives_a_shell_change(self):
+        """The injection used to key off the literal '<main>' and went
+        silent the moment the shell grew an id attribute - hiding the
+        warning that exists to stop panels failing silently."""
+        out = server.render_page("t", '<div id="d"></div><div id="d"></div>',
+                                 "/", "db")
+        assert "Duplicate element ids on this page" in out
+
+
+class TestDecisionDossier:
+    def test_header_states_the_verdict_before_the_reasoning(self, seeded):
+        db = Db(seeded)
+        html = panels.trace_page(db, "c1", p="tr")
+        db.close()
+        assert "Verdict" in html and "Model view" in html
+        assert "Size the code chose" in html
+        assert "set by the risk engine, never by the model" in html
+        # the verdict tiles precede the numbered narrative
+        assert html.index("tr-tiles") < html.index("1. What the model was given")
+
+    def test_conviction_is_shown_against_the_floor_it_had_to_clear(self, seeded):
+        db = Db(seeded)
+        html = panels.trace_page(db, "c1", p="tr")
+        db.close()
+        assert 'id="tr-conviction"' in html
+        assert "gauge-mark" in html, (
+            "a conviction with no threshold beside it does not explain "
+            "why the trade happened")
+
+
+class TestEvidenceMindmap:
+    def _graph_db(self, tmp_path, rows):
+        import uuid as _u
+        path = str(tmp_path / "g.db")
+        conn = init_db(path)
+        conn.executescript(
+            open("catalyst/storage/schema_graph.sql").read())
+        now = "2026-08-10T12:00:00+00:00"
+        conn.execute("INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?,?)",
+                     ("c1", "GBFH", "insider_cluster", "2026-08-20",
+                      "confirmed", "[]", now, "financials", "[]"))
+        ents = {"co": ("company", "company:GBFH", "Glen Burnie Bancorp"),
+                "ceo": ("person", "person:cik:1", "Nigro, Gerald J"),
+                "llc": ("person", "person:cik:2", "Sovereign Holdings LLC")}
+        for eid, (kind, key, name) in ents.items():
+            conn.execute("INSERT INTO graph_entities VALUES (?,?,?,?,?)",
+                         (eid, kind, key, name, now))
+        for subj, pred, obj in rows:
+            conn.execute(
+                "INSERT INTO graph_assertions VALUES (?,?,?,?,?,?,?,?,?)",
+                (str(_u.uuid4()), subj, pred, obj, None, "edgar_filing",
+                 "acc-1", now, "primary_document"))
+        conn.commit(); conn.close()
+        return path
+
+    def test_the_company_is_the_centre_even_when_it_is_the_object(
+            self, tmp_path):
+        """Every 'X bought shares of GBFH' has the company as the
+        OBJECT. Reading the object blindly put an LLC in the middle and
+        drew the company four times around the rim."""
+        path = self._graph_db(tmp_path, [
+            ("ceo", "bought shares of", "co"),
+            ("llc", "bought shares of", "co"),
+        ])
+        db = Db(path)
+        html = panels.trace_page(db, "c1", p="tr")
+        db.close()
+        assert 'id="tr-mindmap"' in html
+        centre = [m for m in re.findall(r'fill="#ffffff">([^<]+)</text>', html)]
+        assert "Glen Burnie Bancorp" in " ".join(centre)
+        rim = re.findall(r'fill="var\(--ink-2\)">([^<]+)</text>', html)
+        assert any("Nigro" in r for r in rim)
+        assert not any("Glen Burnie" in r for r in rim), (
+            "the centre must not also be drawn as one of its own branches")
+
+    def test_mindmap_labels_stay_inside_the_viewbox(self):
+        svg = charts.mindmap(
+            "A very long company name that would overflow a box", [
+                ("bought shares of", "Somebody With An Extremely Long Name", 
+                 "person", "primary_document", "acc-1"),
+                ("dated", "2026-08-05", "event", "official_schedule", "acc-1"),
+            ], chart_id="mm")
+        assert charts.labels_outside_viewbox(svg) == []
+
+    def test_mindmap_refuses_to_draw_nothing(self):
+        with pytest.raises(ValueError):
+            charts.mindmap("x", [], chart_id="mm")

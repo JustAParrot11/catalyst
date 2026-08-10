@@ -13,6 +13,7 @@ stale browser and a failed deploy stop looking identical.
 """
 
 import json
+import re
 import sys
 import traceback
 from datetime import datetime, timezone
@@ -25,11 +26,13 @@ from catalyst.dashboard.db import Db, db_path
 from catalyst.dashboard.redact import redact_obj
 from catalyst.dashboard.render import (
     alarm,
+    dollars,
     duplicate_ids,
     esc,
     page,
     pre,
     section,
+    signed_pp,
 )
 
 DEFAULT_HOST = "0.0.0.0"
@@ -45,10 +48,53 @@ def _no_store_headers(handler: BaseHTTPRequestHandler, content_type: str, length
     handler.send_header("X-Catalyst-Build", BUILD_HASH)
 
 
-def render_page(title: str, body: str, active: str, path: str) -> str:
+def _rail_for(db: Db) -> str:
+    """The always-visible state strip. Built ONLY from figures the pages
+    already compute - it reads, it never decides."""
+    from catalyst.dashboard.render import status_rail
+
+    items = []
+    try:
+        perf = queries.performance(db)
+        equity = perf.net_equity_cents
+        items.append(("Account", dollars(equity),
+                      "good" if perf.bot_points else "idle"))
+        excess = perf.excess_pp
+        items.append((
+            "vs S&P",
+            esc(signed_pp(excess)) if excess is not None else "&mdash;",
+            "idle" if excess is None else ("good" if excess >= 0 else "crit")))
+        items.append(("Closed trades", str(perf.n_closed),
+                      "good" if perf.n_closed else "idle"))
+    except Exception:  # noqa: BLE001 - the rail must never break a page
+        items.append(("Account", "unavailable", "warn"))
+    try:
+        c = queries.cost_panel(db)
+        used = (float(c.scheduled_mtd_cents) / float(c.base_cap_cents) * 100
+                if c.base_cap_cents else 0.0)
+        items.append((
+            "Spend this month",
+            f"{dollars(c.scheduled_mtd_cents)} of {dollars(c.base_cap_cents)}",
+            "crit" if used >= 100 else ("warn" if used >= 75 else "good")))
+    except Exception:  # noqa: BLE001
+        items.append(("Spend this month", "unavailable", "warn"))
+    try:
+        open_positions = db.q(
+            "SELECT COUNT(*) n FROM positions WHERE status = 'open'")
+        n = open_positions.rows[0]["n"] if open_positions.rows else 0
+        items.append(("Open positions", f"{n} of 5",
+                      "good" if n else "idle"))
+    except Exception:  # noqa: BLE001
+        items.append(("Open positions", "unavailable", "warn"))
+    return status_rail(items)
+
+
+def render_page(title: str, body: str, active: str, path: str,
+                db: Db | None = None, subtitle: str = "") -> str:
     """Build the page, then CHECK IT. A duplicated element id becomes a
     banner on the page rather than two silently blank panels."""
-    html_doc = page(title, body, active, path)
+    rail = _rail_for(db) if db is not None else ""
+    html_doc = page(title, body, active, path, rail=rail, subtitle=subtitle)
     dupes = duplicate_ids(html_doc)
     if dupes:
         banner = alarm(
@@ -57,7 +103,14 @@ def render_page(title: str, body: str, active: str, path: str) -> str:
             + ". One panel may be receiving data meant for another. This banner is "
             "a bug report against the dashboard itself, not against the bot."
         )
-        html_doc = html_doc.replace("<main>", "<main>" + banner, 1)
+        # Match the OPENING <main ...> tag rather than the literal
+        # "<main>": the shell grew an id attribute and this injection
+        # silently stopped firing, which would have hidden the very
+        # banner that exists to stop panels failing silently.
+        html_doc, n = re.subn(r"(<main\b[^>]*>)", r"\1" + banner.replace("\\", "\\\\"),
+                              html_doc, count=1)
+        if not n:      # the shell changed shape again - never lose the warning
+            html_doc = html_doc.replace("</body>", banner + "</body>", 1)
     return html_doc
 
 
@@ -73,16 +126,17 @@ def route_overview(db: Db, params: dict) -> str:
         + panels.cost_panel(db, p="ovcost", compact=True)
         + panels.alerts_panel(db, p="alerts")
     )
-    return render_page("Overview", body, "/", db.path)
+    return render_page("Overview", body, "/", db.path, db=db)
 
 
 def route_performance(db: Db, params: dict) -> str:
     return render_page("Performance", panels.performance_panel(db, p="perf"),
-                       "/performance", db.path)
+                       "/performance", db.path, db=db)
 
 
 def route_funnel(db: Db, params: dict) -> str:
-    return render_page("Funnel", panels.funnel_panel(db, p="funnel"), "/funnel", db.path)
+    return render_page("Funnel", panels.funnel_panel(db, p="funnel"), "/funnel",
+                       db.path, db=db)
 
 
 def route_costs(db: Db, params: dict) -> str:
@@ -94,12 +148,13 @@ def route_costs(db: Db, params: dict) -> str:
             "your name and the time. Scheduled spend resumes on the next "
             "authorization check.</p>",
         )
-    return render_page("Cost", banner + panels.cost_panel(db, p="cost"), "/costs", db.path)
+    return render_page("Cost", banner + panels.cost_panel(db, p="cost"), "/costs",
+                       db.path, db=db)
 
 
 def route_decisions(db: Db, params: dict) -> str:
     return render_page("Decisions", panels.decisions_index(db, p="dec"),
-                       "/decisions", db.path)
+                       "/decisions", db.path, db=db)
 
 
 def route_decision(db: Db, params: dict) -> str:
@@ -110,17 +165,18 @@ def route_decision(db: Db, params: dict) -> str:
                        "The <a href='/decisions'>decisions list</a> links to each one.</p>")
     else:
         body = panels.trace_page(db, cid, p="tr")
-    return render_page("Decision trace", body, "/decisions", db.path)
+    return render_page("Decision trace", body, "/decisions", db.path, db=db)
 
 
 def route_refusals(db: Db, params: dict) -> str:
     return render_page("Refusals", panels.refusals_panel(db, p="ref"),
-                       "/refusals", db.path)
+                       "/refusals", db.path, db=db)
 
 
 def route_logs(db: Db, params: dict) -> str:
     flat = {k: v[0] for k, v in params.items() if v}
-    return render_page("Logs", panels.logs_panel(db, flat, p="log"), "/logs", db.path)
+    return render_page("Logs", panels.logs_panel(db, flat, p="log"), "/logs",
+                       db.path, db=db)
 
 
 def route_maintenance(db: Db, params: dict) -> str:
@@ -143,14 +199,14 @@ def route_maintenance(db: Db, params: dict) -> str:
             creds = None
     report = maintenance.build_report(db, creds, run_active=run_active)
     return render_page("Maintenance", panels.maintenance_panel(report, p="maint"),
-                       "/maintenance", db.path)
+                       "/maintenance", db.path, db=db)
 
 
 def route_setup(db: Db, params: dict) -> str:
     """STAGE 7 MOUNT POINT. Replace the body of this function with the
     real credential form; the route, the no-store headers and the
     redaction layer are already in place around it."""
-    return render_page("Setup", panels.setup_stub(p="setup"), "/setup", db.path)
+    return render_page("Setup", panels.setup_stub(p="setup"), "/setup", db.path, db=db)
 
 
 def diagnostics_bundle(db: Db) -> dict:

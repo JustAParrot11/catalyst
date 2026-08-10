@@ -572,6 +572,33 @@ def evidence_chain(db: Db, candidate_id: str) -> EvidenceChain:
     return EvidenceChain(True, table, cols, res)
 
 
+def evidence_graph(db: Db, ticker: str) -> QueryResult:
+    """Assertions around one company, with entity NAMES resolved.
+
+    Display-only. graph_assertions stores entity ids; rendering those
+    raw shows the reader "company:GBFH" where a name belongs, which is
+    not evidence anybody can check. Both graph tables are
+    feature-detected exactly as evidence_chain does - stage 5a may not
+    be present in a given database, and guessing is how a panel blanks.
+    """
+    if not (db.table_exists("graph_assertions")
+            and db.table_exists("graph_entities")):
+        return QueryResult("graph tables absent", (), [],
+                           "graph_entities/graph_assertions not in this database")
+    key = f"company:{(ticker or '').strip().upper()}"
+    return db.q(
+        """SELECT a.predicate, a.object_date, a.source_class, a.source_ref,
+                  a.reliability, a.asserted_at,
+                  s.display_name AS subject_label, s.kind AS subject_kind,
+                  o.display_name AS object_label, o.kind AS object_kind
+           FROM graph_assertions a
+           JOIN graph_entities s ON s.id = a.subject_entity_id
+           LEFT JOIN graph_entities o ON o.id = a.object_entity_id
+           WHERE s.canonical_key = ? OR o.canonical_key = ?
+           ORDER BY a.asserted_at, a.id LIMIT 40""",
+        (key, key))
+
+
 def decision_trace(db: Db, candidate_id: str) -> Trace:
     candidate_q = db.q("SELECT * FROM candidates WHERE id = ?", (candidate_id,))
     source_ids = []
