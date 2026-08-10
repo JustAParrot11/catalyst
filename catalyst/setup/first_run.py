@@ -115,12 +115,15 @@ FIELDS: tuple[Field, ...] = (
     ),
     Field(
         name="monthly_budget_usd",
-        label="Monthly research budget",
+        label="Your own spending limit (a brake, not a budget)",
         explanation=(
-            "The most the bot may spend on research in a month, in US dollars. "
-            "Five is the recommended figure and the bot will not go past it. "
-            "It can only ever rise out of profit the bot has actually banked - "
-            "never out of profit it merely hopes for."
+            "The bot has its own ceiling of $5 a month, and this box "
+            "CANNOT raise it - a larger number here changes nothing. It "
+            "only ever tightens the limit, so enter a smaller figure if "
+            "you want the bot to spend less than $5. That $5 ceiling can "
+            "rise only out of profit the bot has actually banked, never "
+            "out of profit it merely hopes for, and never past $8 without "
+            "a human changing the code."
         ),
         kind="number",
         default="5",
@@ -297,6 +300,23 @@ function post(path, payload){
       'The page could not reach the bot. It may still be starting up - '
       + 'wait ten seconds and try again. (' + e + ')'}; });
 }
+var BOT_CEILING_USD = 5;
+function budgetHint(){
+  var el = q('monthly_budget_usd'); if(!el) return;
+  var hint = q('monthly_budget_usd_hint'); if(!hint) return;
+  var v = parseFloat(el.value);
+  if (isNaN(v)) { hint.textContent = ''; return; }
+  if (v > BOT_CEILING_USD) {
+    hint.textContent = 'Note: the bot will still stop at $' + BOT_CEILING_USD
+      + ' a month. This box cannot raise the ceiling, only lower it, so '
+      + '$' + v + ' has the same effect as $' + BOT_CEILING_USD + '.';
+  } else if (v === 0) {
+    hint.textContent = 'This stops the bot researching anything at all, so '
+      + 'it will never place a trade.';
+  } else {
+    hint.textContent = 'The bot will stop at $' + v + ' a month.';
+  }
+}
 function testAlpaca(){
   show('alpaca_result', true, 'Checking with Alpaca...');
   post(PREFIX + '/test/alpaca', {alpaca_key: q('alpaca_key').value,
@@ -352,9 +372,15 @@ def _field_input(f: Field) -> str:
             f"Only choose this deliberately, with live Alpaca keys, once "
             f"the paper record has convinced you.</span></label>")
     if f.kind == "number":
+        # Live feedback, because the field silently ignores anything
+        # above the ceiling. Owner report 2026-08-10: entered 20, saw
+        # $5 everywhere afterwards and had no way to know why. The
+        # explanation above says it; this says it at the moment the
+        # number is typed, which is when it is actually read.
         return (
             f'<input id="{f.name}" name="{f.name}" type="number" min="0" step="1" '
-            f'value="{html.escape(f.default)}">'
+            f'value="{html.escape(f.default)}" oninput="budgetHint()">'
+            f'<p class="explain" id="{f.name}_hint"></p>'
         )
     return (
         f'<input id="{f.name}" name="{f.name}" type="password" autocomplete="off" '
