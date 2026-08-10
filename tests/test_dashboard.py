@@ -770,9 +770,14 @@ class TestAnalysisLayer:
             "line, about twice a comfortable measure")
 
     def test_surface_is_not_pure_white(self):
+        """Intent, not a specific hex: a pure-white field beside black
+        text is the main source of glare. Pinning the exact value made
+        this fail on a pure restyle, which is not what it is for."""
+        import re as _re
         from catalyst.dashboard.render import _CSS
-        assert "--surface:     #fbfbf9" in _CSS
-        assert "--surface:     #ffffff" not in _CSS
+        surfaces = _re.findall(r"--surface(?:-2)?:\s*(#[0-9a-fA-F]{6})", _CSS)
+        assert surfaces, "no surface tokens found at all"
+        assert not any(v.lower() == "#ffffff" for v in surfaces), surfaces
 
 
 class TestOwnerBudgetReconciliation:
@@ -950,3 +955,72 @@ class TestEvidenceMindmap:
     def test_mindmap_refuses_to_draw_nothing(self):
         with pytest.raises(ValueError):
             charts.mindmap("x", [], chart_id="mm")
+
+
+class TestTerminalStyling:
+    """The Bloomberg-ish restyle, pinned where it carries meaning."""
+
+    @staticmethod
+    def _token(name):
+        import re as _re
+        from catalyst.dashboard.render import _CSS
+        return _re.findall(rf"{name}:\s*(#[0-9a-fA-F]{{6}})", _CSS)
+
+    @staticmethod
+    def _hue(hex_value):
+        import colorsys
+        h = hex_value.lstrip("#")
+        r, g, b = (int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
+        return colorsys.rgb_to_hls(r, g, b)[0] * 360
+
+    def test_chrome_accent_is_not_confusable_with_the_warning_colour(self):
+        """The obvious terminal accent is Bloomberg amber - and amber is
+        already the reserved WARNING status here. Measured with the
+        data-viz validator: amber chrome #ffa028 sits dE 4.5 from
+        warning #fab219 in normal vision, far under the 15 floor, so a
+        decorative accent would read as an alert and teach the eye to
+        ignore alerts. Cyan measures dE 25.0 from warning."""
+        accents = self._token("--accent")
+        warnings = self._token("--warning")
+        assert accents and warnings
+        for a in accents:
+            for w in warnings:
+                gap = abs(self._hue(a) - self._hue(w))
+                gap = min(gap, 360 - gap)
+                assert gap > 40, (
+                    f"accent {a} sits {gap:.0f} degrees from warning {w}; "
+                    "a chrome colour that reads as a status is worse than "
+                    "a boring chrome colour")
+
+    def test_figures_are_monospaced_so_columns_align(self):
+        from catalyst.dashboard.render import _CSS
+        assert "ui-monospace" in _CSS
+        for selector in (".tile-value", ".rail-value", "td.num"):
+            assert selector in _CSS
+
+    def test_the_verbatim_assertions_are_folded_but_still_present(
+            self, tmp_path):
+        """The mindmap now carries the meaning; the exact wording stays
+        one click away rather than dominating the page."""
+        import uuid as _u
+        path = str(tmp_path / "g.db")
+        conn = init_db(path)
+        conn.executescript(open("catalyst/storage/schema_graph.sql").read())
+        now = "2026-08-10T12:00:00+00:00"
+        conn.execute("INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?,?)",
+                     ("c1", "GBFH", "insider_cluster", "2026-08-20",
+                      "confirmed", "[]", now, "financials", "[]"))
+        for eid, kind, key, name in [("co", "company", "company:GBFH", "Glen Burnie"),
+                                     ("ceo", "person", "person:cik:1", "Nigro")]:
+            conn.execute("INSERT INTO graph_entities VALUES (?,?,?,?,?)",
+                         (eid, kind, key, name, now))
+        conn.execute("INSERT INTO graph_assertions VALUES (?,?,?,?,?,?,?,?,?)",
+                     (str(_u.uuid4()), "ceo", "bought shares of", "co", None,
+                      "edgar_filing", "acc-1", now, "primary_document"))
+        conn.commit(); conn.close()
+        db = Db(path)
+        html = panels.trace_page(db, "c1", p="tr")
+        db.close()
+        assert "every assertion behind that diagram, verbatim" in html
+        assert "<details" in html
+        assert "primary_document" in html      # the data itself survives
