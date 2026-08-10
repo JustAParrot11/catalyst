@@ -108,13 +108,20 @@ def _load_spy(start: date, end: date):
         (b.day, float(b.close / base * 100), int(b.close / base * START_CAPITAL_CENTS))
         for b in window
     ]
-    meta = ""
+    # Read the basis from the cache metadata rather than asserting it.
+    # The label used to hardcode "feed=sip, adjustment=all"; if a refresh
+    # ever wrote a different basis, the page would have gone on claiming
+    # the old one - a caption that cannot be wrong is not provenance.
+    basis, meta = "basis unrecorded", ""
     try:
         raw_meta = cache.read_meta() or {}
-        meta = f", cache_meta fetched_at={raw_meta.get('fetched_at', 'unknown')}"
+        if raw_meta.get("feed") or raw_meta.get("adjustment"):
+            basis = (f"feed={raw_meta.get('feed', 'unrecorded')}, "
+                     f"adjustment={raw_meta.get('adjustment', 'unrecorded')}")
+        meta = f", fetched_at={raw_meta.get('fetched_at', 'unknown')}"
     except Exception:
         meta = ", cache_meta unreadable"
-    return points, f"local bar cache {root}/SPY.csv (feed=sip, adjustment=all){meta}", None, len(window)
+    return points, f"local bar cache {root}/SPY.csv ({basis}{meta})", None, len(window)
 
 
 def performance(db: Db) -> Performance:

@@ -114,6 +114,34 @@ endpoint), ClinicalTrials.gov v2, Federal Register, openFDA
    **Alpaca paper does not simulate T+1 settlement**, so the settled-
    cash clamp is unverifiable until live. (live verification)
 
+## The benchmark maintains itself now
+
+Found 2026-08-10, answering an owner question about when the SPY line
+would appear. Two silent defects, both fixed:
+
+1. **`data/` is gitignored and no bar file is tracked**, so the
+   installer's fresh clone reached the VPS with *no* SPY history at
+   all. The headline comparison the whole dashboard is built around had
+   nothing to draw against.
+2. **Nothing in the running bot ever wrote the bar cache.** Even a
+   populated cache (a dev machine that had run
+   `scripts/fetch_history.py`) froze on its fetch date while the bot's
+   own equity line kept advancing.
+
+`catalyst/data/benchmark.py` now bootstraps a missing cache from the
+documented SIP floor and thereafter appends only the days it lacks, once
+a day, from the scheduler. It merges rather than replaces (an empty or
+failed response can cost the update, never the history), pins
+feed=sip/adjustment=all from the same constants the cached history was
+built with, and records that basis in the cache metadata — the
+dashboard now *reads* the basis instead of asserting it.
+
+**If the Alpaca account lacks SIP entitlement** the fetch returns an
+HTTP error, which is reported with its raw body and does not fall back
+to another feed: a benchmark labelled with a basis it was not fetched
+on is worse than no benchmark. If that happens, the log names it and
+the performance page stays honestly empty.
+
 ## Known gap: two machines, one Alpaca account
 
 The single-instance lock (`orchestrator/instance_lock.py`) prevents two

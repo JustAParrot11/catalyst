@@ -222,6 +222,41 @@ def _maybe_reconcile_yesterday(db_file: str) -> None:
         conn.close()
 
 
+def _maybe_refresh_benchmark(state: dict) -> None:
+    """Keep the SPY comparison series current, once a day.
+
+    The dashboard's headline is performance against the S&P net of
+    costs; `data/` is gitignored, so a fresh install arrives with no
+    benchmark at all, and nothing else in the running bot ever writes
+    the cache. Failures are logged and never reach the trading loop -
+    a stale benchmark is a reporting problem, not a trading one."""
+    from datetime import datetime, timezone
+
+    today = datetime.now(timezone.utc).date()
+    if state.get("benchmark_day") == today:
+        return
+    state["benchmark_day"] = today
+    try:
+        from catalyst.data import benchmark
+        from catalyst.dashboard.db import bars_path
+        from catalyst.setup.credentials import load_credentials
+
+        creds = load_credentials()
+        result = benchmark.refresh_benchmark(
+            bars_path(), creds.alpaca_key, creds.alpaca_secret)
+        if result.skipped_reason in (None, "already_current"):
+            _log.info("Benchmark series: %s bar(s) added, %s.",
+                      result.written, result.skipped_reason or "up to date")
+        else:
+            _log.warning(
+                "Benchmark series not updated (%s). The performance page "
+                "compares against SPY, so that comparison will stay stale "
+                "until this succeeds. Raw upstream: %s",
+                result.skipped_reason, (result.raw_response or "")[:500])
+    except Exception:  # noqa: BLE001 - reporting must never stop trading
+        _log.exception("The benchmark refresh failed; trading is unaffected.")
+
+
 def _run_one_cycle(db_file: str):
     """Wire the live dependencies and run exactly one cycle. Thin by
     design: every piece here is constructed, none is decided."""
@@ -357,6 +392,7 @@ def main(argv: list[str] | None = None) -> int:
     start_setup_server()
 
     cycle_seconds = int(os.environ.get("CATALYST_CYCLE_SECONDS", DEFAULT_CYCLE_SECONDS))
+    _daily_state: dict = {}   # once-a-day markers for the loop
     last_waiting_log = 0.0
     announced_ready = False
 
@@ -380,6 +416,7 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             _maybe_reconcile_yesterday(path)
+            _maybe_refresh_benchmark(_daily_state)
             report = _run_one_cycle(path)
             if report.kill_switch.tripped:
                 _log.warning("Kill switch tripped: %s. New entries are "
