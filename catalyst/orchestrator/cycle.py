@@ -252,6 +252,12 @@ def _protective_duties(conn, broker: Broker, report: "CycleReport",
                     (keep, p["id"]))
                 p["stop_order_id"] = keep
                 status_by_id[p["id"]] = status = "ok"
+                # the live set is now exactly the kept stop; without this
+                # the backfill below reads the STALE tuple and re-points
+                # the row at the id just cancelled (risk round 3 #2,
+                # reproduced by test_stage5_gaps)
+                live = (keep,)
+                live_ids_by_pos[p["id"]] = live
 
         if status == "ok":
             # Backfill/repair the recorded id from the broker's truth
@@ -305,7 +311,7 @@ def _protective_duties(conn, broker: Broker, report: "CycleReport",
 def _broker_positions_agree(broker: Broker, conn,
                             report: "CycleReport") -> bool:
     """Positions-level reconciliation (re-review NEW-1 / stress
-    escalation 4): a ticker held at the broker with no local open
+    ESCALATION-8): a ticker held at the broker with no local open
     position is invisible to every kill switch, limit and exit. Detect
     the divergence and block entries until a human resolves it. Fails
     open-eyed: a broker error here reads as 'cannot confirm agreement'."""
@@ -328,7 +334,7 @@ def _broker_positions_agree(broker: Broker, conn,
 def _adopt_orphan_entries(conn, report: "CycleReport", now: datetime) -> None:
     """A filled buy whose cycle died before the positions INSERT is a
     real holding with no stop, no exit date and no exposure accounting
-    (re-review NEW-1b / stress escalation 3). Adopt it: create the
+    (re-review NEW-1b / stress ESCALATION-2). Adopt it: create the
     position row from the decision so every protective duty sees it."""
     rows = conn.execute(
         """SELECT o.id, o.decision_id, d.planned_exit_date
@@ -365,14 +371,15 @@ def _void_dead_entries(conn, report: "CycleReport") -> None:
     """An entry that went terminal with ZERO fill can never become a
     holding: void the position instead of re-arming a naked sell stop
     for shares never bought, forever (re-review NEW-2 / stress
-    escalation 2)."""
+    ESCALATION-7)."""
     rows = conn.execute(
         """SELECT p.id, p.ticker, o.status FROM positions p
            JOIN orders o ON o.id = json_extract(
                 CASE WHEN json_valid(p.entry_order_ids)
                      THEN p.entry_order_ids ELSE '[]' END, '$[0]')
            WHERE p.status = 'open'
-             AND o.status IN ('canceled', 'expired', 'rejected')
+             AND o.status IN ('canceled', 'expired', 'rejected',
+                              'done_for_day', 'suspended', 'stopped')
              AND NOT EXISTS (SELECT 1 FROM fills f
                              WHERE f.order_id = o.id)""").fetchall()
     for pos_id, ticker, order_status in rows:
@@ -466,13 +473,20 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
         (now.date().isoformat(), "broker_read")).fetchone()
     if prior is not None and Decimal(prior[0]) > portfolio.equity_usd:
         # same-day replace would forget the intraday high the drawdown
-        # peak needs (re-review F7 note): preserve it under its own source
+        # peak needs (re-review F7 note): preserve it under its own
+        # source, keeping the MAX ever seen today - a REPLACE with a
+        # later, lower prior would understate the peak (risk round 3 #5)
+        existing_high = conn.execute(
+            "SELECT equity_usd FROM equity_snapshots WHERE day=? AND source=?",
+            (now.date().isoformat(), "intraday_high")).fetchone()
+        high = (max(Decimal(existing_high[0]), Decimal(prior[0]))
+                if existing_high else Decimal(prior[0]))
         conn.execute(
             """INSERT OR REPLACE INTO equity_snapshots
                (day, taken_at, equity_usd, settled_cash_usd,
                 positions_notional, source)
                VALUES (?,?,?,?,?,?)""",
-            (now.date().isoformat(), now.isoformat(), prior[0],
+            (now.date().isoformat(), now.isoformat(), str(high),
              str(portfolio.settled_cash_usd), positions_notional,
              "intraday_high"))
     conn.execute(
@@ -592,7 +606,7 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
             # the open-ticker screen ran before the loop; a second
             # candidate on the SAME ticker in one cycle is double
             # exposure plus a guaranteed duplicate-stops deadlock
-            # (stress escalation 6)
+            # (stress ESCALATION-9)
             report.drop_reasons.setdefault("researched", []).append(
                 f"{c.id}: ticker_already_entered_this_cycle")
             continue
@@ -677,7 +691,7 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
         if filled_qty > decision.qty:
             # a broker-reported fill larger than the order is upstream
             # garbage; sizing a stop from it would sell shares we never
-            # ordered (stress escalation 1). Protect the ordered qty and
+            # ordered (stress ESCALATION-1). Protect the ordered qty and
             # flag the discrepancy for review.
             report.errors.append(
                 f"broker reports filled_qty {filled_qty} > ordered "
@@ -820,11 +834,7 @@ def _open_position_dicts(conn, now: datetime) -> list[dict]:
     today = now.date().isoformat()
     rows = conn.execute(
         """SELECT p.id, p.ticker, p.stop_order_id, p.planned_exit_date,
-                  o.decision_id, o.qty, d.stop_price, f.qty,
-                  (SELECT COALESCE(SUM(CAST(sf.qty AS REAL)), 0)
-                   FROM fills sf JOIN orders so ON so.id = sf.order_id
-                   WHERE so.decision_id = o.decision_id
-                     AND so.side = 'sell')
+                  o.decision_id, o.qty, d.stop_price, f.qty
            FROM positions p
            LEFT JOIN orders o ON o.id = json_extract(
                 CASE WHEN json_valid(p.entry_order_ids)
@@ -839,9 +849,21 @@ def _open_position_dicts(conn, now: datetime) -> list[dict]:
         # the gross entry qty is an oversized order the cash account
         # rejects forever). No fill row yet -> fall back to ordered qty
         # only for stop/exit sizing of a possibly-filled entry.
+        # The netting sums in DECIMAL, in Python: SQLite's REAL cast
+        # turned 1 - 3x0.1 into 0.69999999999999996, a qty Alpaca
+        # rejects (risk round 3 #3, reproduced by test_stage5_gaps).
         if r[7] is not None:
-            held = Decimal(str(r[7])) - Decimal(str(r[8] or 0))
-            qty = str(held) if held > 0 else None
+            sold = sum(
+                (Decimal(str(q)) for (q,) in conn.execute(
+                    """SELECT sf.qty FROM fills sf
+                       JOIN orders so ON so.id = sf.order_id
+                       WHERE so.decision_id = ? AND so.side = 'sell'""",
+                    (r[4],))),
+                Decimal("0"))
+            held = (Decimal(str(r[7])) - sold).quantize(Decimal("0.0001"))
+            # trailing zeros stripped so "4" stays "4", not "4.0000"
+            qty = (format(held, "f").rstrip("0").rstrip(".")
+                   if held > 0 else None)
         else:
             qty = r[5]
         out.append(

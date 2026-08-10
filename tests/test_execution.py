@@ -283,19 +283,48 @@ class TestReconcile:
             "SELECT broker_reported_price, modeled_slippage FROM fills"
         ).fetchone() == ("49.87", None)
 
-    def test_unknown_order_404_recorded_verbatim(self, db):
+    def test_unknown_order_404_needs_two_passes_to_terminalize(self, db):
+        """One transient 404 must NOT terminalize an order (risk round 3
+        finding 1: a single flaky lookup rippled into voiding a live
+        position). The first pass parks it; the second confirms."""
         _seed_order(db)
 
         def handler(request):
             return httpx.Response(404, json={"message": "order not found"})
 
-        assert reconcile(make_broker(handler), db) == []
+        b = make_broker(handler)
+        assert reconcile(b, db) == []
+        status, raw = db.execute(
+            "SELECT status, raw_response FROM orders").fetchone()
+        assert status == "reconcile_404_once"     # NOT terminal yet
+        raw = json.loads(raw)
+        assert raw["reconcile_404"] is True and raw["confirmed"] is False
+        assert raw["body"] == {"message": "order not found"}
+
+        assert reconcile(b, db) == []             # second consecutive 404
         status, raw = db.execute(
             "SELECT status, raw_response FROM orders").fetchone()
         assert status == "rejected"
-        raw = json.loads(raw)
-        assert raw["reconcile_404"] is True
-        assert raw["body"] == {"message": "order not found"}
+        assert json.loads(raw)["confirmed"] is True
+
+    def test_transient_404_recovers_on_next_pass(self, db):
+        _seed_order(db)
+        calls = {"n": 0}
+
+        def handler(request):
+            calls["n"] += 1
+            if calls["n"] <= 2:   # client-id lookup AND broker-id check
+                return httpx.Response(404, json={"message": "not found"})
+            return httpx.Response(200, json={
+                "id": "brok-1", "status": "filled", "filled_qty": "2.5",
+                "filled_avg_price": "49.87",
+                "filled_at": "2026-08-10T14:31:00Z"})
+
+        b = make_broker(handler)
+        reconcile(b, db)          # transient 404 -> parked
+        fills = reconcile(b, db)  # broker answers now -> fill recorded
+        assert len(fills) == 1
+        assert db.execute("SELECT status FROM orders").fetchone()[0] == "filled"
 
     def test_terminal_orders_not_requeried(self, db):
         _seed_order(db, status="filled")

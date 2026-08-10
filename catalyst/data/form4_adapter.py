@@ -69,7 +69,7 @@ def flatten_form4_events(feed_events: list[RawEvent]) -> list[RawEvent]:
                 # a single insider purchase claiming >$100M is a parse
                 # error or a poisoned filing, and either way it must not
                 # clear the cluster's dollar floor by orders of magnitude
-                # (stress escalation 8). The raw filing stays verbatim in
+                # (stress ESCALATION-5). The raw filing stays verbatim in
                 # raw_events; only the flattened row is withheld.
                 continue
             for i, (owner_cik, owner) in enumerate(zip(owner_ciks,

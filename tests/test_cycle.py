@@ -493,3 +493,53 @@ class TestQuoteFreshness:
                    backoff_s=0)
         snap = build_market_snapshot(b, "TEST", NOW)
         assert snap is not None and snap.last_close == Decimal("50")
+
+
+class TestVoidAndPeakRegressions:
+    """Risk round 3 findings 4 and 5."""
+
+    def test_done_for_day_zero_fill_is_voided(self, db):
+        """Finding 4: done_for_day is terminal-unfilled too; missing it
+        left a naked-stop position blocked forever, not 'one session'."""
+        from catalyst.orchestrator.cycle import CycleReport, _void_dead_entries
+        from catalyst.risk import KillSwitchState
+        db.execute("INSERT INTO orders VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   ("ord-buy", "cand-old", "b1", "buy", "2", "market", "day",
+                    "2026-08-01T14:00:00+00:00", "done_for_day", "{}"))
+        db.execute("INSERT INTO positions VALUES (?,?,?,?,?,?,?)",
+                   ("pos-old", "OLDPOS", json.dumps(["ord-buy"]), None,
+                    "2026-08-01T14:00:00+00:00", "2026-08-20", "open"))
+        db.commit()
+        report = CycleReport("c", NOW, KillSwitchState(False, None))
+        _void_dead_entries(db, report)
+        assert db.execute("SELECT status FROM positions").fetchone()[0] == "void"
+
+    def test_intraday_high_keeps_the_maximum(self, db):
+        """Finding 5: a later, lower prior must never replace a higher
+        recorded intraday high."""
+        account = {"equity": "1000", "cash": "1000", "last_equity": "1000",
+                   "non_marginable_buying_power": "1000"}
+
+        def handler(request):
+            url = str(request.url)
+            if "/v2/account" in url:
+                return httpx.Response(200, json=dict(account))
+            if "/v2/clock" in url:
+                return httpx.Response(200, json={"is_open": True})
+            if "/v2/positions" in url:
+                return httpx.Response(200, json=[])
+            if "/v2/orders" in url:
+                return httpx.Response(200, json=[])
+            return httpx.Response(404, json={})
+
+        b = Broker("k", "s", transport=httpx.MockTransport(handler),
+                   backoff_s=0)
+        for equity in ("1100", "1050", "1040"):
+            account["equity"] = equity
+            run(db, b, None, [], events=[])
+        high = db.execute("SELECT equity_usd FROM equity_snapshots "
+                          "WHERE source='intraday_high'").fetchone()[0]
+        assert Decimal(high) == Decimal("1100")
+        latest = db.execute("SELECT equity_usd FROM equity_snapshots "
+                            "WHERE source='broker_read'").fetchone()[0]
+        assert Decimal(latest) == Decimal("1040")

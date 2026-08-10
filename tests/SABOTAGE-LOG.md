@@ -597,3 +597,9 @@ change kept from this session is the strengthened assertion block in
   written first and carried the desired behavior) - the equivalent of
   a failing-test-first cycle for each. Markers removed so they are
   permanent regressions.
+- Risk round-3 batch: two-pass 404 terminalization sabotaged (single
+  404 terminalizes) -> caught by both new reconcile tests; done_for_day
+  removed from the void list -> caught; intraday-high max reverted to
+  replace -> caught. The duplicate-reduction stale-live and float-
+  netting fixes were proven by test-writer's pre-written failing tests
+  flipping to green (markers then removed).

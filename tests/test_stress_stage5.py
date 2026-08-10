@@ -428,10 +428,16 @@ class TestReconcileHostileFills:
         assert db.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 0
 
     def test_404_on_reconcile_marks_rejected_with_raw_body(self, db):
-        """SURVIVED: an order the broker never heard of is terminal, and
-        the raw body is recorded beside it."""
+        """An order the broker never heard of is terminal only after TWO
+        consecutive 404 passes (risk round 3 finding 1: one transient
+        404 must not terminalize - it rippled into voiding a live
+        position). The raw body is recorded on both passes."""
         self._seeded(db)
         b = brk(lambda r: httpx.Response(404, json={"message": "not found"}))
+        assert reconcile(b, db) == []
+        status, raw = db.execute(
+            "SELECT status, raw_response FROM orders WHERE id='o1'").fetchone()
+        assert status == "reconcile_404_once" and "not found" in raw
         assert reconcile(b, db) == []
         status, raw = db.execute(
             "SELECT status, raw_response FROM orders WHERE id='o1'").fetchone()

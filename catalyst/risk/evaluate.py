@@ -34,7 +34,7 @@ def evaluate(
     skip_reasons: list[str] = []
 
     # A catalyst_type with no configured parameters must SKIP, not
-    # KeyError inside sizing and kill the cycle (stress escalation 9).
+    # KeyError inside sizing and kill the cycle (stress ESCALATION-6).
     for param_name in ("adverse_gap_assumption", "stop_width",
                        "holding_period_estimate"):
         if candidate.catalyst_type not in params[param_name]:

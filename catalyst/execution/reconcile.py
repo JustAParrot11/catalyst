@@ -49,18 +49,34 @@ def reconcile(broker: Broker, conn) -> list[Fill]:
             remote = broker.get_order_by_client_id(order_id)
         except BrokerError as exc:
             if exc.status_code == 404:
-                # The broker has never heard of this order: the submit
-                # never landed. Terminal, and the raw answer is recorded
-                # beside it (house rule 3).
-                conn.execute(
-                    "UPDATE orders SET status = 'rejected', raw_response = ? "
-                    "WHERE id = ?",
-                    (json.dumps({"reconcile_404": True,
-                                 "body": exc.body,
-                                 "checked_at": _now().isoformat()}),
-                     order_id))
-                continue
-            raise
+                # One 404 must not terminalize an order that may be real
+                # (risk round 3 #1: a transient 404 rippled into VOIDING
+                # a live position). Cross-check by broker id when we have
+                # one; otherwise require the 404 on two consecutive
+                # passes before writing 'rejected'.
+                if broker_order_id:
+                    try:
+                        remote = broker.get_order(broker_order_id)
+                    except BrokerError as exc2:
+                        if exc2.status_code != 404:
+                            raise
+                        remote = None
+                else:
+                    remote = None
+                if remote is None:
+                    first_404 = local_status != "reconcile_404_once"
+                    conn.execute(
+                        "UPDATE orders SET status = ?, raw_response = ? "
+                        "WHERE id = ?",
+                        ("reconcile_404_once" if first_404 else "rejected",
+                         json.dumps({"reconcile_404": True,
+                                     "confirmed": not first_404,
+                                     "body": exc.body,
+                                     "checked_at": _now().isoformat()}),
+                         order_id))
+                    continue
+            else:
+                raise
 
         remote_status = remote.get("status", "unknown")
         conn.execute(
