@@ -33,6 +33,14 @@ def evaluate(
 ) -> RiskDecision:
     skip_reasons: list[str] = []
 
+    # A catalyst_type with no configured parameters must SKIP, not
+    # KeyError inside sizing and kill the cycle (stress escalation 9).
+    for param_name in ("adverse_gap_assumption", "stop_width",
+                       "holding_period_estimate"):
+        if candidate.catalyst_type not in params[param_name]:
+            skip_reasons.append("unknown_catalyst_type")
+            break
+
     if view.direction == "no_trade":
         skip_reasons.append("model_no_trade")
     elif view.direction == "short":
@@ -58,8 +66,9 @@ def evaluate(
         cluster_key=cluster_key,
     )
 
-    holding_days = int(params["holding_period_estimate"][candidate.catalyst_type])
-    planned_exit = portfolio.as_of.date() + timedelta(days=holding_days)
+    holding = params["holding_period_estimate"].get(candidate.catalyst_type)
+    planned_exit = (portfolio.as_of.date() + timedelta(days=int(holding))
+                    if holding is not None else None)
 
     if sized.action == "skip":
         skip_reasons.extend(r for r in sized.skip_reasons if r != "gate_not_passed")

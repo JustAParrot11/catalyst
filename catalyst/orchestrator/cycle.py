@@ -20,8 +20,10 @@ from decimal import Decimal
 
 from catalyst.discovery import Candidate
 from catalyst.execution.broker import Broker, BrokerError
-from catalyst.execution.exits import manage_exits, reopen_stops
-from catalyst.execution.orders import confirm_stops_resting, place, place_stop
+from catalyst.execution.exits import _neutralize_stop, manage_exits, reopen_stops
+from catalyst.execution.orders import (
+    confirm_stops_resting, place, place_stop, replace_stop,
+)
 from catalyst.execution.reconcile import close_filled_positions, reconcile
 from catalyst.research.boundary import CostContext, investigate
 from catalyst.risk import (
@@ -182,33 +184,15 @@ def _protective_duties(conn, broker: Broker, report: "CycleReport",
         reconcile(broker, conn)
     except BrokerError as exc:
         report.errors.append(f"reconcile: {exc}")
+    _adopt_orphan_entries(conn, report, now)
     close_filled_positions(conn, now=now)
+    _void_dead_entries(conn, report)
 
     open_rows = _open_position_dicts(conn, now)
-    if not open_rows:
-        return True, open_rows
-    try:
-        confirmations = confirm_stops_resting(open_rows, broker, conn)
-    except BrokerError as exc:
-        report.errors.append(f"confirm_stops: {exc}")
-        return False, open_rows
 
-    status_by_id = {c.position_id: c.status for c in confirmations}
-    unprotected = [
-        p for p in open_rows
-        if status_by_id.get(p["id"]) == "unprotected"
-        and p.get("stop_price") is not None and p.get("qty")
-        and not p["due"]]
-    if unprotected:
-        results = reopen_stops(unprotected, broker, conn)
-        for pos, res in zip(unprotected, results):
-            if res.status != "rejected" and res.broker_order_id:
-                conn.execute(
-                    "UPDATE positions SET stop_order_id = ? WHERE id = ?",
-                    (res.broker_order_id, pos["id"]))
-                status_by_id[pos["id"]] = "ok"
-        conn.commit()
-
+    # Hard-date exits FIRST: they neutralize their own stops and must
+    # not wait on the confirmation pass (re-review NEW-5: one flaky
+    # get_open_orders delayed every exit a full cycle).
     due = [p for p in open_rows if p["due"]]
     # A due position whose entry order or quantity cannot be resolved
     # used to send a market sell with qty "None" and then die on a NOT
@@ -227,10 +211,177 @@ def _protective_duties(conn, broker: Broker, report: "CycleReport",
         except BrokerError as exc:
             report.errors.append(f"manage_exits: {exc}")
 
+    if not open_rows:
+        return _broker_positions_agree(broker, conn, report), open_rows
+    try:
+        open_orders = broker.get_open_orders()
+        confirmations = confirm_stops_resting(open_rows, broker, conn,
+                                              open_orders=open_orders)
+    except BrokerError as exc:
+        report.errors.append(f"confirm_stops: {exc}")
+        return False, open_rows
+
+    status_by_id = {c.position_id: c.status for c in confirmations}
+    live_ids_by_pos = {c.position_id: c.live_stop_order_ids
+                       for c in confirmations}
+    stop_qty_by_id = {o.get("id"): o.get("qty") for o in open_orders}
+
+    for p in open_rows:
+        if p["due"]:
+            continue
+        status = status_by_id.get(p["id"])
+        live = live_ids_by_pos.get(p["id"], ())
+
+        if status == "duplicate_stops":
+            # Two live stops sell one position twice (re-review NEW-3).
+            # Keep the recorded id when it is among the live set, else
+            # the first live one; neutralize the rest.
+            keep = p["stop_order_id"] if p["stop_order_id"] in live else live[0]
+            extras_gone = True
+            for extra in (s for s in live if s != keep):
+                outcome = _neutralize_stop(broker, extra, poll_attempts=3,
+                                           poll_interval_s=1.0)
+                if outcome == "live":
+                    extras_gone = False
+                    report.errors.append(
+                        f"duplicate stop {extra} on {p['id']} could not "
+                        "be confirmed cancelled - entries stay blocked")
+            if extras_gone:
+                conn.execute(
+                    "UPDATE positions SET stop_order_id = ? WHERE id = ?",
+                    (keep, p["id"]))
+                p["stop_order_id"] = keep
+                status_by_id[p["id"]] = status = "ok"
+
+        if status == "ok":
+            # Backfill/repair the recorded id from the broker's truth
+            # (re-review NEW-4: an orphan live stop with a NULL local id
+            # means the exit path later market-sells into it).
+            if live and p["stop_order_id"] != live[0]:
+                conn.execute(
+                    "UPDATE positions SET stop_order_id = ? WHERE id = ?",
+                    (live[0], p["id"]))
+                p["stop_order_id"] = live[0]
+            # Re-arm when the resting stop under-covers what is held
+            # (re-review B4 residual A: a partial that grew after arming
+            # leaves the grown sleeve unprotected all session).
+            held = Decimal(str(p["qty"])) if p["qty"] else None
+            resting = stop_qty_by_id.get(p["stop_order_id"])
+            if (held and resting is not None and p.get("stop_price")
+                    and Decimal(str(resting)) < held):
+                res = replace_stop(p, Decimal(str(p["stop_price"])),
+                                   broker, conn)
+                if res.status == "replaced" and res.new_stop_order_id:
+                    conn.execute(
+                        "UPDATE positions SET stop_order_id = ? WHERE id = ?",
+                        (res.new_stop_order_id, p["id"]))
+                else:
+                    status_by_id[p["id"]] = "unprotected"
+
+    conn.commit()
+    unprotected = [
+        p for p in open_rows
+        if status_by_id.get(p["id"]) == "unprotected"
+        and p.get("stop_price") is not None and p.get("qty")
+        and not p["due"]]
+    if unprotected:
+        results = reopen_stops(unprotected, broker, conn)
+        for pos, res in zip(unprotected, results):
+            if res.status not in ("rejected", "submit_unconfirmed") \
+                    and res.broker_order_id:
+                conn.execute(
+                    "UPDATE positions SET stop_order_id = ? WHERE id = ?",
+                    (res.broker_order_id, pos["id"]))
+                status_by_id[pos["id"]] = "ok"
+        conn.commit()
+
     all_protected = all(
         status_by_id.get(p["id"]) == "ok" for p in open_rows
         if not p["due"])
-    return all_protected, open_rows
+    return (all_protected
+            and _broker_positions_agree(broker, conn, report)), open_rows
+
+
+def _broker_positions_agree(broker: Broker, conn,
+                            report: "CycleReport") -> bool:
+    """Positions-level reconciliation (re-review NEW-1 / stress
+    escalation 4): a ticker held at the broker with no local open
+    position is invisible to every kill switch, limit and exit. Detect
+    the divergence and block entries until a human resolves it. Fails
+    open-eyed: a broker error here reads as 'cannot confirm agreement'."""
+    try:
+        held = broker.get_positions()
+    except BrokerError as exc:
+        report.errors.append(f"get_positions: {exc}")
+        return False
+    local = {r[0] for r in conn.execute(
+        "SELECT ticker FROM positions WHERE status = 'open'")}
+    unaccounted = [p.get("symbol") for p in held
+                   if p.get("symbol") and p.get("symbol") not in local]
+    for sym in unaccounted:
+        report.errors.append(
+            f"broker holds {sym} with no local open position - "
+            "unaccounted exposure, entries blocked pending review")
+    return not unaccounted
+
+
+def _adopt_orphan_entries(conn, report: "CycleReport", now: datetime) -> None:
+    """A filled buy whose cycle died before the positions INSERT is a
+    real holding with no stop, no exit date and no exposure accounting
+    (re-review NEW-1b / stress escalation 3). Adopt it: create the
+    position row from the decision so every protective duty sees it."""
+    rows = conn.execute(
+        """SELECT o.id, o.decision_id, d.planned_exit_date
+           FROM orders o
+           JOIN fills f ON f.order_id = o.id
+           JOIN risk_decisions d ON d.candidate_id = o.decision_id
+                AND d.action = 'trade'
+           WHERE o.side = 'buy'
+             AND NOT EXISTS (
+                 SELECT 1 FROM positions p
+                 WHERE json_valid(p.entry_order_ids)
+                   AND EXISTS (SELECT 1 FROM json_each(p.entry_order_ids)
+                               WHERE json_each.value = o.id))""").fetchall()
+    for order_id, decision_id, planned_exit in rows:
+        ticker_row = conn.execute(
+            "SELECT ticker FROM candidates WHERE id = ?",
+            (decision_id,)).fetchone()
+        if ticker_row is None or not planned_exit:
+            report.errors.append(
+                f"filled orphan entry {order_id} cannot be adopted "
+                "(missing candidate/exit date) - needs review")
+            continue
+        conn.execute(
+            "INSERT INTO positions VALUES (?,?,?,?,?,?,?)",
+            (str(uuid.uuid4()), ticker_row[0], json.dumps([order_id]),
+             None, now.isoformat(), planned_exit, "open"))
+        report.errors.append(
+            f"adopted orphan filled entry {order_id} ({ticker_row[0]}) - "
+            "stop arms on this cycle's confirmation pass")
+    conn.commit()
+
+
+def _void_dead_entries(conn, report: "CycleReport") -> None:
+    """An entry that went terminal with ZERO fill can never become a
+    holding: void the position instead of re-arming a naked sell stop
+    for shares never bought, forever (re-review NEW-2 / stress
+    escalation 2)."""
+    rows = conn.execute(
+        """SELECT p.id, p.ticker, o.status FROM positions p
+           JOIN orders o ON o.id = json_extract(
+                CASE WHEN json_valid(p.entry_order_ids)
+                     THEN p.entry_order_ids ELSE '[]' END, '$[0]')
+           WHERE p.status = 'open'
+             AND o.status IN ('canceled', 'expired', 'rejected')
+             AND NOT EXISTS (SELECT 1 FROM fills f
+                             WHERE f.order_id = o.id)""").fetchall()
+    for pos_id, ticker, order_status in rows:
+        conn.execute("UPDATE positions SET status = 'void' WHERE id = ?",
+                     (pos_id,))
+        report.errors.append(
+            f"position {pos_id} ({ticker}) voided: entry order terminal "
+            f"({order_status}) with zero fill")
+    conn.commit()
 
 
 def _poll_entry_fill(broker: Broker, broker_order_id: str | None, *,
@@ -308,15 +459,29 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
     # daily equity mark from the confirmed broker read (dashboard's
     # performance-vs-SPY panel needs real marks; also feeds the
     # drawdown kill's high-water mark - risk review F7)
+    positions_notional = str(sum(
+        (p.notional_usd for p in portfolio.open_positions), Decimal("0")))
+    prior = conn.execute(
+        "SELECT equity_usd FROM equity_snapshots WHERE day=? AND source=?",
+        (now.date().isoformat(), "broker_read")).fetchone()
+    if prior is not None and Decimal(prior[0]) > portfolio.equity_usd:
+        # same-day replace would forget the intraday high the drawdown
+        # peak needs (re-review F7 note): preserve it under its own source
+        conn.execute(
+            """INSERT OR REPLACE INTO equity_snapshots
+               (day, taken_at, equity_usd, settled_cash_usd,
+                positions_notional, source)
+               VALUES (?,?,?,?,?,?)""",
+            (now.date().isoformat(), now.isoformat(), prior[0],
+             str(portfolio.settled_cash_usd), positions_notional,
+             "intraday_high"))
     conn.execute(
         """INSERT OR REPLACE INTO equity_snapshots
            (day, taken_at, equity_usd, settled_cash_usd,
             positions_notional, source)
            VALUES (?,?,?,?,?,?)""",
         (now.date().isoformat(), now.isoformat(), str(portfolio.equity_usd),
-         str(portfolio.settled_cash_usd),
-         str(sum((p.notional_usd for p in portfolio.open_positions),
-                 Decimal("0"))),
+         str(portfolio.settled_cash_usd), positions_notional,
          "broker_read"))
     conn.commit()
 
@@ -421,7 +586,16 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
 
     # ---- 5. research -> risk -> execution per candidate
     researched = proposed = placed = 0
+    entered_this_cycle: set = set()
     for c in fresh[:max_research]:
+        if c.ticker in entered_this_cycle:
+            # the open-ticker screen ran before the loop; a second
+            # candidate on the SAME ticker in one cycle is double
+            # exposure plus a guaranteed duplicate-stops deadlock
+            # (stress escalation 6)
+            report.drop_reasons.setdefault("researched", []).append(
+                f"{c.id}: ticker_already_entered_this_cycle")
+            continue
         if block_entries is not None:
             report.drop_reasons.setdefault("researched", []).append(
                 f"{c.id}: {block_entries}")
@@ -500,6 +674,15 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
             report.drop_reasons.setdefault("orders_placed", []).append(
                 f"{c.id}: entry_{entry.status}_unfilled")
             continue
+        if filled_qty > decision.qty:
+            # a broker-reported fill larger than the order is upstream
+            # garbage; sizing a stop from it would sell shares we never
+            # ordered (stress escalation 1). Protect the ordered qty and
+            # flag the discrepancy for review.
+            report.errors.append(
+                f"broker reports filled_qty {filled_qty} > ordered "
+                f"{decision.qty} on {c.id} - clamped, needs review")
+            filled_qty = decision.qty
         stop_broker_id = None
         if filled_qty > 0:
             stop = place_stop(decision_id=c.id, ticker=c.ticker,
@@ -519,6 +702,7 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
              decision.planned_exit_date.isoformat(), "open"))
         conn.commit()
         placed += 1
+        entered_this_cycle.add(c.ticker)
         # keep in-cycle exposure honest for the NEXT candidate
         portfolio = _with_position(portfolio, c, decision, cluster_key, now)
         if stop_broker_id is None:
@@ -528,6 +712,9 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
             report.drop_reasons.setdefault("orders_placed", []).append(
                 f"{c.id}: entry_open_but_stop_not_armed")
 
+    for c in fresh[max_research:]:
+        report.drop_reasons.setdefault("researched", []).append(
+            f"{c.id}: deferred_max_research_per_cycle")
     report.funnel["researched"] = researched
     report.funnel["proposed"] = proposed
     report.funnel["orders_placed"] = placed
@@ -552,6 +739,8 @@ def build_market_snapshot(broker: Broker, ticker: str,
     if not isinstance(quote, dict):
         return None
     ts = quote.get("t")
+    if not ts:
+        return None    # an undatable quote cannot pass the freshness gate
     if ts:
         try:
             quote_at = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
@@ -631,7 +820,11 @@ def _open_position_dicts(conn, now: datetime) -> list[dict]:
     today = now.date().isoformat()
     rows = conn.execute(
         """SELECT p.id, p.ticker, p.stop_order_id, p.planned_exit_date,
-                  o.decision_id, o.qty, d.stop_price, f.qty
+                  o.decision_id, o.qty, d.stop_price, f.qty,
+                  (SELECT COALESCE(SUM(CAST(sf.qty AS REAL)), 0)
+                   FROM fills sf JOIN orders so ON so.id = sf.order_id
+                   WHERE so.decision_id = o.decision_id
+                     AND so.side = 'sell')
            FROM positions p
            LEFT JOIN orders o ON o.id = json_extract(
                 CASE WHEN json_valid(p.entry_order_ids)
@@ -639,13 +832,23 @@ def _open_position_dicts(conn, now: datetime) -> list[dict]:
            LEFT JOIN risk_decisions d ON d.candidate_id = o.decision_id
            LEFT JOIN fills f ON f.order_id = o.id
            WHERE p.status = 'open'""").fetchall()
-    return [
-        # qty: FILLED qty when known, never the ordered qty (risk review
-        # B4 - stops and exits must cover what is actually held)
-        {"id": r[0], "ticker": r[1], "stop_order_id": r[2],
-         "decision_id": r[4], "qty": r[7] if r[7] is not None else r[5],
-         "stop_price": r[6], "due": r[3] <= today}
-        for r in rows]
+    out = []
+    for r in rows:
+        # qty: what is actually HELD - entry fills NET of sell fills
+        # (risk review B4 residual B: after a partial stop fire, selling
+        # the gross entry qty is an oversized order the cash account
+        # rejects forever). No fill row yet -> fall back to ordered qty
+        # only for stop/exit sizing of a possibly-filled entry.
+        if r[7] is not None:
+            held = Decimal(str(r[7])) - Decimal(str(r[8] or 0))
+            qty = str(held) if held > 0 else None
+        else:
+            qty = r[5]
+        out.append(
+            {"id": r[0], "ticker": r[1], "stop_order_id": r[2],
+             "decision_id": r[4], "qty": qty,
+             "stop_price": r[6], "due": r[3] <= today})
+    return out
 
 
 def _with_position(portfolio: PortfolioState, candidate, decision,

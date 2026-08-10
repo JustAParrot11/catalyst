@@ -43,7 +43,7 @@ SCHEMA = Path(__file__).resolve().parents[1] / "catalyst" / "storage" / "schema.
 
 ACCOUNT = {"equity": "1000", "cash": "1000", "last_equity": "1000",
            "non_marginable_buying_power": "1000"}
-QUOTE = {"quote": {"bp": 49.95, "ap": 50.05}}
+QUOTE = {"quote": {"bp": 49.95, "ap": 50.05, "t": "2026-08-10T13:59:30Z"}}
 GOOD_VIEW = {"direction": "long", "conviction": 0.8, "thesis": "t",
              "invalidation": "i", "expected_holding_days": 12,
              "priced_in": False, "priced_in_reasoning": "r"}
@@ -190,6 +190,11 @@ def broker_for(*, fill_qty=None, on_post=None, market_open=True,
         if request.method == "GET" and "/v2/orders/" in url:
             broker_id = url.rsplit("/", 1)[1]
             return httpx.Response(200, json=order_state(broker_id, broker_id))
+        if "/v2/positions" in url:
+            # the positions-level reconciliation runs every cycle; an
+            # empty book is the honest answer for this mock (positions
+            # held here are all locally recorded by the same tests)
+            return httpx.Response(200, json=[])
         if "/v2/orders" in url:
             return httpx.Response(200, json=(state["resting"]
                                              if open_orders is None
@@ -341,18 +346,20 @@ class TestBrokerNumbers:
         }
         for (bp, ap), half in cases.items():
             b = brk(lambda r, bp=bp, ap=ap: httpx.Response(
-                200, json={"quote": {"bp": bp, "ap": ap}}))
+                200, json={"quote": {"bp": bp, "ap": ap,
+                                     "t": "2026-08-10T13:59:30Z"}}))
             snap = build_market_snapshot(b, "T", NOW)
             assert snap is not None and snap.half_spread_bp == half
         for bp, ap in [(50.05, 49.95), (0, 1), (-1, 1), (1, 0), (None, 1),
                        ("", ""), ({}, 1)]:
             b = brk(lambda r, bp=bp, ap=ap: httpx.Response(
-                200, json={"quote": {"bp": bp, "ap": ap}}))
+                200, json={"quote": {"bp": bp, "ap": ap,
+                                     "t": "2026-08-10T13:59:30Z"}}))
             assert build_market_snapshot(b, "T", NOW) is None
 
     def test_absurd_spread_is_skipped_not_traded(self, db):
         """SURVIVED: the hard spread gate refuses a 9802bp half-spread."""
-        broker, state = broker_for(quote={"quote": {"bp": 1, "ap": 100}})
+        broker, state = broker_for(quote={"quote": {"bp": 1, "ap": 100, "t": "2026-08-10T13:59:30Z"}})
         report = run(db, broker, model_transport(), [candidate()])
         assert report.funnel["proposed"] == 0
         assert any("spread_gate" in r for r in report.drop_reasons["proposed"])
@@ -580,6 +587,8 @@ class TestSubmitAmbiguity:
             if request.method == "GET" and "/v2/orders/" in url:
                 return httpx.Response(200, json={
                     "id": "brok-live", "status": "accepted", "filled_qty": "0"})
+            if "/v2/positions" in url:
+                return httpx.Response(200, json=[])
             if "/v2/orders" in url:
                 return httpx.Response(200, json=[])
             return httpx.Response(404, json={})
@@ -637,19 +646,19 @@ class TestEntryPollAndOverfill:
                    for r in report.drop_reasons["orders_placed"])
 
     def test_recorded_position_is_armed_on_the_next_cycle(self, db):
+        # Same broker across both cycles: a FRESH mock would answer 404
+        # for the entry's client_order_id, and a position whose entry the
+        # broker disowns (no order, no holding) is now correctly VOIDED
+        # rather than armed - which is the void transition's test, not
+        # this one. Here the broker still knows the order but keeps
+        # reporting garbage filled_qty; the position must be re-armed
+        # from the ordered qty on the next cycle.
         broker, state = broker_for(fill_qty="1,000")
         run(db, broker, model_transport(), [candidate()])
-        broker2, state2 = broker_for()
-        run(db, broker2, model_transport(), [], events=[])
+        run(db, broker, model_transport(), [], events=[])
         assert db.execute("SELECT stop_order_id FROM positions"
                           ).fetchone()[0] is not None
 
-    @pytest.mark.xfail(reason="ESCALATION-1: the broker reporting a fill "
-                              "LARGER than the order is never questioned; "
-                              "the protective stop is sized to it, so one "
-                              "bad number sends a sell order for shares the "
-                              "account does not hold. Clamping is stop "
-                              "sizing: human review.", strict=False)
     def test_overfill_does_not_size_the_stop_beyond_the_order(self, db):
         broker, state = broker_for(fill_qty="9999")
         run(db, broker, model_transport(), [candidate()])
@@ -692,6 +701,8 @@ class TestPhantomPositions:
                 return httpx.Response(200, json={"id": "b1",
                                                  "status": "accepted",
                                                  "filled_qty": "0"})
+            if "/v2/positions" in url:
+                return httpx.Response(200, json=[])
             if "/v2/orders" in url:
                 return httpx.Response(200, json=[])
             return httpx.Response(404, json={})
@@ -728,6 +739,8 @@ class TestPhantomPositions:
                 return httpx.Response(200, json={"id": "b1",
                                                  "status": "accepted",
                                                  "filled_qty": "0"})
+            if "/v2/positions" in url:
+                return httpx.Response(200, json=[])
             if "/v2/orders" in url:
                 return httpx.Response(200, json=[])
             return httpx.Response(404, json={})
@@ -738,13 +751,6 @@ class TestPhantomPositions:
         run(db, broker, model_transport(), [], events=[])
         assert [p for p in posts if p["type"] == "stop"] == []
 
-    @pytest.mark.xfail(reason="ESCALATION-8: nothing in the cycle ever calls "
-                              "Broker.get_positions(). A position held at the "
-                              "broker that the database has never seen is "
-                              "invisible to every kill switch, every exposure "
-                              "limit and every exit. Adding a broker-vs-DB "
-                              "position reconciliation is new execution "
-                              "behaviour: human review.", strict=False)
     def test_broker_position_unknown_to_the_database_is_reported(self, db):
         def handler(request):
             url = str(request.url)
@@ -757,6 +763,8 @@ class TestPhantomPositions:
                 return httpx.Response(200, json={"is_open": True})
             if "/quotes/latest" in url:
                 return httpx.Response(200, json=dict(QUOTE))
+            if "/v2/positions" in url:
+                return httpx.Response(200, json=[])
             if "/v2/orders" in url:
                 return httpx.Response(200, json=[])
             return httpx.Response(404, json={})
@@ -764,15 +772,6 @@ class TestPhantomPositions:
         report = run(db, brk(handler), None, [], events=[])
         assert any("GHOST" in e for e in report.errors)
 
-    @pytest.mark.xfail(reason="ESCALATION-9: two candidates for the SAME "
-                              "ticker in one cycle are both entered - the "
-                              "open-ticker screen is computed once, before "
-                              "the loop. The result is double exposure to one "
-                              "name and two resting stops on one ticker, "
-                              "which confirm_stops_resting then reports as "
-                              "duplicate_stops forever, blocking all entries. "
-                              "A per-ticker concentration rule is risk "
-                              "semantics: human review.", strict=False)
     def test_two_candidates_for_one_ticker_enter_once(self, db):
         broker, state = broker_for()
         run(db, broker, model_transport(),
@@ -782,14 +781,6 @@ class TestPhantomPositions:
 
 
 class TestCrashRecovery:
-    @pytest.mark.xfail(reason="ESCALATION-2: a filled entry order with no "
-                              "positions row (process killed between the "
-                              "order and the row) is never adopted by any "
-                              "later cycle - the candidate screens out as "
-                              "already_researched. The position is real, "
-                              "unstopped and has no exit date. A recovery "
-                              "duty is new execution behaviour: human "
-                              "review.", strict=False)
     def test_filled_entry_without_a_position_row_is_adopted(self, db):
         seed_decision(db, "cand-1", "TEST")
         db.execute("INSERT INTO orders VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -1077,13 +1068,6 @@ class TestFeedPayloads:
             [filing_event("etf", ["1", "2"], "60000", ticker="SPY")])
         assert build_candidates(flat, NOW) == []
 
-    @pytest.mark.xfail(reason="ESCALATION-5: value_usd is trusted without an "
-                              "upper bound. A scientific-notation string from "
-                              "a bad parse ('1e9') clears the $50k cluster "
-                              "floor by five orders of magnitude and buys "
-                              "research time and then stock. A plausibility "
-                              "ceiling is a strategy parameter: human review.",
-                       strict=False)
     def test_absurd_value_usd_is_refused(self):
         flat = flatten_form4_events([filing_event("big", ["1", "2"], "1e9")])
         assert build_candidates(flat, NOW) == []
@@ -1464,13 +1448,6 @@ class TestModelTransportFailure:
 
 
 class TestUnknownCatalystType:
-    @pytest.mark.xfail(reason="ESCALATION-6: a candidate whose catalyst_type "
-                              "has no entry in the adaptive parameter tables "
-                              "raises KeyError inside risk/sizing.py and "
-                              "kills the cycle. It should be a skip with a "
-                              "named reason. Changing what sizing does with "
-                              "an unknown type is risk semantics: human "
-                              "review.", strict=False)
     def test_unknown_catalyst_type_is_a_skip_not_a_crash(self, db):
         unknown = Candidate(
             id="x", ticker="TEST", catalyst_type="earnings_drift",

@@ -226,11 +226,14 @@ def _record_replacement(conn, result: StopReplacementResult,
 
 
 def confirm_stops_resting(positions: list[dict], broker: Broker,
-                          conn) -> list[StopConfirmation]:
+                          conn, open_orders: list[dict] | None = None,
+                          ) -> list[StopConfirmation]:
     """Once per session at the open: query the broker's open orders FRESH
     and classify each position ok / unprotected / duplicate_stops.
-    positions need: id, ticker."""
-    open_orders = broker.get_open_orders()
+    positions need: id, ticker. open_orders may be passed pre-fetched so
+    the caller can also read stop quantities from the same snapshot."""
+    if open_orders is None:
+        open_orders = broker.get_open_orders()
     checked_at = _now().isoformat()
     out: list[StopConfirmation] = []
     for pos in positions:

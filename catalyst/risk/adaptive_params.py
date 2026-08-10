@@ -315,9 +315,12 @@ def apply(
     # Re-verify sample size and significance independently of
     # propose_adjustment (risk review F1): a hand-built proposal with
     # applicable=True must not move a parameter on n=1.
-    n = len(proposal.evidence.trade_ids)
+    # UNIQUE ids: one scored refusal repeated 30 times is one outcome,
+    # not thirty (re-review F1 residual)
+    unique_ids = set(proposal.evidence.trade_ids)
+    n = len(unique_ids)
     if n < MIN_SAMPLE_SIZE[base]:
-        return refuse(f"insufficient_sample: {n} of {MIN_SAMPLE_SIZE[base]} required")
+        return refuse(f"insufficient_sample: {n} unique of {MIN_SAMPLE_SIZE[base]} required")
     if proposal.evidence.significance < SIGNIFICANCE_FLOOR:
         return refuse(f"insufficient_significance: "
                       f"{proposal.evidence.significance} < {SIGNIFICANCE_FLOOR}")
@@ -325,7 +328,7 @@ def apply(
     # Closed, scored outcomes ONLY - enforced, not assumed (risk review
     # F2): every evidence id must be a scored refusal's candidate or a
     # closed trade's position. Unknown ids refuse the whole proposal.
-    for tid in proposal.evidence.trade_ids:
+    for tid in sorted(unique_ids):
         known = conn.execute(
             """SELECT 1 FROM refusals
                WHERE candidate_id = ? AND scored_at IS NOT NULL

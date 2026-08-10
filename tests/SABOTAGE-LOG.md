@@ -591,3 +591,9 @@ change kept from this session is the strengthened assertion block in
   test_reverted_adjustments_window_still_blocks_reuse. Restored, green.
 - cycle.py kill-trip protective duties removed (B2 fix undone): caught
   by test_loss_trip_still_runs_exits_but_blocks_entries. Restored, green.
+- Re-review batch (NEW-1..6, B4 residuals, F1 dedupe, escalations
+  1/2/4/5/6/8/9): six of the stress-tester's xfail escalation tests
+  flipped to PASSING purely by applying the fixes (the tests were
+  written first and carried the desired behavior) - the equivalent of
+  a failing-test-first cycle for each. Markers removed so they are
+  permanent regressions.

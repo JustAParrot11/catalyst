@@ -57,7 +57,7 @@ def stub_prompts(monkeypatch):
 
 ACCOUNT = {"equity": "1000", "cash": "1000", "last_equity": "1000",
            "non_marginable_buying_power": "1000"}
-QUOTE = {"quote": {"bp": 49.95, "ap": 50.05}}   # mid 50, half-spread 10bp
+QUOTE = {"quote": {"bp": 49.95, "ap": 50.05, "t": "2026-08-10T13:59:30Z"}}   # mid 50, half-spread 10bp
 
 
 def broker_for(state=None):
@@ -95,6 +95,8 @@ def broker_for(state=None):
                 "filled_qty": state["qty_by_id"].get(broker_id, "1"),
                 "filled_avg_price": "50.00",
                 "filled_at": "2026-08-10T13:31:00Z"})
+        if "/v2/positions" in url:
+            return httpx.Response(200, json=[])
         if "/v2/orders" in url:
             return httpx.Response(200, json=[])
         return httpx.Response(404, json={"message": "unexpected"})
@@ -334,6 +336,8 @@ class TestKillTripProtection:
                                                  "filled_qty": "2",
                                                  "filled_avg_price": "50.00",
                                                  "filled_at": "2026-08-01T14:00:00Z"})
+            if "/v2/positions" in url:
+                return httpx.Response(200, json=[])
             if "/v2/orders" in url:
                 return httpx.Response(200, json=[])
             return httpx.Response(404, json={})
@@ -409,6 +413,8 @@ class TestStopRejection:
                     "id": broker_id, "status": "filled",
                     "filled_qty": state["qty_by_id"].get(broker_id, "1"),
                     "filled_avg_price": "50.00"})
+            if "/v2/positions" in url:
+                return httpx.Response(200, json=[])
             if "/v2/orders" in url:
                 return httpx.Response(200, json=[])
             return httpx.Response(404, json={})

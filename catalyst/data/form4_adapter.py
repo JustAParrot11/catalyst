@@ -23,6 +23,12 @@ Parity rules replicated deliberately, not improved:
 
 from catalyst.data import RawEvent
 
+# One open-market purchase above this is treated as upstream garbage.
+# The largest real insider buys on record are low tens of millions; the
+# backtest's CSV never contained a row within two orders of magnitude of
+# this ceiling, so it cannot introduce live/backtest divergence.
+MAX_PLAUSIBLE_ROW_VALUE_USD = 100_000_000.0
+
 
 def flatten_form4_events(feed_events: list[RawEvent]) -> list[RawEvent]:
     """One filing-level RawEvent -> N purchase-row RawEvents in the
@@ -55,6 +61,17 @@ def flatten_form4_events(feed_events: list[RawEvent]) -> list[RawEvent]:
                 continue
             if not tx.get("shares") or not tx.get("price_per_share"):
                 continue   # the CSV dropped rows missing either
+            try:
+                row_value = float(tx.get("value_usd") or 0)
+            except (TypeError, ValueError):
+                continue
+            if row_value > MAX_PLAUSIBLE_ROW_VALUE_USD:
+                # a single insider purchase claiming >$100M is a parse
+                # error or a poisoned filing, and either way it must not
+                # clear the cluster's dollar floor by orders of magnitude
+                # (stress escalation 8). The raw filing stays verbatim in
+                # raw_events; only the flattened row is withheld.
+                continue
             for i, (owner_cik, owner) in enumerate(zip(owner_ciks,
                                                        owners or [{}])):
                 flat.append(RawEvent(
