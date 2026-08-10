@@ -310,3 +310,72 @@ class TestEmptyAssistantContentIsNeverSentBack:
         assert result.parsed_view is None
         assert "at least 1 item required" in (result.skipped_reason or ""), (
             "the upstream explanation must survive into the skip reason")
+
+
+class TestExtractionCanBeSkipped:
+    """Token optimisation, measured before it was built.
+
+    The extraction turn re-sends the ENTIRE exploration context - 24k
+    tokens of web-search results, on the real 2026-08-10 call - purely
+    to collect a few hundred tokens of JSON. That second full-price read
+    is 5.6c of a 14.7c candidate, 38% of the bill.
+
+    (Prompt caching was measured FIRST and rejected: the expensive
+    tokens are the search results, which do not exist when turn one is
+    sent, so there is nothing to write to cache at that point. Caching a
+    two-turn shape saves nothing and costs a 1.25x write.)
+
+    So the schema tool is now offered DURING exploration. If the model
+    submits its view there, the extraction turn never happens. If it
+    does not, the forced extraction runs exactly as before - the saving
+    is opportunistic, never at the cost of getting a view.
+    """
+
+    def submitted_during_exploration(self):
+        return {"content": [
+            {"type": "text", "text": "searched, concluded"},
+            {"type": "tool_use", "name": "submit_research_view",
+             "input": dict(GOOD_VIEW)},
+        ], "stop_reason": "tool_use", "usage": dict(USAGE)}
+
+    def test_one_turn_when_the_model_submits_during_exploration(self, db):
+        transport, log = transport_script([self.submitted_during_exploration()])
+        result = investigate(candidate(), ctx(db), transport)
+        assert result.parsed_view is not None
+        assert result.parsed_view.direction == "long"
+        assert result.skipped_reason is None
+        assert len(result.api_turns) == 1, (
+            "the whole point: no second full-context turn")
+        assert db.execute("SELECT COUNT(*) FROM research_views"
+                          ).fetchone()[0] == 1
+
+    def test_the_schema_tool_is_offered_during_exploration(self, db):
+        transport, log = transport_script([self.submitted_during_exploration()])
+        investigate(candidate(), ctx(db), transport)
+        names = [t.get("name") for t in log[0]["tools"]]
+        assert "submit_research_view" in names
+        assert log[0]["tool_choice"] == {"type": "auto"}, (
+            "exploration must stay unforced - forcing it here would stop "
+            "the model searching at all")
+
+    def test_it_still_falls_back_to_forced_extraction(self, db):
+        """No view during exploration - behave exactly as before."""
+        transport, log = transport_script([end_turn(), extraction_response()])
+        result = investigate(candidate(), ctx(db), transport)
+        assert result.parsed_view is not None
+        assert len(result.api_turns) == 2
+        assert log[1]["tool_choice"] == {"type": "tool",
+                                         "name": "submit_research_view"}
+
+    def test_an_invalid_early_submission_does_not_skip_the_fallback(self, db):
+        """A malformed early view must not be accepted NOR end the
+        investigation - it falls through to the forced turn."""
+        bad = dict(GOOD_VIEW)
+        del bad["invalidation"]
+        early_bad = {"content": [
+            {"type": "tool_use", "name": "submit_research_view", "input": bad},
+        ], "stop_reason": "tool_use", "usage": dict(USAGE)}
+        transport, _ = transport_script([early_bad, extraction_response()])
+        result = investigate(candidate(), ctx(db), transport)
+        assert result.parsed_view is not None
+        assert len(result.api_turns) == 2

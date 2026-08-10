@@ -107,7 +107,16 @@ def investigate(
     conn = cost_context.conn
     started = time.monotonic()
     prompt = prompts.render_research_prompt(candidate, graph_context=graph_context)
-    tools = prompts.exploration_tools()
+    # The schema tool is offered DURING exploration as well as in the
+    # forced turn. If the model submits its view while it still has the
+    # search results in hand, the extraction turn - which re-sends the
+    # ENTIRE context, 24k tokens on the measured live call, to collect a
+    # few hundred tokens of JSON - never happens. That second full-price
+    # read is 38% of a candidate's cost. The saving is opportunistic:
+    # tool_choice stays `auto` here, so the model is never pushed into
+    # concluding before it has searched, and the forced turn still runs
+    # whenever no valid view arrives early.
+    tools = list(prompts.exploration_tools()) + [SUBMIT_RESEARCH_VIEW_TOOL]
     tools_offered = tuple(t.get("name", t.get("type", "?")) for t in tools)
 
     turns: list[APITurn] = []
@@ -218,6 +227,20 @@ def investigate(
             return finish(
                 None, f"usage_unpriced_governor_blocked: {unpriced[0]}")
         exploration_rounds += 1
+
+    # Did the model already answer? Only a FULLY VALID view short-circuits
+    # - a malformed early submission falls through to the forced turn
+    # rather than becoming a skipped candidate.
+    try:
+        early = _extract_tool_input(turn.raw_response)
+    except AmbiguousExtraction:
+        early = None
+    if early is not None:
+        try:
+            # finish() persists the view; there is no separate writer.
+            return finish(make_view_from_tool_input(candidate.id, early), None)
+        except (KeyError, TypeError, ValueError):
+            pass          # fall through to the forced extraction turn
 
     echo = _assistant_echo(turn)
     if echo is not None:
