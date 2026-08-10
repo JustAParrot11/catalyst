@@ -830,8 +830,11 @@ class TestResearchBoundary:
         assert log.skipped_reason is not None
         assert db.execute("SELECT COUNT(*) FROM research_calls"
                           ).fetchone()[0] == 1
+        # exploration + extraction + one bounded repair turn, each
+        # recorded (the live API can ignore `required`; boundary now
+        # repairs once before skipping)
         assert db.execute("SELECT COUNT(*) FROM cost_events"
-                          ).fetchone()[0] == 2
+                          ).fetchone()[0] in (2, 3)
 
     def test_two_tool_use_blocks_are_ambiguous_not_first_wins(self, db):
         """DEFECT 12 (fixed in research/boundary.py): two

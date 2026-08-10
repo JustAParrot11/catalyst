@@ -154,21 +154,43 @@ class TestInvestigate:
         assert result.parsed_view is not None
 
     def test_no_tool_call_in_extraction(self, db):
-        transport, _ = transport_script([end_turn(), end_turn()])
+        # the live API can ignore `required` on forced tool calls, so a
+        # bad extraction gets ONE bounded repair turn before skipping
+        transport, _ = transport_script([end_turn(), end_turn(), end_turn()])
         result = investigate(candidate(), ctx(db), transport)
         assert result.parsed_view is None
         assert result.skipped_reason == "no_tool_call_in_extraction_turn"
+        assert len(result.api_turns) == 3     # exploration + 2 attempts
 
     def test_invalid_view_is_skip_not_default(self, db):
         bad = dict(GOOD_VIEW)
         del bad["invalidation"]
         transport, _ = transport_script([end_turn(),
+                                         extraction_response(bad),
                                          extraction_response(bad)])
         result = investigate(candidate(), ctx(db), transport)
         assert result.parsed_view is None
         assert result.skipped_reason.startswith("invalid_view")
         assert db.execute("SELECT COUNT(*) FROM research_views"
                           ).fetchone()[0] == 0
+
+    def test_repair_turn_recovers_an_incomplete_view(self, db):
+        """Observed live 2026-08-10: forced tool_choice omitted a
+        required field; the single repair turn must recover it."""
+        bad = dict(GOOD_VIEW)
+        del bad["invalidation"]
+        transport, log = transport_script([end_turn(),
+                                           extraction_response(bad),
+                                           extraction_response()])
+        result = investigate(candidate(), ctx(db), transport)
+        assert result.parsed_view is not None
+        assert result.skipped_reason is None
+        # the repair request told the model what was wrong
+        repair_msg = log[2]["messages"][-1]["content"]
+        assert "invalidation" in repair_msg
+        assert len(result.api_turns) == 3
+        assert db.execute("SELECT COUNT(*) FROM research_views"
+                          ).fetchone()[0] == 1   # the repaired view landed
 
     def test_usage_recorded_even_when_view_invalid(self, db):
         # spend happened; the ledger must say so regardless of outcome

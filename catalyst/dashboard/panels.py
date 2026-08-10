@@ -268,6 +268,32 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
         "multiplies a partial month into a year (ARCHITECTURE section 7.4)."
     ))
 
+    # cost-audit F2: the nightly bill check going dark must be as loud as
+    # the check failing. Alarms when the admin key is configured but the
+    # most recent SUCCESSFUL reconciliation is missing or > 2 days behind
+    # yesterday, and prints the raw error of any failed check beside it.
+    check_is_stale = c.admin_key_present and (
+        c.reconcile_gap_days is None or c.reconcile_gap_days > 2)
+    if check_is_stale or c.check_failed_q.rows:
+        last = (f"most recent successful check covered "
+                f"{esc(c.last_reconciled_ok)}" if c.last_reconciled_ok
+                else "no day has EVER been successfully reconciled")
+        out.append(alarm(
+            f'<b id="{p}-recon-stale">The nightly bill check is not '
+            f"current.</b> An admin key is "
+            f"{'configured' if c.admin_key_present else 'NOT configured'}; "
+            f"{last}. Until it runs, every figure above is the local "
+            "estimate with no cross-check against the real bill."
+        ))
+        for i, r in enumerate(c.check_failed_q.rows):
+            out.append(
+                f'<div id="{p}-recon-failed-{i}">'
+                f"<p>Bill check for {esc(r['target_date'])} FAILED; raw "
+                f"error below.</p>"
+                + details(f"{p}-recon-failed-raw-{i}", "raw failure",
+                          pre(json_pretty(r["api_raw_response"])))
+                + "</div>")
+
     if c.scheduled_samples == 0:
         upstream = None
         if c.reconciliation_q.rows:

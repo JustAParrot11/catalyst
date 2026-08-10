@@ -88,6 +88,18 @@ FIELDS: tuple[Field, ...] = (
         ),
     ),
     Field(
+        name="anthropic_admin_key",
+        label="Anthropic ADMIN key (optional, recommended)",
+        explanation=(
+            "A second Anthropic key that starts sk-ant-admin. It lets the "
+            "bot check its own spending records against the real Anthropic "
+            "bill every night, and pause spending if they disagree. It is "
+            "only ever used to READ your bill - never to change any limit. "
+            "Leave it blank to skip the nightly check. Get it from the "
+            "Anthropic console under Organization, then API keys."
+        ),
+    ),
+    Field(
         name="account_mode",
         label="Which account to trade",
         explanation=(
@@ -116,7 +128,10 @@ FIELDS: tuple[Field, ...] = (
 )
 
 _SETTING_FIELDS = {"monthly_budget_usd", "account_mode"}
-_SECRET_FIELD_NAMES = tuple(f.name for f in FIELDS if f.name not in _SETTING_FIELDS)
+_OPTIONAL_FIELDS = {"anthropic_admin_key"}   # blank = feature off, never a refusal
+_SECRET_FIELD_NAMES = tuple(f.name for f in FIELDS
+                            if f.name not in _SETTING_FIELDS
+                            and f.name not in _OPTIONAL_FIELDS)
 
 
 @dataclass
@@ -287,7 +302,7 @@ def render_setup_page(prefix: str = "") -> str:
     ))
     blocks.append(block(
         "Research (Anthropic)",
-        ["anthropic_key"],
+        ["anthropic_key", "anthropic_admin_key"],
         '<p><button type="button" onclick="testAnthropic()">Test this connection</button></p>'
         '<div id="anthropic_result" class="result"></div>',
     ))
@@ -362,6 +377,7 @@ class SetupApp:
         on_saved: Callable[[], None] | None = None,
         alpaca_tester: Callable[..., tuple[bool, str]] | None = None,
         anthropic_tester: Callable[..., tuple[bool, str]] | None = None,
+        admin_tester: Callable[..., tuple[bool, str]] | None = None,
         require_token: bool = True,
     ) -> None:
         self.credentials_path = credentials_path
@@ -369,6 +385,7 @@ class SetupApp:
         self.on_saved = on_saved
         self.alpaca_tester = alpaca_tester or creds.test_alpaca
         self.anthropic_tester = anthropic_tester or creds.test_anthropic
+        self.admin_tester = admin_tester or creds.test_admin_key
         self.require_token = require_token
 
     # -- helpers ---------------------------------------------------------
@@ -559,12 +576,25 @@ class SetupApp:
                             "either the practice account or the live one."),
             }, cookie)
 
+        admin_raw = (data.get("anthropic_admin_key") or "").strip()
+        if admin_raw:
+            ok, message = self.admin_tester(admin_raw)
+            if not ok:
+                return _json(200, {
+                    "ok": False,
+                    "message": ("Nothing was saved, because the Anthropic "
+                                "ADMIN key did not work. Leave it blank to "
+                                "skip the nightly bill check, or fix it. "
+                                + message),
+                }, cookie)
+
         try:
             creds.save_credentials(
                 alpaca_key,
                 alpaca_secret,
                 anthropic_key,
                 None,  # keep the access code this machine already has
+                anthropic_admin_key=admin_raw,
                 settings={"monthly_budget_usd": budget,
                           "account_mode": account_mode},
                 path=self.credentials_path,

@@ -285,6 +285,7 @@ def test_credentials_repr_shows_nothing(cred_file):
     assert loaded.status() == {
         "alpaca_key": True, "alpaca_secret": True,
         "anthropic_key": True, "dashboard_token": True,
+        "anthropic_admin_key": False,   # optional, unset in this fixture
     }
 
 

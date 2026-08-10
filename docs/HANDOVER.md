@@ -140,10 +140,27 @@ endpoint), ClinicalTrials.gov v2, Federal Register, openFDA
    0.08, stop width 0.10) are estimates. Only the 12-day hold is
    measured. They will move slowly, on evidence, and the dashboard shows
    how far each is from having enough.
-7. **The research prompt has never met a real model.** No Anthropic key
-   existed during the build (by design); the boundary is exercised
-   against documented API shapes. The first live research calls should
-   be watched on the dashboard's decision traces.
+7. **The research boundary is now live-verified** (2026-08-10, real
+   keys, manual spend, 32.6¢ total). A real discovered candidate (GBFH
+   insider cluster) went through `investigate()` end to end: web search
+   ran, the forced extraction returned a complete view, and the view was
+   sharp — it identified that "three insiders" were one CEO plus two
+   LLCs he manages buying identical amounts, and returned `no_trade` at
+   0.15 conviction. Three real API drifts surfaced and were each caught
+   by the record-first discipline before any spend was mispriced:
+   `output_tokens_details` (a breakdown of output_tokens, not extra
+   billing), `server_tool_use.web_fetch_requests` (informational, web
+   fetch is not metered), and the live API not enforcing `required` on
+   forced tool calls (fixed with one bounded repair turn). Actual cost
+   of a full researched candidate with 2 web searches: **18.7¢** —
+   above the 13¢ estimate below, still inside the cap at the expected
+   cadence.
+8. **The Cost API adapter is live-verified with a real admin key.**
+   Amounts confirmed as decimal strings in CENTS (priced 2026-08-04's
+   real token volumes against the reported amount — 100× apart from the
+   dollars reading). Reconciliation runs nightly for closed days only;
+   the adapter is read-only by construction and a test forbids any
+   mutating HTTP verb in the module.
 
 ## Next steps, in order
 
@@ -163,8 +180,13 @@ endpoint), ClinicalTrials.gov v2, Federal Register, openFDA
 ## Cost expectation
 
 Scheduled spend is governed to $5/month base (≈6%/year hurdle on
-$1,000). The boundary's pessimistic per-call estimates put a researched
-candidate at ≈13¢; three a day would breach the cap and be skipped, and
-the realistic cadence (a few researched candidates a week) lands well
-under it. The dashboard separates scheduled from manual spend and states
-the annual hurdle.
+$1,000). The first live researched candidate cost a **measured 18.7¢**
+(24k input tokens, 2.3k output, two web searches at 1¢ each) against
+the 13¢ pessimistic estimate — the difference is web search volume.
+At that measured cost, ~26 researched candidates/month fit the cap;
+the realistic cadence (a few a week) lands well under it. The governor's
+pre-call estimates were raised to the measured reality plus margin
+(15¢ exploration + 8¢ extraction — the original 8¢+5¢ "pessimistic"
+figures were 44% under what the first live call actually cost). The
+dashboard separates scheduled from manual spend and states the annual
+hurdle.

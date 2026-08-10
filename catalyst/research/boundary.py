@@ -51,11 +51,14 @@ MAX_EXPLORATION_TURNS = 2               # pause_turn continuations included
 
 # Pre-call estimates, deliberately pessimistic (the governor compares
 # against these BEFORE the call; an optimistic estimate is a hole in the
-# cap). Basis: sonnet pricing at $3/M in, $15/M out; a research prompt
-# runs ~3k tokens in / ~1.5k out => ~3.2c; up to 3 web searches at $10
-# per 1,000 adds 3c; extraction is prompt + forced tool json, no search.
-EXPLORATION_TURN_ESTIMATE_CENTS = Decimal("8")
-EXTRACTION_TURN_ESTIMATE_CENTS = Decimal("5")
+# cap). Basis: MEASURED, not assumed (cost-audit F4 - the original 8c/5c
+# "pessimistic" figures were 58% under reality). The first live research
+# call (2026-08-10, fixture in tests/test_cost_api_adapter.py) cost
+# 12.63c for exploration: 24k tokens in (web search results are large),
+# 2.3k out, 2 searches at 1c each. 15c covers that with a third search;
+# extraction measured ~1.3c, 8c leaves headroom for a repair turn.
+EXPLORATION_TURN_ESTIMATE_CENTS = Decimal("15")
+EXTRACTION_TURN_ESTIMATE_CENTS = Decimal("8")
 
 
 @dataclass(frozen=True)
@@ -202,31 +205,57 @@ def investigate(
     messages.append({"role": "user", "content": (
         "Submit your conclusion now via submit_research_view.")})
 
-    # ---- extraction: exactly one turn, tool_choice FORCED. The model
-    # cannot answer in prose; the only way out is the schema.
-    turn = run_turn({
-        "model": model, "max_tokens": 1024,
-        "messages": messages,
-        "tools": [SUBMIT_RESEARCH_VIEW_TOOL],
-        "tool_choice": {"type": "tool", "name": "submit_research_view"},
-    })
-    if turn is None:
-        return finish(None, transport_errors[0] if transport_errors
-                      else "budget_denied")
-    if unpriced:
-        return finish(None, f"usage_unpriced_governor_blocked: {unpriced[0]}")
+    # ---- extraction: tool_choice FORCED. The model cannot answer in
+    # prose; the only way out is the schema. Two live-API facts learned
+    # 2026-08-10 shape this block:
+    # - max_tokens 2048: a 512 ceiling truncated a real forced tool call
+    #   mid-JSON (stop_reason max_tokens) - the parser refused the
+    #   partial view, but the paid call was wasted;
+    # - forced tool_choice does NOT enforce the schema's `required` list:
+    #   real runs omitted a different required field each time. One
+    #   bounded REPAIR turn names the problem and re-forces the tool;
+    #   still-invalid output is then a named skip, never a default.
+    last_error: str | None = None
+    for attempt in ("first", "repair"):
+        turn = run_turn({
+            "model": model, "max_tokens": 2048,
+            "messages": messages,
+            "tools": [SUBMIT_RESEARCH_VIEW_TOOL],
+            "tool_choice": {"type": "tool", "name": "submit_research_view"},
+        })
+        if turn is None:
+            return finish(None, transport_errors[0] if transport_errors
+                          else "budget_denied")
+        if unpriced:
+            return finish(None,
+                          f"usage_unpriced_governor_blocked: {unpriced[0]}")
 
-    try:
-        tool_input = _extract_tool_input(turn.raw_response)
-    except AmbiguousExtraction as exc:
-        return finish(None, f"multiple_tool_calls_in_extraction_turn: {exc}")
-    if tool_input is None:
-        return finish(None, "no_tool_call_in_extraction_turn")
-    try:
-        view = make_view_from_tool_input(candidate.id, tool_input)
-    except (KeyError, TypeError, ValueError) as exc:
-        return finish(None, f"invalid_view: {type(exc).__name__}: {exc}")
-    return finish(view, None)
+        if turn.stop_reason == "max_tokens":
+            last_error = "extraction_truncated_max_tokens"
+        else:
+            try:
+                tool_input = _extract_tool_input(turn.raw_response)
+            except AmbiguousExtraction as exc:
+                return finish(
+                    None, f"multiple_tool_calls_in_extraction_turn: {exc}")
+            if tool_input is None:
+                last_error = "no_tool_call_in_extraction_turn"
+            else:
+                try:
+                    return finish(
+                        make_view_from_tool_input(candidate.id, tool_input),
+                        None)
+                except (KeyError, TypeError, ValueError) as exc:
+                    last_error = f"invalid_view: {type(exc).__name__}: {exc}"
+
+        if attempt == "first":
+            messages.append({"role": "assistant",
+                             "content": turn.raw_response.get("content", [])})
+            messages.append({"role": "user", "content": (
+                "Your submission was not accepted: "
+                f"{last_error}. Submit again via submit_research_view "
+                "with EVERY required field present and complete.")})
+    return finish(None, last_error or "extraction_failed")
 
 
 class AmbiguousExtraction(ValueError):
