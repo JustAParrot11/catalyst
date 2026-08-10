@@ -1536,9 +1536,122 @@ def trace_page(db: Db, candidate_id: str, p: str = "tr") -> str:
 # --------------------------------------------------------------------------
 
 
+def _refusal_switch(active: str, p: str) -> str:
+    def one(key, label, hint):
+        on = " active" if key == active else ""
+        return (f'<a class="switch-opt{on}" href="/refusals?view={key}"'
+                + (' aria-current="page"' if key == active else "")
+                + f"><b>{esc(label)}</b><span>{esc(hint)}</span></a>")
+    return (f'<div class="switch" id="{p}-switch" role="navigation" '
+            'aria-label="Level of detail">'
+            + one("simple", "Simple", "which reasons refuse, and were they right")
+            + one("full", "Full record", "every refusal, with prices")
+            + "</div>")
+
+
+def refusals_simple(db: Db, p: str = "refs") -> str:
+    """The refusal tracker as a map: reason -> candidate -> what happened.
+
+    The brief calls this the single most important feedback loop, and a
+    table makes you compute the loop in your head. Drawn, the question
+    "is a particular reason refusing things that then went up?" is
+    answered by following one strand instead of reading a column.
+    """
+    r = queries.refusals(db)
+    out = [_refusal_switch("simple", p)]
+    rows = [dict(x) for x in r.query.rows]
+    if not rows:
+        out.append(empty_block(f"{p}-empty", r.query,
+                               meaning="no candidate has been declined and "
+                                       "recorded, so there is nothing to score"))
+        return section(f"{p}-section", "Refusals", "".join(out))
+
+    if r.n_scored:
+        share = 100.0 * r.n_positive / r.n_scored
+        out.append(
+            f"<p id='{p}-headline'><span class='big'>{r.mean_outcome_return:+.4f}"
+            f"</span> mean outcome return across {r.n_scored} scored "
+            f"refusal(s); {r.n_positive} of {r.n_scored} ({share:.0f}%) moved "
+            "the way the system declined to go.</p>")
+    else:
+        out.append(
+            f"<p id='{p}-headline'>{len(rows)} refusal(s) recorded, "
+            "<b>none scored yet</b>. Until they are scored there is no answer "
+            "to \"is it too strict\" - only the question.</p>")
+
+    reason_hits, cand_hits, outcome_hits = {}, {}, {}
+    edges = []
+    for x in rows:
+        cid = f"c:{x['candidate_id']}"
+        cand_hits[cid] = (x["ticker"] or x["candidate_id"], 0)
+        reasons = jload(x["skip_reasons"], []) or ["no reason recorded"]
+        for reason in reasons:
+            rk = f"r:{reason}"
+            reason_hits[rk] = reason_hits.get(rk, 0) + 1
+            edges.append((rk, cid, 1,
+                          f"{x['ticker'] or x['candidate_id']} was refused on "
+                          f"{reason}"))
+        # The outcome column is the point of the whole tracker.
+        if not x["scored_at"]:
+            ok = "o:not scored yet"
+            detail = "refused, outcome not yet measured"
+        else:
+            ret = _dec_or_none(x["outcome_return"])
+            if ret is None:
+                ok, detail = "o:scored, no return recorded", "scored but no return"
+            elif ret > 0:
+                ok = "o:went UP after refusal"
+                detail = f"outcome return {ret:+}"
+            else:
+                ok = "o:did not go up"
+                detail = f"outcome return {ret:+}"
+        outcome_hits[ok] = outcome_hits.get(ok, 0) + 1
+        edges.append((cid, ok, 1, detail))
+
+    degree = {}
+    for a, b_, _, _ in edges:
+        degree[a] = degree.get(a, 0) + 1
+        degree[b_] = degree.get(b_, 0) + 1
+    layers = [
+        ("Why it refused", [(k, k[2:].replace("_", " "), v)
+                            for k, v in sorted(reason_hits.items(),
+                                               key=lambda kv: -kv[1])]),
+        ("Which candidate", [(k, label, degree.get(k, 0))
+                             for k, (label, _) in cand_hits.items()]),
+        ("What it then did", [(k, k[2:], v)
+                              for k, v in sorted(outcome_hits.items(),
+                                                 key=lambda kv: -kv[1])]),
+    ]
+    out.append('<div class="chart-wrap">' + charts.neural_map(
+        [(esc(lbl), [(esc(a), esc(b_), w) for a, b_, w in ns])
+         for lbl, ns in layers],
+        [(esc(a), esc(b_), w, esc(t)) for a, b_, w, t in edges],
+        chart_id=f"{p}-map") + "</div>")
+    out.append(prov(
+        "Left is the rule that declined it, middle is the candidate, right is "
+        "what the price did afterwards. A reason with most of its strands "
+        "landing on \"went UP after refusal\" is a reason refusing money - "
+        "which is the number that is allowed to move the conviction floor, "
+        "and only once the sample is big enough."))
+    if r.n_scored < MIN_TRADES_FOR_MEANING:
+        out.append(alarm(
+            f"<b id='{p}-small-sample'>Too small to act on.</b> {r.n_scored} "
+            f"scored refusal(s) against a {MIN_TRADES_FOR_MEANING} minimum. "
+            "Read the shape, not the verdict."))
+    return section(f"{p}-section", "Refusals", "".join(out))
+
+
+def _dec_or_none(value):
+    from decimal import Decimal, InvalidOperation
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
 def refusals_panel(db: Db, p: str = "ref") -> str:
     r = queries.refusals(db)
-    out = []
+    out = [_refusal_switch("full", p)]
     if r.n_scored:
         share = 100.0 * r.n_positive / r.n_scored
         out.append(
@@ -1861,3 +1974,67 @@ def value_reconciliation_panel(db: Db, p: str = "val") -> str:
         ))
     return section(f"{p}-section",
                    "Broker value vs net value", "".join(out))
+
+
+# --------------------------------------------------------------------------
+# The brain
+# --------------------------------------------------------------------------
+
+
+def brain_panel(db: Db, p: str = "brain") -> str:
+    """The whole system's wiring in one picture.
+
+    Not a metaphor and not an illustration: every node is a row and
+    every line is a foreign key or a recorded assertion. A picture of a
+    machine that draws links the machine does not have would be worse
+    than no picture, because it would be believed.
+    """
+    b = queries.brain(db)
+    out = []
+    if not b.edge_count:
+        out.append(note(
+            f'<b id="{p}-quiet">Nothing is wired up yet.</b> The bot has not '
+            "yet linked a source to a candidate, so there is nothing to draw. "
+            "This fills in on its own as discovery runs - the queries behind "
+            "it are printed below, so an empty brain and a broken query are "
+            "never the same picture."))
+        for i, q in enumerate(b.queries):
+            out.append(empty_block(f"{p}-q-{i}", q,
+                                   meaning="no rows behind this layer yet"))
+        return section(f"{p}-section", "The brain", "".join(out))
+
+    out.append(
+        f'<p id="{p}-headline"><span class="big">{b.edge_count}</span> recorded '
+        f"link(s) across {b.node_count} node(s). Left to right is the path a "
+        "filing takes to become a trade: what the bot read, what it built from "
+        "it, what it linked, what the model made of it, what the code decided, "
+        "and what actually happened.</p>")
+    out.append('<div class="chart-wrap">' + charts.neural_map(
+        [(esc(label), [(esc(nid), esc(nlabel), w) for nid, nlabel, w in nodes])
+         for label, nodes in b.layers],
+        [(esc(s), esc(d), w, esc(t)) for s, d, w, t in b.edges],
+        chart_id=f"{p}-map") + "</div>")
+    out.append(prov(
+        "Every line is one recorded relationship - a source event named by a "
+        "candidate, an assertion in the evidence graph, a view against a "
+        "candidate, a decision against a view. Nothing is added to make the "
+        "picture denser. Hover any line for the row behind it, and any node "
+        "for how many links it carries. Brightness is how heavily a link is "
+        "used; dot size is how connected a node is. Colour is depth only - "
+        "left is early, right is late - not category."))
+    out.append(caveat(
+        "This draws what the database HAS, which is not the same as what the "
+        "bot considered. A source that returned nothing, or a candidate "
+        "dropped before it was stored, leaves no node here. Read the Pipeline "
+        "page for the drop reasons at each stage."))
+
+    rows = []
+    for label, nodes in b.layers:
+        for _, nlabel, weight in nodes:
+            rows.append([esc(label), esc(nlabel), str(weight)])
+    if rows:
+        out.append(details(
+            f"{p}-node-table", f"the same {len(rows)} nodes as a table",
+            table(f"{p}-nodes", ["layer", "node", "links"], rows,
+                  numeric_cols={2})))
+    return section(f"{p}-section", "The brain", "".join(out))

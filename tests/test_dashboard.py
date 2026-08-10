@@ -1425,3 +1425,149 @@ def test_a_candidate_with_nothing_recorded_says_so(bare, tmp_path):
     # what must never happen is a crash or a blank panel.
     assert "trs-section" in html_out
     assert "NUL" in html_out
+
+
+# --------------------------------------------------------- the brain map
+
+
+@pytest.fixture
+def wired(tmp_path):
+    """A database with a real chain: two sources feed a candidate, the
+    candidate carries an evidence graph, a model view, a risk decision
+    and an outcome."""
+    from catalyst.storage import init_db
+
+    path = str(tmp_path / "wired.db")
+    conn = init_db(path)
+    conn.executescript(
+        (Path(__file__).resolve().parent.parent / "catalyst" / "storage"
+         / "schema_graph.sql").read_text())
+    iso = datetime.now(timezone.utc).isoformat()
+    for src, sid in [("edgar", "e-1"), ("federal_register", "f-1")]:
+        conn.execute("INSERT INTO raw_events VALUES (?,?,?,?)", (src, sid, iso, "{}"))
+    conn.execute("INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?,?)",
+                 ("c1", "GBFH", "insider_cluster", "2026-09-01", "confirmed",
+                  # "ghost-1" is named by the candidate but was never
+                  # stored as a raw event - it must produce NO node and
+                  # NO edge, or the map claims a source the bot cannot
+                  # show you.
+                  json.dumps(["e-1", "f-1", "ghost-1"]), iso, "financials", "[]"))
+    conn.execute("INSERT INTO research_views VALUES (?,?,?,?,?,?,?,?)",
+                 ("c1", "long", 0.74, "t", "i", 14, 0, "r"))
+    conn.execute("INSERT INTO risk_decisions VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                 ("d1", "c1", "trade", "long", "180.00", "4.0", "39.00",
+                  "2026-09-15", "[]", "{}", iso))
+    conn.execute("INSERT INTO positions VALUES (?,?,?,?,?,?,?)",
+                 ("p1", "GBFH", "[]", "s1", iso, "2026-09-15", "closed"))
+    conn.execute("INSERT INTO closed_trades VALUES (?,?,?,?,?,?,?,?,?)",
+                 ("p1", "paper", "42.71", "45.02", "target_reached",
+                  1000, 12, 4, iso))
+    for eid, kind, key, name in [("e1", "company", "company:GBFH", "GBFH"),
+                                 ("e2", "person", "person:r", "J. Restrepo, CFO")]:
+        conn.execute("INSERT INTO graph_entities VALUES (?,?,?,?,?)",
+                     (eid, kind, key, name, iso))
+    conn.execute("INSERT INTO graph_assertions VALUES (?,?,?,?,?,?,?,?,?)",
+                 ("a1", "e2", "bought shares of", "e1", None, "edgar_filing",
+                  "SEC Form 4", iso, "primary_document"))
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_the_brain_draws_the_whole_chain(wired):
+    b = queries.brain(Db(wired))
+    names = [label for label, _ in b.layers]
+    assert names == ["Sources", "Candidates", "What it linked", "Model view",
+                     "Risk engine", "Outcome"]
+    assert b.edge_count >= 5
+    html_out = panels.brain_panel(Db(wired), p="brain")
+    for expect in ("edgar", "federal register", "GBFH", "J. Restrepo, CFO",
+                   "long", "trade", "target reached"):
+        assert expect in html_out, expect
+
+
+def test_an_entity_is_labelled_by_its_NAME_not_its_key(wired):
+    """The key is "person:r"; the name is "J. Restrepo, CFO". Drawing the
+    key shows an id where a name belongs, which is not evidence anyone
+    can check."""
+    html_out = panels.brain_panel(Db(wired), p="brain")
+    svg = html_out[html_out.index("<svg"):html_out.index("</svg>")]
+    assert "J. Restrepo, CFO" in svg
+    assert ">person:r<" not in svg
+
+
+def test_every_drawn_edge_has_both_endpoints_on_the_map(wired):
+    """An edge to a node that was never drawn would be a line into empty
+    space - and worse, a link the reader cannot check."""
+    b = queries.brain(Db(wired))
+    drawn = {nid for _, nodes in b.layers for nid, _, _ in nodes}
+    for src, dst, _, _ in b.edges:
+        assert src in drawn or dst in drawn, f"{src}->{dst} touches no node"
+
+
+def test_the_brain_invents_no_links(wired):
+    """Every edge must trace to a row. The exact count is checked because
+    a layout that 'looks denser' by adding connectors is the one failure
+    this picture must never have."""
+    b = queries.brain(Db(wired))
+    sources = [s for s, _, _, _ in b.edges if s.startswith("src:")]
+    assert len(sources) == 2, (
+        "one edge per source event that was actually STORED - the "
+        f"candidate names three, one of which does not exist: {sources}")
+    assert not any("ghost" in s for s in sources)
+    views = [e for e in b.edges if e[1].startswith("view:")]
+    assert len(views) == 1
+    outcomes = [e for e in b.edges if e[1].startswith("out:")]
+    assert len(outcomes) == 1
+
+
+def test_an_empty_database_says_so_and_prints_its_queries(bare):
+    html_out = panels.brain_panel(Db(bare), p="brain")
+    assert "Nothing is wired up yet" in html_out
+    assert "FROM candidates" in html_out, "the query behind the emptiness"
+    assert "<svg" not in html_out, "nothing to draw means nothing drawn"
+
+
+def test_the_brain_route_is_in_the_nav_and_renders(wired):
+    from catalyst.dashboard.render import NAV
+    assert any(href == "/brain" for href, _ in NAV)
+    assert 'id="brain-map"' in server.route_brain(Db(wired), {})
+
+
+# ------------------------------------------------------ refusals, simple
+
+
+def test_refusals_simple_maps_reason_to_candidate_to_outcome(seeded):
+    html_out = panels.refusals_simple(Db(seeded), p="refs")
+    assert 'id="refs-map"' in html_out
+    svg = html_out[html_out.index("<svg"):html_out.index("</svg>")]
+    assert "adverse gap exceeds max loss" in svg   # the reason
+    assert "BIOX" in svg                            # the candidate
+    assert "went UP after refusal" in svg           # what it then did
+
+
+def test_an_unscored_refusal_is_never_counted_as_an_outcome(seeded, tmp_path):
+    """Scoring is the whole point of the tracker; an unscored refusal
+    must read as unfinished business, not as a result."""
+    conn = sqlite3.connect(seeded)
+    conn.execute("UPDATE refusals SET scored_at = NULL, outcome_return = NULL")
+    conn.commit()
+    conn.close()
+    html_out = panels.refusals_simple(Db(seeded), p="refs")
+    svg = html_out[html_out.index("<svg"):html_out.index("</svg>")]
+    assert "not scored yet" in svg
+    assert "went UP after refusal" not in svg, (
+        "an unscored refusal was drawn as though its outcome were known")
+    assert "none scored yet" in html_out
+
+
+def test_both_refusal_views_reach_each_other(seeded):
+    simple = panels.refusals_simple(Db(seeded), p="refs")
+    full = panels.refusals_panel(Db(seeded), p="ref")
+    assert "view=full" in simple and "view=simple" in full
+
+
+def test_the_refusals_route_defaults_to_the_map(seeded):
+    db = Db(seeded)
+    assert 'id="refs-map"' in server.route_refusals(db, {})
+    assert 'id="ref-table"' in server.route_refusals(db, {"view": ["full"]})

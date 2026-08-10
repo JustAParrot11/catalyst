@@ -426,6 +426,7 @@ NAV_GROUPS = [
         ("/funnel", "Pipeline", "Raw filings through to orders"),
     ]),
     ("Investigate", [
+        ("/brain", "The brain", "Everything it has linked, as one map"),
         ("/decisions", "Decisions", "Why each trade was taken or declined"),
         ("/refusals", "Refusals", "What declined candidates went on to do"),
         ("/logs", "Logs", "Searchable event log"),

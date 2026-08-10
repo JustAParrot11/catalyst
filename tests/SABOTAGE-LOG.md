@@ -671,3 +671,14 @@ change kept from this session is the strengthened assertion block in
   Layout was checked by SCREENSHOT, not by reasoning - the first render
   had three boxes overlapping in the top arm, fixed with a deterministic
   radius stagger and re-rendered.
+- The brain and refusal map (2026-08-10). Three sabotages: entity nodes
+  labelled by canonical_key instead of display_name; unknown source ids
+  falling back to a real source name (inventing a link); and unscored
+  refusals bucketed as a known outcome. Two caught immediately.
+  THE SECOND WAS NOT: the fixture had no unknown source id, so the test
+  could not tell the honest code from the sabotage. Fixed by giving the
+  candidate a source_event_id that was never stored ("ghost-1") - the
+  map must draw two edges, not three - after which the sabotage fails.
+  Labels were checked by SCREENSHOT: the first render had every node
+  label struck through by the connectors behind it, fixed with a
+  paint-order halo and re-rendered.

@@ -885,3 +885,157 @@ def alerts(db: Db) -> Alerts:
     )
     return Alerts(items=items, kill_q=kill_q, unprotected_q=unprotected_q,
                   adaptive_q=adaptive_q)
+
+
+# --------------------------------------------------------------------------
+# 8. The brain: the whole system's wiring, as recorded
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class Brain:
+    layers: list = field(default_factory=list)   # [(label, [(id,label,weight)])]
+    edges: list = field(default_factory=list)    # [(src,dst,weight,title)]
+    queries: list = field(default_factory=list)  # every query behind it
+    node_count: int = 0
+    edge_count: int = 0
+
+
+def brain(db: Db, limit: int = 60) -> Brain:
+    """Sources -> candidates -> entities -> views -> decisions -> outcomes.
+
+    Built ONLY from rows that exist. Every edge here is a foreign key or
+    a recorded assertion; none is inferred to make the picture denser. A
+    connector nobody can trace to a row would be a decoration that looks
+    like evidence.
+    """
+    b = Brain()
+    cand_q = db.q(
+        "SELECT id, ticker, catalyst_type, source_event_ids, sector "
+        "FROM candidates ORDER BY discovered_at DESC LIMIT ?", (limit,))
+    b.queries.append(cand_q)
+    cands = [dict(r) for r in cand_q.rows]
+    cand_ids = {c["id"] for c in cands}
+
+    # 1. Sources -> candidates, via the event ids the candidate names.
+    src_q = db.q("SELECT source_id, source FROM raw_events")
+    b.queries.append(src_q)
+    source_of = {r["source_id"]: r["source"] for r in src_q.rows}
+    source_hits: dict = {}
+    for c in cands:
+        for sid in (jload(c["source_event_ids"], []) or []):
+            src = source_of.get(sid)
+            if not src:
+                continue
+            key = f"src:{src}"
+            source_hits[key] = source_hits.get(key, 0) + 1
+            b.edges.append((key, f"cand:{c['id']}", 1,
+                            f"{src} filing {sid} became candidate "
+                            f"{c['ticker'] or c['id']}"))
+
+    # 2. Candidates -> entities, from the evidence graph (if present).
+    entity_hits: dict = {}
+    if db.table_exists("graph_assertions") and db.table_exists("graph_entities"):
+        ev_q = db.q(
+            """SELECT s.canonical_key AS sk, s.display_name AS sn, s.kind AS skind,
+                      o.canonical_key AS ok, o.display_name AS onm, o.kind AS okind,
+                      a.predicate
+               FROM graph_assertions a
+               JOIN graph_entities s ON s.id = a.subject_entity_id
+               LEFT JOIN graph_entities o ON o.id = a.object_entity_id
+               LIMIT 400""")
+        b.queries.append(ev_q)
+        by_ticker = {(c["ticker"] or "").upper(): c["id"] for c in cands}
+        for r in ev_q.rows:
+            d = dict(r)
+            for near, far, far_name, far_kind in (
+                    (d["sk"], d["ok"], d["onm"], d["okind"]),
+                    (d["ok"], d["sk"], d["sn"], d["skind"])):
+                if not near or not str(near).startswith("company:"):
+                    continue
+                cid = by_ticker.get(str(near).split(":", 1)[1].upper())
+                if not cid or not far or not far_name:
+                    continue
+                # Keyed by canonical_key, LABELLED by display name. The
+                # key is "person:restrepo" and the name is "J. Restrepo,
+                # CFO"; drawing the key shows the reader an id where a
+                # name belongs, which is not evidence anyone can check.
+                key = f"ent:{far}"
+                name, count = entity_hits.get(key, (far_name, 0))
+                entity_hits[key] = (name, count + 1)
+                b.edges.append((f"cand:{cid}", key, 1,
+                                f"{d['predicate']} ({far_kind or 'entity'})"))
+
+    # 3. Candidates -> the model's view.
+    view_q = db.q("SELECT candidate_id, direction, conviction FROM research_views")
+    b.queries.append(view_q)
+    view_hits: dict = {}
+    for r in view_q.rows:
+        d = dict(r)
+        if d["candidate_id"] not in cand_ids:
+            continue
+        key = f"view:{d['direction'] or 'no direction'}"
+        view_hits[key] = view_hits.get(key, 0) + 1
+        b.edges.append((f"cand:{d['candidate_id']}", key, 1,
+                        f"the model read this as {d['direction']} "
+                        f"(conviction {d['conviction']})"))
+
+    # 4. Views -> what the risk engine did with them.
+    dec_q = db.q("SELECT candidate_id, action, skip_reasons FROM risk_decisions")
+    b.queries.append(dec_q)
+    act_hits: dict = {}
+    for r in dec_q.rows:
+        d = dict(r)
+        if d["candidate_id"] not in cand_ids:
+            continue
+        view = next((dict(v)["direction"] for v in view_q.rows
+                     if dict(v)["candidate_id"] == d["candidate_id"]), None)
+        act = f"act:{d['action'] or 'no action'}"
+        act_hits[act] = act_hits.get(act, 0) + 1
+        if view is not None:
+            b.edges.append((f"view:{view or 'no direction'}", act, 1,
+                            f"the risk engine chose to {d['action']}"))
+        for reason in (jload(d["skip_reasons"], []) or []):
+            key = f"why:{reason}"
+            act_hits.setdefault(act, 0)
+            b.edges.append((act, key, 1, f"stopped on {reason}"))
+
+    # 5. What actually happened.
+    out_q = db.q("SELECT exit_reason, COUNT(*) n FROM closed_trades "
+                 "GROUP BY exit_reason")
+    b.queries.append(out_q)
+    outcome_hits = {f"out:{r['exit_reason'] or 'unrecorded'}": r["n"]
+                    for r in out_q.rows}
+    for key in outcome_hits:
+        b.edges.append(("act:trade", key, outcome_hits[key],
+                        f"closed: {key.split(':', 1)[1]}"))
+    reason_hits: dict = {}
+    for src, dst, _, _ in b.edges:
+        if dst.startswith("why:"):
+            reason_hits[dst] = reason_hits.get(dst, 0) + 1
+
+    def nodes(hits: dict, strip: str, pretty=lambda s: s):
+        return [(k, pretty(k[len(strip):]), v)
+                for k, v in sorted(hits.items(), key=lambda kv: -kv[1])]
+
+    degree: dict = {}
+    for src, dst, _, _ in b.edges:
+        degree[src] = degree.get(src, 0) + 1
+        degree[dst] = degree.get(dst, 0) + 1
+
+    b.layers = [
+        ("Sources", nodes(source_hits, "src:", lambda s: s.replace("_", " "))),
+        ("Candidates", [(f"cand:{c['id']}", c["ticker"] or c["id"],
+                         degree.get(f"cand:{c['id']}", 0)) for c in cands
+                        if degree.get(f"cand:{c['id']}", 0)]),
+        ("What it linked",
+         [(k, name, count) for k, (name, count) in
+          sorted(entity_hits.items(), key=lambda kv: -kv[1][1])]),
+        ("Model view", nodes(view_hits, "view:")),
+        ("Risk engine", nodes(act_hits, "act:")
+         + nodes(reason_hits, "why:", lambda s: s.replace("_", " "))),
+        ("Outcome", nodes(outcome_hits, "out:", lambda s: s.replace("_", " "))),
+    ]
+    b.node_count = sum(len(n) for _, n in b.layers)
+    b.edge_count = len(b.edges)
+    return b

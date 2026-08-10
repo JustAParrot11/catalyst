@@ -181,9 +181,21 @@ def route_decision(db: Db, params: dict) -> str:
     return render_page("Decision trace", body, "/decisions", db.path, db=db)
 
 
+def route_brain(db: Db, params: dict) -> str:
+    return render_page("The brain", panels.brain_panel(db, p="brain"),
+                       "/brain", db.path, db=db,
+                       subtitle="Every line is one recorded link")
+
+
 def route_refusals(db: Db, params: dict) -> str:
-    return render_page("Refusals", panels.refusals_panel(db, p="ref"),
-                       "/refusals", db.path, db=db)
+    # Simple by default, same as Decisions: the map answers "is a reason
+    # refusing money" by following a strand; the table makes you compute
+    # it in your head.
+    if (params.get("view") or ["simple"])[0] == "full":
+        body = panels.refusals_panel(db, p="ref")
+    else:
+        body = panels.refusals_simple(db, p="refs")
+    return render_page("Refusals", body, "/refusals", db.path, db=db)
 
 
 def route_logs(db: Db, params: dict) -> str:
@@ -334,6 +346,7 @@ HTML_ROUTES = {
     "/costs": route_costs,
     "/decisions": route_decisions,
     "/decision": route_decision,
+    "/brain": route_brain,
     "/refusals": route_refusals,
     "/logs": route_logs,
     "/maintenance": route_maintenance,

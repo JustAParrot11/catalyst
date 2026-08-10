@@ -626,3 +626,133 @@ def decision_spider(
 
     out.append("</svg>")
     return "\n".join(out)
+
+
+# --------------------------------------------------------------------------
+# Neural map: the whole system as layers of connected nodes
+# --------------------------------------------------------------------------
+
+#: Layer depth is ORDINAL - sources come before candidates come before
+#: decisions - so the ramp is sequential single-hue, not categorical.
+#: Validated for ordinal use in both modes: monotonic, adjacent OKLab
+#: dL 0.093 light / 0.095 dark against a 0.06 floor.
+NEURAL_STEPS = ("var(--step-1)", "var(--step-2)", "var(--step-3)",
+                "var(--step-4)", "var(--step-5)")
+
+MAX_NODES_PER_LAYER = 14
+
+
+def neural_map(
+    layers: list,       # [(layer_label, [(node_id, node_label, weight)])]
+    edges: list,        # [(src_id, dst_id, weight, title)]
+    *,
+    chart_id: str,
+    width: int = 1180,
+    row_gap: int = 34,
+) -> str:
+    """The system's live wiring, drawn as connected layers.
+
+    EVERY EDGE IS A RECORDED RELATIONSHIP. Nothing is added to make the
+    picture denser - a connector nobody can trace back to a row is a
+    decoration that looks like evidence, which is the one thing this
+    dashboard must never draw.
+
+    Deterministic: columns follow `layers`, rows follow each layer's own
+    order, so the same database always draws the same brain. No physics,
+    no animation, no JavaScript.
+    """
+    import math
+
+    kept = []
+    for label, nodes in layers:
+        shown = list(nodes)[:MAX_NODES_PER_LAYER]
+        kept.append((label, shown, max(0, len(nodes) - len(shown))))
+    if not any(nodes for _, nodes, _ in kept):
+        raise ValueError("neural_map needs at least one node; use placeholder()")
+
+    n_cols = len(kept)
+    tallest = max((len(nodes) for _, nodes, _ in kept), default=1)
+    height = max(340, 96 + row_gap * tallest)
+    col_w = width / n_cols
+    top = 74
+
+    # Position every node first: edges need both endpoints.
+    pos, radius = {}, {}
+    max_w = max((w for _, nodes, _ in kept for _, _, w in nodes), default=1) or 1
+    for ci, (label, nodes, _) in enumerate(kept):
+        cx = col_w * (ci + 0.5)
+        for ri, (nid, _, weight) in enumerate(nodes):
+            pos[nid] = (cx, top + row_gap * ri + row_gap / 2)
+            radius[nid] = 4.0 + 4.0 * math.sqrt(max(weight, 0) / max_w)
+
+    out = [
+        f'<svg id="{chart_id}" class="chart" viewBox="0 0 {width} {height}" '
+        f'width="100%" height="{height}" role="img" xmlns="http://www.w3.org/2000/svg" '
+        'aria-label="The bot\'s wiring: '
+        + "; ".join(f"{label} ({len(nodes)})" for label, nodes, _ in kept)
+        + '. Every line is one recorded link.">',
+        f'<rect x="0" y="0" width="{width}" height="{height}" fill="var(--page)" '
+        f'stroke="var(--hairline)"/>',
+    ]
+
+    # Column headings, then the edges beneath every node.
+    for ci, (label, nodes, extra) in enumerate(kept):
+        cx = col_w * (ci + 0.5)
+        out.append(
+            f'<text x="{cx:.1f}" y="30" font-size="{FONT_SIZE}" font-weight="700" '
+            f'text-anchor="middle" fill="var(--ink-2)" '
+            f'letter-spacing="0.08em">{label.upper()}</text>')
+        out.append(
+            f'<text x="{cx:.1f}" y="46" font-size="{FONT_SIZE - 1}" '
+            f'text-anchor="middle" fill="var(--muted)">'
+            + (f"{len(nodes)} shown, {extra} more" if extra else f"{len(nodes)}")
+            + "</text>")
+
+    # Edges: cubic beziers with horizontal control points. Opacity
+    # carries strength, so a heavily-used link reads as a brighter one.
+    max_e = max((w for _, _, w, _ in edges), default=1) or 1
+    drawn = 0
+    for src, dst, weight, title in edges:
+        if src not in pos or dst not in pos:
+            continue        # an endpoint past the per-layer cap
+        x1, y1 = pos[src]
+        x2, y2 = pos[dst]
+        cxa, cxb = x1 + (x2 - x1) * 0.45, x2 - (x2 - x1) * 0.45
+        opacity = 0.22 + 0.55 * (weight / max_e)
+        out.append(
+            f'<path d="M{x1:.1f},{y1:.1f} C{cxa:.1f},{y1:.1f} {cxb:.1f},{y2:.1f} '
+            f'{x2:.1f},{y2:.1f}" fill="none" stroke="var(--accent)" '
+            f'stroke-width="1.1" opacity="{opacity:.2f}">'
+            f"<title>{title}</title></path>")
+        drawn += 1
+
+    # Nodes last, so no connector crosses a label.
+    for ci, (label, nodes, _) in enumerate(kept):
+        colour = NEURAL_STEPS[min(ci, len(NEURAL_STEPS) - 1)]
+        left_side = ci >= n_cols / 2
+        for nid, node_label, weight in nodes:
+            x, y = pos[nid]
+            r = radius[nid]
+            out.append(
+                f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{r:.1f}" fill="{colour}" '
+                f'stroke="var(--page)" stroke-width="2">'
+                f"<title>{node_label} ({weight} link(s))</title></circle>")
+            tx = x - r - 7 if left_side else x + r + 7
+            anchor = "end" if left_side else "start"
+            text = node_label if len(node_label) <= 20 else node_label[:19] + "…"
+            # A HALO, not a shadow. With this many connectors a bare
+            # label is crossed by three of them and reads as struck
+            # through - painting the page colour as a stroke UNDER the
+            # glyphs cuts a clean gap in every line behind it.
+            out.append(
+                f'<text x="{tx:.1f}" y="{y + 3.5:.1f}" font-size="{FONT_SIZE - 1}" '
+                f'text-anchor="{anchor}" fill="var(--ink-2)" '
+                f'stroke="var(--page)" stroke-width="3.5" paint-order="stroke" '
+                f'style="stroke-linejoin:round">{text}</text>')
+
+    out.append(
+        f'<text x="{width - 10}" y="{height - 10}" font-size="{FONT_SIZE - 1}" '
+        f'text-anchor="end" fill="var(--muted)">{drawn} recorded link(s) drawn'
+        "</text>")
+    out.append("</svg>")
+    return "\n".join(out)
