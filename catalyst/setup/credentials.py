@@ -42,6 +42,7 @@ DEFAULT_SERVICE_USER = "catalyst"
 # performance is proven, so the connection test has no live URL to
 # accidentally point at.
 ALPACA_PAPER_BASE_URL = "https://paper-api.alpaca.markets"
+ALPACA_LIVE_BASE_URL = "https://api.alpaca.markets"
 ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 ANTHROPIC_VERSION = "2023-06-01"
 

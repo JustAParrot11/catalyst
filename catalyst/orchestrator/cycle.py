@@ -171,7 +171,8 @@ def _consecutive_losses(conn) -> int:
 
 
 def _protective_duties(conn, broker: Broker, report: "CycleReport",
-                       now: datetime) -> tuple[bool, list[dict]]:
+                       now: datetime,
+                       account_mode: str = "paper") -> tuple[bool, list[dict]]:
     """Reconcile fills, close finished positions, re-arm expired DAY
     stops, run hard-date exits. Runs on EVERY cycle including loss-rule
     kill trips - these duties only ever reduce risk. A reconcile failure
@@ -185,7 +186,7 @@ def _protective_duties(conn, broker: Broker, report: "CycleReport",
     except BrokerError as exc:
         report.errors.append(f"reconcile: {exc}")
     _adopt_orphan_entries(conn, report, now)
-    close_filled_positions(conn, now=now)
+    close_filled_positions(conn, account_mode=account_mode, now=now)
     _void_dead_entries(conn, report)
 
     open_rows = _open_position_dicts(conn, now)
@@ -432,7 +433,8 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
               kind: str = "scheduled",
               max_research: int = MAX_RESEARCH_PER_CYCLE,
               entry_poll_attempts: int = 5,
-              entry_poll_interval_s: float = 1.0) -> CycleReport:
+              entry_poll_interval_s: float = 1.0,
+              account_mode: str = "paper") -> CycleReport:
     now = now or datetime.now(timezone.utc)
     cycle_id = str(uuid.uuid4())
     params = current_values(conn)
@@ -460,7 +462,7 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
         # on state we cannot trust is how a bad day becomes a worse one.
         if ks.reason not in ("portfolio_state_unreliable",
                              "portfolio_state_stale"):
-            _protective_duties(conn, broker, report, now)
+            _protective_duties(conn, broker, report, now, account_mode=account_mode)
         return report
 
     # daily equity mark from the confirmed broker read (dashboard's
@@ -500,7 +502,8 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
     conn.commit()
 
     # ---- 2 + 3. reconcile, then stop duties and hard exits
-    stops_ok, open_rows = _protective_duties(conn, broker, report, now)
+    stops_ok, open_rows = _protective_duties(conn, broker, report, now,
+                                             account_mode=account_mode)
 
     # score refusals whose counterfactual window has elapsed (the
     # feedback loop; failures leave rows unscored for the next cycle)

@@ -121,8 +121,12 @@ def _run_one_cycle(db_file: str):
     from catalyst.orchestrator.cycle import run_cycle
     from catalyst.setup.credentials import load_credentials
 
+    from catalyst.execution.broker import base_url_for_mode
+
     creds = load_credentials()
-    broker = Broker(creds.alpaca_key, creds.alpaca_secret)
+    account_mode = str((creds.settings or {}).get("account_mode", "paper"))
+    broker = Broker(creds.alpaca_key, creds.alpaca_secret,
+                    base_url=base_url_for_mode(account_mode))
     transport = (_anthropic_transport(creds.anthropic_key)
                  if creds.anthropic_key else None)
 
@@ -132,7 +136,8 @@ def _run_one_cycle(db_file: str):
     conn = sqlite3.connect(db_file)
     try:
         return run_cycle(conn, broker, transport, feed,
-                         build_candidates, cluster)
+                         build_candidates, cluster,
+                         account_mode=account_mode)
     finally:
         conn.close()
         broker.close()

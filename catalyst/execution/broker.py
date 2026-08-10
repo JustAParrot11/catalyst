@@ -21,6 +21,17 @@ import time
 import httpx
 
 PAPER_BASE_URL = "https://paper-api.alpaca.markets"
+LIVE_BASE_URL = "https://api.alpaca.markets"
+
+
+def base_url_for_mode(account_mode: str) -> str:
+    """'paper' -> the paper endpoint; 'live' -> real money. Anything
+    else refuses loudly rather than guessing which account to trade."""
+    if account_mode == "paper":
+        return PAPER_BASE_URL
+    if account_mode == "live":
+        return LIVE_BASE_URL
+    raise ValueError(f"unknown account_mode: {account_mode!r}")
 DATA_BASE_URL = "https://data.alpaca.markets"
 
 _RETRIES = 3

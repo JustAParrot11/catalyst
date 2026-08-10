@@ -87,6 +87,20 @@ FIELDS: tuple[Field, ...] = (
         ),
     ),
     Field(
+        name="account_mode",
+        label="Which account to trade",
+        explanation=(
+            "Paper means practice: the bot trades a simulated account with "
+            "fake money against the real market, and nothing you own is at "
+            "risk. Live means real money leaves your Alpaca account when the "
+            "bot buys. The bot is built to prove itself on paper first; "
+            "switching to live is always your explicit choice here, never "
+            "something the bot decides."
+        ),
+        kind="account_mode",
+        default="paper",
+    ),
+    Field(
         name="monthly_budget_usd",
         label="Monthly research budget",
         explanation=(
@@ -100,7 +114,7 @@ FIELDS: tuple[Field, ...] = (
     ),
 )
 
-_SETTING_FIELDS = {"monthly_budget_usd"}
+_SETTING_FIELDS = {"monthly_budget_usd", "account_mode"}
 _SECRET_FIELD_NAMES = tuple(f.name for f in FIELDS if f.name not in _SETTING_FIELDS)
 
 
@@ -225,6 +239,15 @@ def _shell(title: str, inner: str, prefix: str) -> str:
 
 
 def _field_input(f: Field) -> str:
+    if f.kind == "account_mode":
+        return (
+            f'<label class="radio"><input type="radio" name="{f.name}" '
+            f'value="paper" checked> Practice account (paper) - fake money, '
+            f'real market. Recommended until the record proves itself.</label>'
+            f'<label class="radio"><input type="radio" name="{f.name}" '
+            f'value="live"> Live account - REAL MONEY. Only choose this '
+            f'deliberately, with live Alpaca keys, once the paper record '
+            f'has convinced you.</label>')
     if f.kind == "number":
         return (
             f'<input id="{f.name}" name="{f.name}" type="number" min="0" step="1" '
@@ -267,6 +290,7 @@ def render_setup_page(prefix: str = "") -> str:
         '<p><button type="button" onclick="testAnthropic()">Test this connection</button></p>'
         '<div id="anthropic_result" class="result"></div>',
     ))
+    blocks.append(block("Practice or real money", ["account_mode"], ""))
     blocks.append(block("Spending limit", ["monthly_budget_usd"], ""))
 
     inner = (
@@ -449,8 +473,12 @@ class SetupApp:
 
         if route == "/test/alpaca" and method == "POST":
             data = self._parse_body(body, headers)
+            mode = (data.get("account_mode") or "paper").strip().lower()
+            kwargs = ({"base_url": creds.ALPACA_LIVE_BASE_URL}
+                      if mode == "live" else {})
             ok, message = self.alpaca_tester(data.get("alpaca_key", ""),
-                                             data.get("alpaca_secret", ""))
+                                             data.get("alpaca_secret", ""),
+                                             **kwargs)
             return _json(200, {"ok": bool(ok), "message": message}, cookie)
 
         if route == "/test/anthropic" and method == "POST":
@@ -485,7 +513,11 @@ class SetupApp:
                             ". Paste a value into each box, then press Save again."),
             }, cookie)
 
-        ok, message = self.alpaca_tester(alpaca_key, alpaca_secret)
+        save_mode = (data.get("account_mode") or "paper").strip().lower()
+        mode_kwargs = ({"base_url": creds.ALPACA_LIVE_BASE_URL}
+                       if save_mode == "live" else {})
+        ok, message = self.alpaca_tester(alpaca_key, alpaca_secret,
+                                         **mode_kwargs)
         if not ok:
             return _json(200, {
                 "ok": False,
@@ -514,13 +546,22 @@ class SetupApp:
                             "is not one. Try 5."),
             }, cookie)
 
+        account_mode = (data.get("account_mode") or "paper").strip().lower()
+        if account_mode not in ("paper", "live"):
+            return _json(200, {
+                "ok": False,
+                "message": ("Nothing was saved. The account choice must be "
+                            "either the practice account or the live one."),
+            }, cookie)
+
         try:
             creds.save_credentials(
                 alpaca_key,
                 alpaca_secret,
                 anthropic_key,
                 None,  # keep the access code this machine already has
-                settings={"monthly_budget_usd": budget},
+                settings={"monthly_budget_usd": budget,
+                          "account_mode": account_mode},
                 path=self.credentials_path,
             )
         except creds.CredentialError as exc:
