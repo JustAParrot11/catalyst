@@ -115,15 +115,17 @@ FIELDS: tuple[Field, ...] = (
     ),
     Field(
         name="monthly_budget_usd",
-        label="Your own spending limit (a brake, not a budget)",
+        label="Monthly research budget",
         explanation=(
-            "The bot has its own ceiling of $5 a month, and this box "
-            "CANNOT raise it - a larger number here changes nothing. It "
-            "only ever tightens the limit, so enter a smaller figure if "
-            "you want the bot to spend less than $5. That $5 ceiling can "
-            "rise only out of profit the bot has actually banked, never "
-            "out of profit it merely hopes for, and never past $8 without "
-            "a human changing the code."
+            "The most the bot may spend on Claude research in a month, "
+            "in US dollars. Five is the recommended figure. You can set "
+            "it higher or lower and the bot obeys you either way, up to "
+            "a maximum of $25 - above that the strategy would have to "
+            "beat about 30 percent a year just to cover the bill. Set 0 "
+            "to stop it researching, and therefore trading, entirely. "
+            "Separately, the bot may add a little to its own budget out "
+            "of profit it has actually banked, never out of profit it "
+            "merely hopes for, and never past $8 on its own."
         ),
         kind="number",
         default="5",
@@ -300,22 +302,30 @@ function post(path, payload){
       'The page could not reach the bot. It may still be starting up - '
       + 'wait ten seconds and try again. (' + e + ')'}; });
 }
-var BOT_CEILING_USD = 5;
+var OWNER_MAX_USD = 25;
 function budgetHint(){
   var el = q('monthly_budget_usd'); if(!el) return;
   var hint = q('monthly_budget_usd_hint'); if(!hint) return;
   var v = parseFloat(el.value);
   if (isNaN(v)) { hint.textContent = ''; return; }
-  if (v > BOT_CEILING_USD) {
-    hint.textContent = 'Note: the bot will still stop at $' + BOT_CEILING_USD
-      + ' a month. This box cannot raise the ceiling, only lower it, so '
-      + '$' + v + ' has the same effect as $' + BOT_CEILING_USD + '.';
+  if (v > OWNER_MAX_USD) {
+    hint.textContent = 'Above the $' + OWNER_MAX_USD + ' maximum, so the bot '
+      + 'will use $' + OWNER_MAX_USD + ' a month.';
+    v = OWNER_MAX_USD;
   } else if (v === 0) {
     hint.textContent = 'This stops the bot researching anything at all, so '
       + 'it will never place a trade.';
+    return;
   } else {
-    hint.textContent = 'The bot will stop at $' + v + ' a month.';
+    hint.textContent = '';
   }
+  /* The cost of the choice, at the moment of choosing: a fixed monthly
+     bill against a $1,000 account is a return the strategy must clear
+     before a single trade counts as good. */
+  var hurdle = (v * 12 / 1000 * 100).toFixed(1);
+  hint.textContent += ' The bot will stop at $' + v + ' a month, which is '
+    + hurdle + '% a year on a $1,000 account - the return the strategy has '
+    + 'to beat before a trade counts as good.';
 }
 function testAlpaca(){
   show('alpaca_result', true, 'Checking with Alpaca...');

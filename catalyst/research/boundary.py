@@ -79,6 +79,23 @@ class CostContext:
 Transport = Callable[[dict], dict]
 
 
+def _assistant_echo(turn) -> dict | None:
+    """The assistant message to send back, or None if there is nothing
+    valid to send.
+
+    The Messages API REJECTS an assistant message whose content array is
+    empty (HTTP 400). Every continuation here echoes the previous turn's
+    content verbatim, so a turn that returns no content blocks - which
+    pause_turn and some server-tool states do - poisoned the next
+    request and killed the whole investigation. Four of the owner's five
+    live research calls died this way on 2026-08-10.
+    """
+    content = (turn.raw_response or {}).get("content") or []
+    if not isinstance(content, list) or not content:
+        return None
+    return {"role": "assistant", "content": content}
+
+
 def investigate(
     candidate: Candidate,
     cost_context: CostContext,
@@ -185,8 +202,10 @@ def investigate(
     exploration_rounds = 1
     while (turn.stop_reason == "pause_turn"
            and exploration_rounds < MAX_EXPLORATION_TURNS):
-        messages.append({"role": "assistant",
-                         "content": turn.raw_response.get("content", [])})
+        echo = _assistant_echo(turn)
+        if echo is None:
+            break            # nothing to continue from; go to extraction
+        messages.append(echo)
         turn = run_turn({
             "model": model, "max_tokens": 2048,
             "messages": messages, "tools": tools,
@@ -200,8 +219,9 @@ def investigate(
                 None, f"usage_unpriced_governor_blocked: {unpriced[0]}")
         exploration_rounds += 1
 
-    messages.append({"role": "assistant",
-                     "content": turn.raw_response.get("content", [])})
+    echo = _assistant_echo(turn)
+    if echo is not None:
+        messages.append(echo)
     messages.append({"role": "user", "content": (
         "Submit your conclusion now via submit_research_view.")})
 
@@ -249,8 +269,9 @@ def investigate(
                     last_error = f"invalid_view: {type(exc).__name__}: {exc}"
 
         if attempt == "first":
-            messages.append({"role": "assistant",
-                             "content": turn.raw_response.get("content", [])})
+            echo = _assistant_echo(turn)
+            if echo is not None:
+                messages.append(echo)
             messages.append({"role": "user", "content": (
                 "Your submission was not accepted: "
                 f"{last_error}. Submit again via submit_research_view "

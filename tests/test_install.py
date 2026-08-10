@@ -1207,26 +1207,37 @@ class TestBudgetFieldTellsTheTruth:
     only out of realised profit). The PAGE was the defect: it invited a
     number it would silently ignore."""
 
-    def test_the_explanation_says_it_cannot_raise_the_ceiling(self):
+    def test_the_explanation_states_the_range_and_the_bots_own_limit(self):
+        """CONTRACT CHANGED at the owner's request - the field now sets
+        the budget both ways. What the page must still make plain is the
+        maximum, and that the bot topping itself up out of profit is a
+        SEPARATE thing bounded separately."""
         from catalyst.setup.first_run import FIELDS
 
         f = next(f for f in FIELDS if f.name == "monthly_budget_usd")
         text = (f.label + " " + f.explanation).lower()
-        assert "cannot raise" in text
-        assert "$5" in f.explanation
-        assert "tighten" in text or "lower" in text
+        assert "higher or lower" in text
+        assert "$25" in f.explanation          # the human ceiling
+        assert "$8" in f.explanation           # what the bot may add itself
+        assert "0" in f.explanation            # stopping entirely
 
-    def test_the_form_warns_live_when_a_bigger_number_is_typed(self):
+    def test_the_form_shows_the_annual_hurdle_as_the_number_is_typed(self):
+        """The cost of the choice, at the moment of choosing: a fixed
+        monthly bill on a $1,000 account is a return the strategy has to
+        clear before a trade counts as good."""
         from catalyst.setup.first_run import render_setup_page
 
         page = render_setup_page()
         assert 'oninput="budgetHint()"' in page
         assert "monthly_budget_usd_hint" in page
-        assert "cannot raise the ceiling, only lower it" in page
+        assert "% a year on a $1,000 account" in page
+        assert "OWNER_MAX_USD = 25" in page
 
-    def test_a_bigger_owner_figure_really_does_not_raise_the_cap(self, tmp_path):
-        """The page's new promise, checked against the governor itself
-        rather than against its own wording."""
+    def test_a_bigger_owner_figure_now_raises_the_cap_but_is_bounded(
+            self, tmp_path):
+        """CONTRACT CHANGED at the owner's request: the figure sets the
+        budget in both directions. The safety property that survives is
+        the bound - a mistyped 200 dollars gets the ceiling, not 200."""
         import sqlite3
         from decimal import Decimal
 
@@ -1240,9 +1251,14 @@ class TestBudgetFieldTellsTheTruth:
                            basis="test", kind="scheduled", component="research")
         d = gov.authorize(est, conn, Decimal("0.10"),
                           owner_monthly_cap_cents=Decimal("2000"))  # $20
-        assert d.authorized is False
-        assert d.cap_cents == BASE_CAP_CENTS, (
-            "an owner figure above the ceiling must change nothing")
+        assert d.cap_cents == Decimal("2000"), (
+            "the owner's deliberate figure is the budget now")
+        assert d.authorized is True
+        # ... but a wild figure is still clamped
+        from catalyst.cost.governor import OWNER_MAX_CAP_CENTS
+        d2 = gov.authorize(est, conn, Decimal("0.10"),
+                           owner_monthly_cap_cents=Decimal("999999"))
+        assert d2.cap_cents == OWNER_MAX_CAP_CENTS
         conn.close()
 
     def test_a_smaller_owner_figure_does_tighten_the_cap(self, tmp_path):

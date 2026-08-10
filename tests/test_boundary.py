@@ -252,3 +252,61 @@ class TestMakeView:
     def test_good_view_parses(self):
         v = make_view_from_tool_input("c1", dict(GOOD_VIEW))
         assert v.candidate_id == "c1" and v.conviction == 0.8
+
+
+class TestEmptyAssistantContentIsNeverSentBack:
+    """Owner's live funnel, 2026-08-10: four of five research calls died
+    on `400 Bad Request` from the Messages API, with no reason - the
+    transport had thrown the response body away.
+
+    The Messages API rejects an assistant message whose content array is
+    empty. Every place this boundary continues a conversation appends
+    `turn.raw_response.get("content", [])` verbatim, so a turn that
+    comes back with no content blocks - which pause_turn and some
+    server-tool states do - poisons the NEXT request with
+    `{"role": "assistant", "content": []}` and earns a 400.
+    """
+
+    def _payloads_are_valid(self, log):
+        for payload in log:
+            for msg in payload["messages"]:
+                content = msg["content"]
+                if isinstance(content, list):
+                    assert content, (
+                        f"empty content array sent for role {msg['role']!r} - "
+                        "the Messages API 400s on this")
+
+    def test_an_empty_exploration_turn_does_not_poison_the_next_request(
+            self, db):
+        empty_pause = {"content": [], "stop_reason": "pause_turn",
+                       "usage": dict(USAGE)}
+        transport, log = transport_script([empty_pause, extraction_response()])
+        result = investigate(candidate(), ctx(db), transport)
+        self._payloads_are_valid(log)
+        assert result.parsed_view is not None, (
+            "an empty exploration turn is recoverable, not fatal")
+
+    def test_an_empty_extraction_turn_does_not_poison_the_repair(self, db):
+        empty = {"content": [], "stop_reason": "end_turn", "usage": dict(USAGE)}
+        transport, log = transport_script([end_turn(), empty,
+                                           extraction_response()])
+        result = investigate(candidate(), ctx(db), transport)
+        self._payloads_are_valid(log)
+        assert result.parsed_view is not None
+
+    def test_a_transport_error_records_the_upstream_body_not_just_a_status(
+            self, db):
+        """House rule 3. A 400 whose only detail is a link to MDN cannot
+        be diagnosed; Anthropic says exactly what it objected to in the
+        response body, and that is what has to reach the funnel."""
+        class Boom(Exception):
+            pass
+
+        def transport(payload):
+            raise Boom("HTTP 400: {\"error\":{\"message\":"
+                       "\"messages.1.content: at least 1 item required\"}}")
+
+        result = investigate(candidate(), ctx(db), transport)
+        assert result.parsed_view is None
+        assert "at least 1 item required" in (result.skipped_reason or ""), (
+            "the upstream explanation must survive into the skip reason")

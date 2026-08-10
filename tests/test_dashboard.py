@@ -802,20 +802,22 @@ class TestOwnerBudgetReconciliation:
             os.environ.pop("CATALYST_CREDENTIALS", None)
         return html
 
-    def test_a_too_large_setting_is_explained_not_ignored(self, tmp_path, bare):
+    def test_a_higher_setting_is_enforced_and_prices_its_own_hurdle(
+            self, tmp_path, bare):
+        """CONTRACT CHANGED at the owner's request: a bigger figure is
+        now obeyed. The page must show what that choice costs - a fixed
+        bill is a return the strategy has to clear."""
         html = self._panel_with_budget(tmp_path, bare, 20)
-        assert "You set a spending limit of $20 a month" in html
-        assert "has no effect" in html
-        # scoped to THIS message: other copy on the page legitimately
-        # contains escaped apostrophes
-        import re as _re
-        msg = _re.search(r"You set a spending limit.*?</div>", html, _re.S).group(0)
-        assert "&#x27;" not in msg, "apostrophe double-escaped in the message"
+        assert "$20/month is the figure being enforced" in html
+        assert "above" in html
+        assert "24.0% a year" in html, "the hurdle of the choice must be shown"
 
-    def test_a_tighter_setting_is_shown_as_the_one_enforced(self, tmp_path, bare):
+    def test_a_tighter_setting_is_also_shown_with_its_hurdle(
+            self, tmp_path, bare):
         html = self._panel_with_budget(tmp_path, bare, 2)
-        assert "tighter than" in html
-        assert "yours is the one being enforced" in html
+        assert "$2/month is the figure being enforced" in html
+        assert "below" in html
+        assert "2.4% a year" in html
 
     def test_no_message_when_the_setting_matches_the_ceiling(self, tmp_path, bare):
         html = self._panel_with_budget(tmp_path, bare, 5)
