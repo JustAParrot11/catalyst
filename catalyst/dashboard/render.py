@@ -75,9 +75,13 @@ PAPER_PNL_CAVEAT = (
 _CSS = """
 :root {
   color-scheme: light;
-  --page:        #f7f7f5;
-  --surface:     #ffffff;
-  --surface-2:   #f2f2ef;
+  /* Off-white rather than #fff: a pure-white field beside black text is
+     the main source of glare on a page somebody stares at for a while.
+     The categorical palette was validated against #ffffff, the harsher
+     of the two, so softening the surface only widens its margins. */
+  --page:        #f2f2ef;
+  --surface:     #fbfbf9;
+  --surface-2:   #f0f0ec;
   --ink:         #0b0b0b;
   --ink-2:       #52514e;
   --muted:       #898781;
@@ -126,9 +130,17 @@ _CSS = """
   }
 }
 * { box-sizing: border-box; }
-body { font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
-       margin: 0; color: var(--ink); background: var(--page); }
-header { background: var(--header); color: #fff; padding: 12px 20px; }
+body { font: 14.5px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+       margin: 0; color: var(--ink); background: var(--page);
+       -webkit-font-smoothing: antialiased; }
+/* Measure. Prose set the full width of a 1180px page runs to ~170
+   characters a line, which is roughly twice what the eye tracks
+   comfortably; the return sweep is where re-reading the same line comes
+   from. Tables, charts and tile rows are exempt - they are not prose. */
+p, li, .prov, .caveat, .alarm, .ok, .empty, summary { max-width: 82ch; }
+header { background: var(--header); color: #fff; padding: 12px 20px;
+         position: sticky; top: 0; z-index: 20;
+         box-shadow: 0 1px 0 rgba(0,0,0,.25); }
 header h1 { font-size: 15px; margin: 0 0 8px 0; font-weight: 600;
             letter-spacing: .01em; }
 nav { display: flex; flex-wrap: wrap; gap: 2px; }
@@ -185,7 +197,8 @@ th { background: var(--surface-2); font-weight: 600; font-size: 11px;
      border-bottom: 1px solid var(--baseline); }
 tbody tr:hover { background: var(--surface-2); }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-.scroll-x { overflow-x: auto; }
+.scroll-x { overflow-x: auto; max-width: 100%; }
+.scroll-x table { min-width: 520px; }
 pre { background: #14140f; color: #e8e8e0; padding: 10px; overflow-x: auto;
       font-size: 12px; border-radius: 7px; white-space: pre-wrap;
       word-break: break-word; max-height: 380px; }
@@ -197,9 +210,11 @@ footer { color: var(--muted); font-size: 12px; padding: 12px 20px 28px 20px; }
 /* Funnel: an ordinal ramp, darkening as candidates survive each stage. */
 .funnel-row { display: flex; align-items: center; gap: 12px; margin: 5px 0; }
 .funnel-bar { height: 22px; border-radius: 3px; min-width: 3px; }
-.funnel-label { width: 210px; font-size: 13px; flex: none; }
-.funnel-n { width: 74px; text-align: right; font-variant-numeric: tabular-nums;
-            font-weight: 600; flex: none; }
+/* No widths here: the .funnel-row grid owns the columns. Setting both
+   made the count and the conversion figure collide. */
+.funnel-label { font-size: 13px; }
+.funnel-n { text-align: right; font-variant-numeric: tabular-nums;
+            font-weight: 650; font-size: 15px; }
 .funnel-drop { color: var(--serious); font-size: 12px; }
 .blame { background: var(--crit-wash); border-left: 3px solid var(--critical);
          padding: 9px 11px; font-size: 13px; margin: 9px 0;
@@ -215,6 +230,38 @@ button { background: var(--series-1); color: #fff; border-color: transparent;
 .tag { display: inline-block; background: var(--surface-2);
        border: 1px solid var(--hairline); border-radius: 5px; padding: 1px 7px;
        font-size: 12px; margin-right: 4px; }
+
+/* Budget meter: spend against the cap, with a pace marker. Answers
+   "am I on track to breach?" - which a month-to-date total alone
+   cannot, because it says nothing about how much month is left. */
+.meter { position: relative; height: 12px; border-radius: 6px;
+         background: var(--surface-2); border: 1px solid var(--hairline);
+         margin: 8px 0 6px 0; overflow: visible; max-width: 560px; }
+.meter-fill { position: absolute; left: 0; top: 0; bottom: 0;
+              border-radius: 6px 0 0 6px; background: var(--series-1); }
+.meter-fill.over { background: var(--critical); }
+.meter-pace { position: absolute; top: -4px; bottom: -4px; width: 2px;
+              background: var(--ink-2); }
+.meter-legend { font-size: 11.5px; color: var(--ink-2); margin: 0 0 2px 0; }
+
+/* Funnel: label, count, conversion, bar. A fixed grid so the numbers
+   form columns the eye can run down instead of a ragged edge. */
+.funnel-row { display: grid; grid-template-columns: 220px 64px 76px 1fr;
+              align-items: center; gap: 12px; margin: 0; padding: 7px 0;
+              border-top: 1px solid var(--hairline); }
+.funnel-row:first-of-type { border-top: none; }
+.funnel-conv { font-size: 12px; color: var(--ink-2);
+               font-variant-numeric: tabular-nums; }
+.funnel-conv.lost { color: var(--serious); font-weight: 600; }
+.quiet { color: var(--muted); font-size: 12px; margin: 0 0 6px 232px;
+         max-width: 70ch; }
+.quiet summary { color: var(--muted); font-size: 12px; }
+.quiet code { font-size: 11.5px; }
+@media (max-width: 760px) {
+  .funnel-row { grid-template-columns: 1fr 54px 66px; }
+  .funnel-row .funnel-bar { display: none; }
+  .quiet { margin-left: 0; }
+}
 """
 
 NAV = [
@@ -365,9 +412,14 @@ def table(tid: str, headers: list, rows: list, numeric_cols: set | None = None) 
             for i, c in enumerate(row)
         )
         body.append(f"<tr>{cells}</tr>")
+    # Wide tables scroll INSIDE their own box. Without this the widest
+    # table on the page sets the width of the page, and the whole
+    # document scrolls sideways on a phone - measured at 390px, where
+    # the five-column cost table was doing exactly that.
     return (
+        f'<div class="scroll-x">'
         f'<table id="{esc(tid)}"><thead><tr>{head}</tr></thead>'
-        f"<tbody>{''.join(body)}</tbody></table>"
+        f"<tbody>{''.join(body)}</tbody></table></div>"
     )
 
 
@@ -385,6 +437,31 @@ def pill(state: str, label: str) -> str:
     return (f'<span class="pill pill-{state}">'
             f'<span aria-hidden="true">{_PILL_GLYPH[state]}</span>'
             f"{esc(label)}</span>")
+
+
+def meter(mid: str, used: float, cap: float, pace: float | None = None,
+          legend: str = "") -> str:
+    """Spend against a cap, with an optional pace marker.
+
+    A month-to-date total cannot answer "am I on track to breach it?" -
+    that needs the elapsed fraction of the month beside it. The marker
+    is where spending would be if it were perfectly even; a fill left of
+    the marker is under pace, right of it is over.
+    """
+    pct = (used / cap * 100.0) if cap else 0.0
+    over = pct > 100.0
+    width = min(max(pct, 0.0), 100.0)
+    marker = ""
+    if pace is not None:
+        marker = (f'<span class="meter-pace" '
+                  f'style="left:{min(max(pace, 0.0), 100.0):.1f}%"></span>')
+    return (
+        (f'<p class="meter-legend">{legend}</p>' if legend else "")
+        + f'<div class="meter" id="{esc(mid)}" role="img" '
+          f'aria-label="{pct:.0f}% of the cap used">'
+          f'<span class="meter-fill{" over" if over else ""}" '
+          f'style="width:{width:.1f}%"></span>{marker}</div>'
+    )
 
 
 def tiles(tid: str, items: list) -> str:
