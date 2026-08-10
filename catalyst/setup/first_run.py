@@ -171,32 +171,115 @@ def _page(status: int, body_html: str, headers: list[tuple[str, str]] | None = N
 # Rendering
 # --------------------------------------------------------------------------
 
+# Owner report 2026-08-10: "the initial setup is a bit hard to see with
+# the colours". Root cause, reproduced in a dark-mode browser: the page
+# declared `color-scheme: light dark`, so the browser painted a DARK
+# background and light default text - while every colour below was a
+# hardcoded LIGHT-mode value. The field explanations (#444 on near
+# black), the Test buttons (inherited white text on #f3f3f3) and the
+# whole privacy note (white on #f6f6f6) were effectively invisible.
+#
+# A page may not promise a colour scheme it has not actually written.
+# Both schemes are now defined explicitly, from the same tokens the
+# dashboard uses, so setup and dashboard look like one product.
 _STYLE = """
-:root { color-scheme: light dark; }
+:root {
+  color-scheme: light;
+  --page:      #f2f2ef;
+  --surface:   #fbfbf9;
+  --ink:       #0b0b0b;
+  --ink-2:     #43423f;
+  --muted:     #6b6a65;
+  --hairline:  #d6d5cd;
+  --field:     #ffffff;
+  --focus:     #2a78d6;
+  --good:      #0f6b33;
+  --good-wash: #eaf6ee;
+  --good-ink:  #0d5227;
+  --crit:      #b3261e;
+  --crit-wash: #fdeeee;
+  --crit-ink:  #8c1c16;
+  --primary-ink: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --page:      #0d0d0d;
+    --surface:   #1a1a19;
+    --ink:       #ffffff;
+    --ink-2:     #d2d1c8;
+    --muted:     #a3a29a;
+    --hairline:  #383835;
+    --field:     #232322;
+    --focus:     #6da7ec;
+    --good:      #2f9e57;
+    --good-wash: #14261a;
+    --good-ink:  #8fd7a6;
+    --crit:      #e06a63;
+    --crit-wash: #2b1615;
+    --crit-ink:  #f0a9a4;
+    /* Measured: white on the dark-mode green is only 3.42:1, short of
+       AA for text this size. Dark ink on the same green is 5.76:1, and
+       the button also stands out better against the near-black page
+       (5.69:1 vs 2.93:1 for a darker green with white text). */
+    --primary-ink: #0b0b0b;
+  }
+}
+* { box-sizing: border-box; }
 body { font-family: system-ui, -apple-system, "Segoe UI", Helvetica, sans-serif;
-       max-width: 44rem; margin: 0 auto; padding: 2rem 1.25rem 5rem;
-       line-height: 1.55; }
-h1 { font-size: 1.6rem; margin-bottom: .25rem; }
-.lede { color: #555; margin-top: 0; }
-fieldset { border: 1px solid #ccc; border-radius: 10px; padding: 1rem 1.1rem;
-           margin: 1.25rem 0; }
-legend { font-weight: 600; padding: 0 .4rem; }
-.explain { color: #444; font-size: .95rem; margin: .1rem 0 .7rem; }
+       max-width: 46rem; margin: 0 auto; padding: 2rem 1.25rem 5rem;
+       line-height: 1.6; color: var(--ink); background: var(--page);
+       -webkit-font-smoothing: antialiased; }
+h1 { font-size: 1.55rem; margin-bottom: .3rem; letter-spacing: -.01em; }
+.lede { color: var(--ink-2); margin-top: 0; }
+fieldset { border: 1px solid var(--hairline); border-radius: 12px;
+           padding: 1.1rem 1.2rem .3rem; margin: 1.4rem 0;
+           background: var(--surface); }
+legend { font-weight: 650; padding: 0 .45rem; font-size: .95rem;
+         color: var(--ink); }
+label { display: block; font-weight: 600; margin-top: .3rem; }
+/* The explanations are the point of this page - they must read as body
+   text, not as fine print the eye skips. */
+.explain { color: var(--ink-2); font-size: .95rem; margin: .15rem 0 .6rem;
+           font-weight: 400; max-width: 62ch; }
 input[type=password], input[type=text], input[type=number] {
-   width: 100%; padding: .6rem .7rem; font-size: 1rem; border-radius: 8px;
-   border: 1px solid #999; box-sizing: border-box; }
-button { font-size: 1rem; padding: .6rem 1rem; border-radius: 8px;
-         border: 1px solid #666; background: #f3f3f3; cursor: pointer; }
-button.primary { background: #1a6f3c; color: #fff; border-color: #1a6f3c;
-                 font-size: 1.05rem; padding: .8rem 1.4rem; }
-.result { margin-top: .7rem; padding: .7rem .8rem; border-radius: 8px;
+   width: 100%; padding: .65rem .75rem; font-size: 1rem; border-radius: 9px;
+   border: 1px solid var(--hairline); background: var(--field);
+   color: var(--ink); }
+input:focus-visible, button:focus-visible {
+   outline: 3px solid var(--focus); outline-offset: 2px; }
+button { font-size: 1rem; padding: .6rem 1.05rem; border-radius: 9px;
+         border: 1px solid var(--hairline); background: var(--surface);
+         color: var(--ink); cursor: pointer; font-weight: 600;
+         margin-bottom: 1rem; }
+button:hover { border-color: var(--focus); color: var(--focus); }
+button.primary { background: var(--good); color: var(--primary-ink);
+                 border-color: var(--good);
+                 font-size: 1.05rem; padding: .85rem 1.5rem; }
+button.primary:hover { filter: brightness(1.08); color: var(--primary-ink); }
+.result { margin: .7rem 0 1rem; padding: .7rem .85rem; border-radius: 9px;
           display: none; white-space: pre-wrap; }
-.result.good { display: block; background: #e6f6ec; border: 1px solid #1a6f3c;
-               color: #12502b; }
-.result.bad  { display: block; background: #fdecec; border: 1px solid #a11; color: #7a1010; }
-.note { background: #f6f6f6; border-left: 4px solid #999; padding: .7rem .9rem;
-        margin: 1.5rem 0; font-size: .95rem; }
-.show-toggle { font-size: .9rem; color: #444; margin-top: .5rem; display: block; }
+.result.good { display: block; background: var(--good-wash);
+               border: 1px solid var(--good); color: var(--good-ink); }
+.result.bad  { display: block; background: var(--crit-wash);
+               border: 1px solid var(--crit); color: var(--crit-ink); }
+.note { background: var(--surface); border: 1px solid var(--hairline);
+        border-left: 4px solid var(--muted); padding: .85rem 1rem;
+        margin: 1.6rem 0; font-size: .95rem; border-radius: 0 10px 10px 0;
+        color: var(--ink-2); }
+.show-toggle { font-size: .92rem; color: var(--ink-2); margin: .6rem 0;
+               font-weight: 400; }
+.show-toggle input { margin-right: .4rem; }
+/* One choice per row, each a target you can hit. Run together as
+   inline text these two read as a single paragraph - and one of them
+   spends real money. */
+label.radio { display: flex; gap: .6rem; align-items: flex-start;
+              font-weight: 400; border: 1px solid var(--hairline);
+              border-radius: 10px; padding: .7rem .8rem; margin: .45rem 0;
+              cursor: pointer; background: var(--page); }
+label.radio:hover { border-color: var(--focus); }
+label.radio input { margin-top: .25rem; flex: none; }
+label.radio b { font-weight: 650; }
 """
 
 _SCRIPT = """
@@ -256,14 +339,18 @@ def _shell(title: str, inner: str, prefix: str) -> str:
 
 def _field_input(f: Field) -> str:
     if f.kind == "account_mode":
+        # Each option is its own row with its own lead-in. Run together
+        # as inline text they read as one paragraph, and one of them
+        # spends real money.
         return (
             f'<label class="radio"><input type="radio" name="{f.name}" '
-            f'value="paper" checked> Practice account (paper) - fake money, '
-            f'real market. Recommended until the record proves itself.</label>'
+            f'value="paper" checked><span><b>Practice account (paper)</b>'
+            f" &mdash; fake money, real market. Recommended until the "
+            f"record proves itself.</span></label>"
             f'<label class="radio"><input type="radio" name="{f.name}" '
-            f'value="live"> Live account - REAL MONEY. Only choose this '
-            f'deliberately, with live Alpaca keys, once the paper record '
-            f'has convinced you.</label>')
+            f'value="live"><span><b>Live account &mdash; REAL MONEY.</b> '
+            f"Only choose this deliberately, with live Alpaca keys, once "
+            f"the paper record has convinced you.</span></label>")
     if f.kind == "number":
         return (
             f'<input id="{f.name}" name="{f.name}" type="number" min="0" step="1" '

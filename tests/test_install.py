@@ -13,6 +13,7 @@ explicit that redaction happens at capture rather than on the way out.
 
 from __future__ import annotations
 
+import html
 import io
 import json
 import logging
@@ -1124,3 +1125,74 @@ def test_scheduler_installs_the_redacting_filter_on_the_root_logger():
     assert any(isinstance(f, creds.RedactingFilter) for f in root.filters), (
         "without this, any log line anywhere in the system could print a key"
     )
+
+
+# --------------------------------------------------------------------------
+# The setup page must be legible in BOTH colour schemes.
+#
+# Owner report 2026-08-10: "the initial setup is a bit hard to see with
+# the colours". Reproduced in a dark-mode browser: the page declared
+# `color-scheme: light dark` while every colour in the sheet was a
+# hardcoded LIGHT value, so the field explanations, the Test buttons and
+# the whole privacy note rendered near-invisible. This is the one screen
+# whose failure the owner cannot route around - there is no dashboard to
+# fall back to until it has been used.
+# --------------------------------------------------------------------------
+
+
+class TestSetupPageLegibility:
+    def _tokens(self, block: str) -> set:
+        import re
+        return set(re.findall(r"(--[a-z0-9-]+)\s*:", block))
+
+    def test_dark_scheme_redefines_every_colour_token(self):
+        """The exact bug class: declaring dark support and then leaving
+        the light values in place. Every token defined for light must be
+        given a dark value too."""
+        from catalyst.setup.first_run import _STYLE
+
+        light = _STYLE.split("@media")[0]
+        dark = _STYLE.split("@media", 1)[1]
+        missing = self._tokens(light) - self._tokens(dark) - {"--color-scheme"}
+        assert not missing, (
+            f"tokens with no dark value: {sorted(missing)} - the page would "
+            "render these light-mode colours on a dark background")
+
+    def test_no_colour_is_hardcoded_outside_the_token_blocks(self):
+        """Rules must consume tokens, not literals - a literal cannot
+        follow the theme, which is how the original bug happened."""
+        import re
+        from catalyst.setup.first_run import _STYLE
+
+        rules = _STYLE.split("}", 2)[2]        # past both :root blocks
+        rules = re.sub(r"@media[^{]*\{[^}]*\{[^}]*\}[^}]*\}", "", rules)
+        literals = [h for h in re.findall(r"#[0-9a-fA-F]{3,8}\b", rules)
+                    if h.lower() not in ("#fff", "#ffffff")]
+        assert not literals, f"hardcoded colours outside the palette: {literals}"
+
+    def test_body_declares_its_own_background_and_ink(self):
+        """Without both, the browser's own dark background shows through
+        under text coloured for light - which is what happened."""
+        from catalyst.setup.first_run import _STYLE
+
+        body = _STYLE.split("body {", 1)[1].split("}", 1)[0]
+        assert "background: var(" in body and "color: var(" in body
+
+    def test_the_two_account_choices_are_separate_hit_targets(self):
+        """One of these spends real money. Run together as inline text
+        they read as a single paragraph."""
+        from catalyst.setup.first_run import render_setup_page
+
+        page = render_setup_page()
+        assert page.count('class="radio"') == 2
+        assert "<b>Live account &mdash; REAL MONEY.</b>" in page
+        assert "label.radio { display: flex" in page
+
+    def test_every_field_explanation_still_renders(self):
+        """The restyle must not have dropped the text that makes this
+        page usable by someone who is not a developer."""
+        from catalyst.setup.first_run import FIELDS, render_setup_page
+
+        page = render_setup_page()
+        for f in FIELDS:
+            assert html.escape(f.explanation)[:60] in page, f.name
