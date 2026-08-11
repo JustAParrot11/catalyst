@@ -53,6 +53,7 @@ the full suite green (232 passed).
 
 from datetime import date, datetime, timezone
 from decimal import Decimal
+import time
 
 import pytest
 
@@ -895,3 +896,103 @@ def test_fetch_events_matches_the_architecture_signature():
     )
     assert len(events) == 2
     assert all(e.source == "edgar_form4" for e in events)
+
+
+# ---------------------------------------------------------------------------
+# One pacer per PROCESS, not per call
+# ---------------------------------------------------------------------------
+
+
+def test_every_sec_caller_shares_one_pacer():
+    """The SEC's 10 req/s ceiling is per IP and shared across all of its
+    APIs, so a limiter created per call site is not a limit at all: two
+    at 5/s each sit exactly on the ceiling and three are over it. The
+    dashboard's reachability probe runs on a request thread while the
+    trading cycle is fetching, so this is a live pairing, not a
+    hypothetical."""
+    assert feed.sec_pacer() is feed.sec_pacer()
+    assert feed.sec_pacer().rate_per_sec <= feed.SEC_MAX_REQUESTS_PER_SEC
+
+
+def test_the_edgar_probe_goes_through_the_shared_pacer():
+    """Owner-asked: "are we adhering to all API limits, i dont want us to
+    get IP banned". The probe used to call httpx.get directly."""
+    from catalyst.dashboard import maintenance
+
+    calls = {"paced": 0, "fetched": 0}
+    pacer = feed.sec_pacer()
+    before = pacer.acquisitions
+
+    def fake_get(url, headers):
+        calls["fetched"] += 1
+        assert "User-Agent" in headers, (
+            "the SEC answers a missing User-Agent with a 403 block page")
+
+        class R:
+            status_code = 200
+            text = "ok"
+        return R()
+
+    original = feed._default_http_get
+    feed._default_http_get = fake_get
+    try:
+        ok, message = maintenance._default_edgar_probe()()
+    finally:
+        feed._default_http_get = original
+    assert ok and calls["fetched"] == 1
+    assert pacer.acquisitions == before + 1, (
+        "the probe reached sec.gov without spending from the shared "
+        "per-IP budget")
+
+
+def test_the_pacer_serialises_its_read_modify_write():
+    """Two threads reading _next_at between the read and the write is
+    exactly how a paced client emits a burst.
+
+    Asserted on the lock rather than on wall-clock gaps: a timing test
+    here PASSED with the lock deleted, because the GIL happened to
+    serialise eight threads anyway. A test that cannot fail is not a
+    test (house rule 4), so this one checks the mechanism that makes the
+    guarantee rather than a symptom that may or may not appear.
+    """
+    limiter = feed.RateLimiter(10.0)
+    real, seen = limiter._lock, []
+
+    class Watched:
+        def __enter__(self):
+            seen.append("enter")
+            return real.__enter__()
+
+        def __exit__(self, *exc):
+            seen.append("exit")
+            return real.__exit__(*exc)
+
+    limiter._lock = Watched()
+    limiter.acquire()
+    limiter.acquire()
+    assert seen == ["enter", "exit", "enter", "exit"], (
+        "acquire() updated the schedule outside the lock")
+
+
+def test_the_pacer_still_spaces_requests_across_threads():
+    """The end-to-end shape, as a smoke check on top of the lock test."""
+    import threading as _threading
+
+    limiter = feed.RateLimiter(10.0)
+    stamps: list[float] = []
+    lock = _threading.Lock()
+
+    def hit():
+        limiter.acquire()
+        with lock:
+            stamps.append(time.monotonic())
+
+    threads = [_threading.Thread(target=hit) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    stamps.sort()
+    gaps = [b - a for a, b in zip(stamps, stamps[1:])]
+    assert len(gaps) == 7
+    assert all(gap > 0.05 for gap in gaps), f"burst: gaps {gaps}"
