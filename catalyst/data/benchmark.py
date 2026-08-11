@@ -56,6 +56,52 @@ class RefreshResult:
     last_day: date | None = None
     skipped_reason: str | None = None
     raw_response: str | None = None
+    #: Which feed actually produced these bars. Never assumed: a series
+    #: labelled sip that is really iex is a lie about its own basis.
+    feed: str | None = None
+
+
+#: Preference order. SIP is the consolidated tape and the right answer
+#: when the account is entitled to it. IEX is one exchange's prints -
+#: for a DAILY close on an instrument as liquid as SPY that is a good
+#: enough benchmark, and infinitely better than no comparison at all,
+#: which is what an unentitled account got before (owner-reported
+#: 2026-08-11: "reachable, but returned no SPY bar - usually means this
+#: account has no SIP data entitlement").
+FEED_PREFERENCE = ("sip", "iex")
+
+
+def _cached_feed(cache) -> str | None:
+    try:
+        return (cache.read_meta() or {}).get("feed")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _fetch_with_fallback(client, start, end, have_feed):
+    """Bars, and the feed that produced them.
+
+    NEVER MIXES FEEDS. A series is one basis or it is not a series: half
+    consolidated tape and half one exchange's prints would make every
+    comparison against it quietly wrong, and the dashboard would go on
+    labelling the whole thing with whichever feed was written last.
+
+    So an existing cache pins the feed. Only a bootstrap - an empty
+    cache - is free to choose, and it takes the best one that answers.
+    """
+    if have_feed:
+        by_symbol, notes = fetch_daily_bars(
+            client, [BENCHMARK_SYMBOL], start, end, feed=have_feed)
+        return by_symbol, notes, have_feed
+
+    last_notes = []
+    for feed in FEED_PREFERENCE:
+        by_symbol, notes = fetch_daily_bars(
+            client, [BENCHMARK_SYMBOL], start, end, feed=feed)
+        if by_symbol.get(BENCHMARK_SYMBOL):
+            return by_symbol, notes, feed
+        last_notes = notes
+    return {}, last_notes, FEED_PREFERENCE[-1]
 
 
 def _existing(cache: BarCache):
@@ -80,6 +126,7 @@ def refresh_benchmark(
 
     cache = BarCache(bars_root)
     have = _existing(cache)
+    have_feed = _cached_feed(cache)
     end = today - timedelta(days=_LAG_DAYS)
     start = (have[-1].day + timedelta(days=1)) if have else SIP_START
     if start > end:
@@ -95,8 +142,8 @@ def refresh_benchmark(
             import httpx
             client = httpx.Client(headers=headers, timeout=30.0)
         try:
-            by_symbol, notes = fetch_daily_bars(
-                client, [BENCHMARK_SYMBOL], start, end)
+            by_symbol, notes, used_feed = _fetch_with_fallback(
+                client, start, end, have_feed)
         finally:
             close = getattr(client, "close", None)
             if callable(close):
@@ -124,7 +171,7 @@ def refresh_benchmark(
     cache.write_bars(BENCHMARK_SYMBOL, ordered)
     cache.write_meta({
         "symbol": BENCHMARK_SYMBOL,
-        "feed": FEED,
+        "feed": used_feed,
         "adjustment": ADJUSTMENT,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "first_day": ordered[0].day.isoformat(),
@@ -132,4 +179,4 @@ def refresh_benchmark(
         "rows": len(ordered),
     })
     return RefreshResult(written=len(fresh), first_day=fresh[0].day,
-                         last_day=fresh[-1].day)
+                         last_day=fresh[-1].day, feed=used_feed)

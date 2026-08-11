@@ -1359,8 +1359,8 @@ def rich_decision(tmp_path):
 
 @pytest.mark.parametrize("must_appear", [
     "GBFH",                     # the candidate
-    "edgar",                    # a source it saw
-    "federal_register",
+    "SEC filings (EDGAR)",      # a source it saw, IN WORDS
+    "Government notices (Federal Register)",
     "insider cluster",          # the catalyst type
     "J. Restrepo, CFO",         # an evidence-graph neighbour
     "Q3 earnings, 14 Sep",
@@ -1494,7 +1494,9 @@ def test_the_brain_draws_the_whole_chain(wired):
                      "Risk engine", "Outcome"]
     assert b.edge_count >= 5
     html_out = panels.brain_panel(Db(wired), p="brain")
-    for expect in ("edgar", "federal register", "GBFH", "J. Restrepo, CFO",
+    for expect in ("SEC filings (EDGAR)",
+                   "Government notices (Federal Register)",
+                   "GBFH", "J. Restrepo, CFO",
                    "long", "trade", "target reached"):
         assert expect in html_out, expect
 

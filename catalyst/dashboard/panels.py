@@ -208,6 +208,14 @@ def performance_panel(db: Db, p: str = "perf") -> str:
     ))
 
     # Benchmark provenance, and its absence made loud.
+    if perf.spy_points and perf.spy_feed and perf.spy_feed != "sip":
+        out.append(caveat(
+            f"This SPY line comes from the {perf.spy_feed.upper()} feed, not "
+            "the consolidated tape. Alpaca only sells the full tape on a paid "
+            "data plan, and this account does not have one, so the bot uses "
+            "the best feed it can read. For a daily close on something as "
+            "liquid as SPY the difference is small - but it is a different "
+            "basis, and the comparison is only as good as that."))
     if perf.spy_points:
         out.append(prov(
             f"Benchmark: SPY, {len(perf.spy_points)} daily closes from "
@@ -1330,8 +1338,10 @@ def _spider_groups(t, c, db, ticker: str) -> list:
     seen = []
     for r in t.raw_events_q.rows[:4]:
         d = dict(r)
-        seen.append((str(d.get("source") or "source"),
-                     f"fetched {d.get('fetched_at') or 'unknown'}"))
+        # The feed in WORDS. "edgar" names the machine, not the thing.
+        seen.append((queries.source_label(d.get("source")),
+                     f"filing {d.get('source_id') or 'unknown'}, fetched "
+                     f"{d.get('fetched_at') or 'unknown'}"))
     ev = queries.evidence_graph(db, ticker) if ticker else None
     for r in (ev.rows if ev else [])[:4]:
         d = dict(r)

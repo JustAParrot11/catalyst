@@ -205,6 +205,7 @@ def alpaca_auth_headers() -> dict[str, str]:
 
 
 def fetch_daily_bars(client, symbols: list[str], start: date, end: date,
+                     feed: str | None = None,
                      ) -> tuple[dict[str, list[Bar]], list[dict]]:
     """Fetch daily bars for a chunk of symbols, following pagination.
 
@@ -224,7 +225,7 @@ def fetch_daily_bars(client, symbols: list[str], start: date, end: date,
         "start": start.isoformat(),
         "end": end.isoformat(),
         "adjustment": ADJUSTMENT,
-        "feed": FEED,
+        "feed": feed or FEED,
         "limit": 10000,
     }
     page_token: str | None = None

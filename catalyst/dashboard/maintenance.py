@@ -180,7 +180,24 @@ def build_checks() -> list[Check]:
         raw=f"hashed from {m['directory']}\n\n{listing}")]
 
 
-def passive_checks(db) -> list[Check]:
+def _edgar_is_publishing(now=None) -> bool:
+    """Is EDGAR in its own publishing window right now?
+
+    Business days, roughly 06:00-22:00 New York. Computed as a UTC
+    offset rather than with a timezone database, because being an hour
+    out either side of a sixteen-hour window changes nothing here and a
+    missing tzdata file must never take the page down.
+    """
+    now = now or datetime.now(timezone.utc)
+    ny_hour = (now.hour - 4) % 24        # EDT; EST is an hour out, harmless
+    weekday = now.weekday() < 5
+    return weekday and 6 <= ny_hour < 22
+
+
+def passive_checks(db, now=None) -> list[Check]:
+    """`now` is injectable so the EDGAR window can be tested on BOTH
+    sides of it. A check whose result depends on when the suite happens
+    to run is not a check - that has bitten this project three times."""
     out: list[Check] = list(stored_credentials_checks())
     out.extend(build_checks())
 
@@ -204,14 +221,37 @@ def passive_checks(db) -> list[Check]:
     #    considered spending; raw_events every cycle that fetched.
     row, err = one("SELECT MAX(fetched_at) t, COUNT(*) n FROM raw_events")
     age = _age(row["t"] if row else None)
+    # EDGAR'S OWN CLOCK, not ours. The bot fetches every cycle, day and
+    # night - discovery is not gated on market hours - but a stored row
+    # only appears when EDGAR PUBLISHES something, and it publishes on
+    # business days, roughly 06:00-22:00 New York. Overnight and at
+    # weekends there is nothing new to store, so the newest row ages
+    # exactly as it should. This check used to warn after six hours
+    # whatever the time, which meant it cried wolf every single night
+    # (owner-reported 2026-08-11: "does this only run during market
+    # hours, if no it says last seen 6 hours ago").
+    publishing = _edgar_is_publishing(now)
+    if age is None:
+        state, why = UNKNOWN, "no filing has been stored yet"
+    elif age < timedelta(hours=6):
+        state, why = OK, "fetched recently"
+    elif publishing:
+        state, why = WARN, ("EDGAR is publishing right now and nothing new "
+                            "has arrived - the feed or the scheduler may be "
+                            "stuck")
+    else:
+        state, why = OK, ("EDGAR is not publishing at this hour, so there is "
+                          "nothing new to store - this is expected, not a "
+                          "fault")
     out.append(Check(
-        "Filing feed (EDGAR) last delivered", "The bot itself",
-        OK if age and age < timedelta(hours=6) else
-        (WARN if age else UNKNOWN),
-        f"{_fmt_age(age)}" + (f", {row['n']} events stored" if row else ""),
-        "The bot fetches filings every cycle, roughly every 15 minutes, "
-        "day and night. Hours without one means the feed or the "
-        "scheduler is stuck.", raw=err or ""))
+        "Filing feed (EDGAR) last delivered", "The bot itself", state,
+        f"{_fmt_age(age)}" + (f", {row['n']} events stored" if row else "")
+        + f" - {why}",
+        "The bot fetches every cycle, roughly every 15 minutes, day and "
+        "night - discovery is never gated on market hours. But a row only "
+        "appears when EDGAR publishes, and it publishes on business days, "
+        "roughly 06:00-22:00 New York. An overnight or weekend gap is the "
+        "feed being quiet, not the bot being stuck.", raw=err or ""))
 
     # 3. Research calls - the only path that spends money.
     row, err = one("SELECT MAX(called_at) t, COUNT(*) n FROM research_calls")
@@ -488,9 +528,9 @@ class MaintenanceReport:
         return [c for c in self.checks if c.group == group]
 
 
-def build_report(db, creds=None, *, run_active: bool = False, **probes
-                 ) -> MaintenanceReport:
-    checks = passive_checks(db)
+def build_report(db, creds=None, *, run_active: bool = False, now=None,
+                 **probes) -> MaintenanceReport:
+    checks = passive_checks(db, now=now)
     if run_active:
         checks += active_checks(creds, **probes)
     return MaintenanceReport(
