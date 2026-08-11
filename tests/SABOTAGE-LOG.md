@@ -761,3 +761,13 @@ change kept from this session is the strengthened assertion block in
   "failed its own tests" for every rollback whatever the cause, and the
   evidence lines ran together because command substitution strips
   trailing newlines.
+- Re-running install.sh (2026-08-11, owner ran install instead of
+  upgrade). Verified empirically first that nothing is lost: the access
+  code, admin key, Alpaca keys, budget and database rows all survive a
+  re-run untouched. What is lost is the SAFETY NET - install.sh takes no
+  backup, runs no tests and cannot roll back. It now hands over to
+  upgrade.sh when a venv, an upgrade script and a git working copy are
+  all present, with fetching skipped. Two sabotages: delegating without
+  checking for a venv (which would break a first install), and removing
+  the delegation. Both caught. Both paths were run for real - a fresh
+  machine still installs, a second run hands over.

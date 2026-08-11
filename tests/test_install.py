@@ -1473,3 +1473,54 @@ class TestEveryDataFileActuallyShips:
         import fnmatch
         assert any(fnmatch.fnmatch("dashboard/schema_logs.sql", g)
                    for g in self._declared_globs())
+
+
+class TestReRunningTheInstallerIsSafe:
+    """The owner ran install.sh instead of upgrade.sh by accident
+    (2026-08-11). Nothing was lost - the installer never overwrites
+    credentials, never deletes a database and keeps the existing access
+    code - but it installed and restarted with NO gate: no backup, no
+    test suite, no rollback. On a machine holding positions that is the
+    one thing that should not happen quietly."""
+
+    def test_the_installer_hands_over_when_already_installed(self):
+        text = INSTALL_SH.read_text()
+        assert 'exec bash "${SCRIPT_DIR}/upgrade.sh"' in text
+        assert "CATALYST_SKIP_PULL=1" in text, (
+            "someone running the installer is asking to install THESE "
+            "files, not to pull new ones behind their back")
+
+    def test_it_only_hands_over_when_there_is_something_to_upgrade(self):
+        """A first install has no venv and must not delegate, or a fresh
+        machine can never be set up at all."""
+        text = INSTALL_SH.read_text()
+        block = text.split("CATALYST_NO_DELEGATE")[1].split("\nfi")[0]
+        assert '[ -x "${VENV_PY}" ]' in block
+        assert '[ -f "${SCRIPT_DIR}/upgrade.sh" ]' in block
+        assert "rev-parse --git-dir" in block, (
+            "the upgrade needs a git working copy; delegating without one "
+            "would refuse an install that would otherwise have worked")
+
+    def test_the_installer_still_never_overwrites_saved_state(self):
+        """The property that made the accident harmless. Kept explicit so
+        it cannot be lost in a later edit."""
+        text = INSTALL_SH.read_text()
+        assert "never overwrites credentials" in text
+        assert "init_db only ever creates tables that are missing" in text
+
+    def test_re_running_keeps_the_access_code(self, cred_file):
+        """The code is in the link the owner uses. Regenerating it on a
+        re-run would lock them out of their own dashboard."""
+        from catalyst.setup.credentials import (
+            ensure_dashboard_token, load_credentials, save_credentials,
+        )
+        save_credentials("PKAAAAAAAAAAAAAAAAAA", "ssssssssssssssssssss",
+                         "sk-ant-aaaaaaaaaaaaaaaa", None,
+                         anthropic_admin_key="sk-ant-admin01-keepme",
+                         settings={"monthly_budget_usd": 20})
+        before = load_credentials()
+        ensure_dashboard_token()          # what the installer calls
+        after = load_credentials()
+        assert after.dashboard_token == before.dashboard_token
+        assert after.anthropic_admin_key == before.anthropic_admin_key
+        assert after.settings["monthly_budget_usd"] == 20
