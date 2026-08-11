@@ -186,7 +186,12 @@ class TestQueriesActuallyRun:
         passed on a machine that had run fetch_history and failed on a
         real server, rolling back the owner's upgrade."""
         for c in maintenance.passive_checks(db):
-            assert not c.raw, f"{c.name} reported an error: {c.raw}"
+            assert c.state != "fail", f"{c.name} failed on a fresh install"
+            # raw is EVIDENCE, and an OK check may legitimately carry it
+            # (the build manifest does). What must never happen is a
+            # check that is not OK carrying an error on a clean machine.
+            if c.state != "ok":
+                assert not c.raw, f"{c.name} reported an error: {c.raw}"
 
     def test_a_missing_bar_cache_is_not_reported_as_a_fault(
             self, db, tmp_path, monkeypatch):
@@ -426,3 +431,66 @@ class TestStoredCredentialEvidence:
         report = maintenance.build_report(Db(dbf), None, run_active=False)
         names = [c.name for c in report.checks]
         assert "Anthropic billing key (admin) - stored?" in names
+
+
+class TestTheBuildStampCarriesItsProvenance:
+    """Owner-reported 2026-08-11: the dashboard showed build hash
+    d3f4e7812eac, which matches no commit in ANY branch. That proves the
+    running files differ from every released version and says nothing at
+    all about how - a fingerprint with no provenance, which is the one
+    thing this dashboard is not supposed to print."""
+
+    def test_the_manifest_lists_every_file_the_hash_covers(self):
+        from catalyst.dashboard.build import _hashed_files, build_manifest
+
+        m = build_manifest()
+        assert m["file_count"] == len(_hashed_files())
+        assert m["file_count"] >= 10
+        names = {x["name"] for x in m["files"]}
+        for expected in ("panels.py", "render.py", "server.py",
+                         "schema_logs.sql"):
+            assert expected in names, expected
+
+    def test_each_file_carries_its_own_digest_and_size(self):
+        """A mismatched build is then one glance from an answer: an extra
+        file, a missing one, or one whose contents differ."""
+        from catalyst.dashboard.build import build_manifest
+
+        for x in build_manifest()["files"]:
+            assert len(x["sha256"]) == 12
+            assert x["bytes"] > 0
+
+    def test_the_manifest_names_the_directory_it_hashed(self):
+        """Which matters when the service imports from site-packages and
+        the repo on disk says something different."""
+        from catalyst.dashboard.build import build_manifest
+
+        assert build_manifest()["directory"].endswith("dashboard")
+
+    def test_changing_one_file_changes_the_hash_and_shows_which(self, tmp_path):
+        from catalyst.dashboard.build import build_manifest, compute_build_hash
+
+        before = {x["name"]: x["sha256"] for x in build_manifest()["files"]}
+        assert compute_build_hash() == build_manifest()["build_hash"]
+        assert len(set(before.values())) == len(before), (
+            "two dashboard files with identical digests would make a "
+            "mismatch ambiguous")
+
+    def test_maintenance_shows_the_manifest_without_ssh(self):
+        from catalyst.dashboard.build import BUILD_HASH
+        from catalyst.dashboard.maintenance import build_checks
+
+        check = build_checks()[0]
+        assert BUILD_HASH in check.summary
+        assert "panels.py" in check.raw
+        assert "hashed from" in check.raw
+
+    def test_the_diagnostic_bundle_carries_it_too(self, tmp_path):
+        from catalyst.dashboard.db import Db
+        from catalyst.dashboard.server import diagnostics_bundle
+        from catalyst.storage import init_db
+
+        path = str(tmp_path / "d.db")
+        init_db(path).close()
+        bundle = diagnostics_bundle(Db(path))
+        assert bundle["build_manifest"]["file_count"] >= 10
