@@ -1417,3 +1417,59 @@ class TestTheSuiteCannotReachTheInstalledSystem:
         path = str(credentials_path())
         assert path.startswith(tempfile.gettempdir())
         assert not path.startswith("/etc/")
+
+
+class TestEveryDataFileActuallyShips:
+    """A .sql file is not a .py file and is not installed by default.
+    That was found once and fixed by listing directories BY HAND - so
+    when dashboard/schema_logs.sql arrived later it was never added and
+    never shipped.
+
+    The owner ran for weeks with an installed dashboard missing it, and
+    because the build hash covers .sql files, the installed copy hashed
+    differently from every released version. That is what sent us hunting
+    for a phantom second checkout (2026-08-11).
+    """
+
+    def _declared_globs(self) -> list:
+        import re
+
+        text = (REPO_ROOT / "pyproject.toml").read_text()
+        after = text.split("[tool.setuptools.package-data]")[1]
+        # Stop at the NEXT section header, not at the first "[" - which
+        # is the opening bracket of the value itself.
+        block = re.split(r"^\[", after, maxsplit=1, flags=re.M)[0]
+        return re.findall(r'"([^"]+)"', block)
+
+    def test_every_sql_file_in_the_tree_is_covered_by_a_declared_glob(self):
+        import fnmatch
+
+        globs = self._declared_globs()
+        assert globs, "package-data declares nothing"
+        missing = []
+        for path in sorted((REPO_ROOT / "catalyst").rglob("*.sql")):
+            rel = path.relative_to(REPO_ROOT / "catalyst").as_posix()
+            if not any(fnmatch.fnmatch(rel, g) or
+                       fnmatch.fnmatch(rel, g.replace("**/", ""))
+                       for g in globs):
+                missing.append(rel)
+        assert not missing, (
+            f"these .sql files would not be installed: {missing}. "
+            "They exist in the repo, so the tests pass and the installed "
+            "copy is broken - the one difference the suite cannot see.")
+
+    def test_the_declaration_is_a_recursive_glob_not_a_hand_list(self):
+        """A hand-written list of directories is a thing to remember, and
+        it was forgotten once. A recursive glob ships a new file because
+        it exists."""
+        assert any("**" in g for g in self._declared_globs()), (
+            "declare package data recursively, or the next .sql file "
+            "added in a new directory silently fails to ship")
+
+    def test_the_dashboard_log_schema_is_among_them(self):
+        """The specific file that did not ship, named so a regression is
+        legible rather than abstract."""
+        assert (REPO_ROOT / "catalyst" / "dashboard" / "schema_logs.sql").exists()
+        import fnmatch
+        assert any(fnmatch.fnmatch("dashboard/schema_logs.sql", g)
+                   for g in self._declared_globs())

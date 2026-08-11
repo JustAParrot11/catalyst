@@ -20,13 +20,24 @@ dev = [
 [tool.setuptools.packages.find]
 include = ["catalyst*"]
 
-# schema.sql is not a .py file, so it is NOT installed by default - an
-# installed copy then imports fine and dies the first time it opens the
-# database. Found by running install.sh on a clean machine, which is the
-# only place the difference between "the repo" and "the installed
+# A .sql file is not a .py file, so it is NOT installed by default - an
+# installed copy then imports fine and dies the first time it needs the
+# schema. Found once by running install.sh on a clean machine, which is
+# the only place the difference between "the repo" and "the installed
 # package" shows up.
+#
+# It then happened AGAIN, because the fix listed directories by hand:
+# dashboard/schema_logs.sql arrived later, was never added here, and so
+# never shipped. The owner's dashboard was missing it for weeks - and
+# because the build hash covers .sql files, the installed copy hashed
+# differently from every released version, which is what sent us
+# hunting for a phantom second checkout (2026-08-11).
+#
+# A recursive glob now, so a new .sql file ships by existing rather than
+# by being remembered. tests/test_install.py asserts every .sql in the
+# tree is covered.
 [tool.setuptools.package-data]
-catalyst = ["storage/*.sql", "storage/migrations/*.sql"]
+catalyst = ["**/*.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
