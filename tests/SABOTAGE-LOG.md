@@ -695,3 +695,27 @@ change kept from this session is the strengthened assertion block in
   remote: a change on a feature branch reports NOTHING CHANGED with an
   unmoved commit, and the same change merged to main moves the commit
   and completes.
+- Owner cap and credential evidence (2026-08-10, owner-reported). Five
+  sabotages: the dashboard reading BASE_CAP_CENTS again (the reported
+  bug - a raised budget never appearing); the typo guard always
+  allowing; the guard measuring against a fixed 5 rather than the
+  current figure (which would block growth in steps); an unreadable
+  credentials file reported as "not entered"; and fingerprint() returning
+  a slice of the key.
+  THE LAST ONE WAS NOT CAUGHT FIRST TIME: the test compared 12-character
+  chunks of the key against the output, and the sabotage returned only 8
+  characters, so nothing matched. Rewritten to state the invariant
+  directly - the fingerprint must not be a substring of the key, and
+  must be 8 hex digits - after which the sabotage fails.
+- Diagram interaction, funnel dating, typography (2026-08-10). Six
+  sabotages, all caught: hit areas removed; hit areas drawn as thin as
+  the line; pointer-events="stroke" dropped; pointer-events="none"
+  dropped from the visible strand; the funnel staleness marker removed;
+  the marker applied to everything (which would soften live errors); and
+  the hero figure sized by hand instead of from the scale.
+  TWO OF THESE WERE FOUND IN A BROWSER, NOT IN THE MARKUP, and neither
+  was catchable by reading: a fully transparent stroke is not hittable
+  under the default pointer-events, and the visible line painted over
+  the hit path was the element receiving hover, so a sibling selector
+  never matched. Both now have tests; the fix is group hover plus
+  explicit pointer-events on both paths.

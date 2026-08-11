@@ -201,6 +201,30 @@ def performance(db: Db) -> Performance:
 # --------------------------------------------------------------------------
 
 
+def _last_seen(last_at, first_at=None) -> str:
+    """When a drop reason last happened, in words that age.
+
+    A bare count cannot say "this stopped". The owner read a wall of
+    400 Bad Request errors as a live fault days after the bug behind
+    them was fixed, because the page showed only how many there had
+    ever been.
+    """
+    day = _as_date(last_at)
+    if day is None:
+        return ""
+    age = (datetime.now(timezone.utc).date() - day).days
+    when = ("last seen today" if age <= 0 else
+            "last seen yesterday" if age == 1 else
+            f"last seen {age} days ago")
+    span = ""
+    first = _as_date(first_at)
+    if first is not None and first != day:
+        span = f", first {first}"
+    if age >= 2:
+        when += " - NOT since, so this may be history rather than a live fault"
+    return f"{when} ({day}{span})"
+
+
 @dataclass
 class Stage:
     key: str
@@ -246,17 +270,23 @@ def funnel(db: Db) -> Funnel:
     researched_q = db.q(
         "SELECT COUNT(DISTINCT candidate_id) FROM research_calls WHERE skipped_reason IS NULL"
     )
+    # DATE EVERY DROP REASON. Owner-reported 2026-08-10: a wall of 400
+    # Bad Request errors from a bug fixed days earlier still read as
+    # current, because a count with no date cannot say "this stopped
+    # happening". Every reason now carries when it was last seen.
     skip_q = _grouped(db,
-        "SELECT skipped_reason, COUNT(*) n FROM research_calls "
+        "SELECT skipped_reason, COUNT(*) n, MIN(called_at) first_at, "
+        "       MAX(called_at) last_at FROM research_calls "
         "WHERE skipped_reason IS NOT NULL GROUP BY skipped_reason ORDER BY n DESC")
     gov_q = _grouped(db,
         "SELECT reason, COUNT(*) n, MIN(at) first_at, MAX(at) last_at "
         "FROM cost_governor_events WHERE decision = 'deny' "
         "GROUP BY reason ORDER BY n DESC")
-    drops = [(f"research skipped: {r['skipped_reason']}", r["n"], "") for r in skip_q.rows]
+    drops = [(f"research skipped: {r['skipped_reason']}", r["n"],
+              _last_seen(r["last_at"], r["first_at"])) for r in skip_q.rows]
     drops += [
         (f"cost governor denied: {r['reason']}", r["n"],
-         f"first {r['first_at']}, last {r['last_at']}")
+         _last_seen(r["last_at"], r["first_at"]))
         for r in gov_q.rows
     ]
     stages.append(Stage(
@@ -382,6 +412,12 @@ class CostPanel:
     reconcile_gap_days: int | None
     admin_key_present: bool
     owner_budget_usd: Decimal | None = None
+    #: Which bound set the cap above: "_owner_set", "_hard_capped", or
+    #: "" for the base. The page must name the bound, not just the number.
+    cap_source: str = ""
+    #: Non-None when the credentials file could not be READ. A read
+    #: failure must never be displayed as "nothing was entered".
+    creds_error: str | None = None
 
 
 def cost_panel(db: Db, as_of: date | None = None) -> CostPanel:
@@ -478,6 +514,7 @@ def cost_panel(db: Db, as_of: date | None = None) -> CostPanel:
         reconcile_gap_days = (yesterday - date.fromisoformat(last_reconciled_ok)).days
     admin_key_present = False
     owner_budget_usd = None
+    creds_error = None
     try:
         from catalyst.setup.credentials import load_credentials
         _creds = load_credentials()
@@ -485,8 +522,20 @@ def cost_panel(db: Db, as_of: date | None = None) -> CostPanel:
         raw_budget = (_creds.settings or {}).get("monthly_budget_usd")
         if raw_budget is not None:
             owner_budget_usd = Decimal(str(raw_budget))
-    except Exception:  # noqa: BLE001 - display only, never fatal
-        pass
+    except Exception as exc:  # noqa: BLE001 - display only, never fatal
+        creds_error = f"{type(exc).__name__}: {exc}"
+
+    # THE CAP THE GOVERNOR ACTUALLY USES, from the governor itself. This
+    # used to be gov.BASE_CAP_CENTS, so an owner who raised their budget
+    # to $20 still read "$0.00 of $5.00" everywhere and concluded the
+    # setting did nothing. It had in fact taken effect - only the screen
+    # was wrong, which is the worse of the two failures.
+    owner_cap_cents = (owner_budget_usd * 100) if owner_budget_usd is not None else None
+    try:
+        effective_cap, cap_source = gov.scheduled_cap_cents(
+            db.conn, gov.DEFAULT_GOVERNOR_PROFIT_SHARE, as_of, owner_cap_cents)
+    except Exception:  # noqa: BLE001 - fall back to the documented base
+        effective_cap, cap_source = gov.BASE_CAP_CENTS, "_unreadable"
 
     return CostPanel(
         as_of=as_of, month_prefix=month, days_elapsed=as_of.day,
@@ -501,12 +550,14 @@ def cost_panel(db: Db, as_of: date | None = None) -> CostPanel:
         governor_q=governor_q, billed_q=billed_q,
         billed_days=billed_q.row_count, billed_total_cents=billed_total,
         rates_stale=rates_stale(as_of), rates_verified_on=RATES_VERIFIED_ON,
-        base_cap_cents=gov.BASE_CAP_CENTS, max_cap_cents=gov.GOVERNOR_MAX_CAP_CENTS,
+        base_cap_cents=effective_cap, cap_source=cap_source,
+        max_cap_cents=gov.GOVERNOR_MAX_CAP_CENTS,
         manual_month_cap_cents=gov.MANUAL_SPEND_CAP_CENTS_PER_MONTH,
         check_failed_q=check_failed_q, last_reconciled_ok=last_reconciled_ok,
         reconcile_gap_days=reconcile_gap_days,
         admin_key_present=admin_key_present,
         owner_budget_usd=owner_budget_usd,
+        creds_error=creds_error,
     )
 
 

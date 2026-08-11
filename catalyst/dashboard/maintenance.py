@@ -83,8 +83,78 @@ def _fmt_age(delta: timedelta | None) -> str:
 # --------------------------------------------------------------------------
 
 
+def stored_credentials_checks() -> list[Check]:
+    """What is ACTUALLY SAVED on disk, with no network call at all.
+
+    "Did my key save?" and "does my key work?" are different questions,
+    and the page used to answer only the second - and only when the
+    owner clicked to run a live probe. Worse, a failure to READ the
+    credentials file was rendered as "no admin key entered (optional)",
+    so a permissions problem and never having typed one looked
+    identical. The owner saved a key, was told it worked, then read that
+    no key was present, with no way to tell which screen was wrong.
+
+    Each credential now reports its FINGERPRINT - a SHA-256 prefix, safe
+    to display and to paste into a bug report. The save form echoes the
+    same fingerprint, so the two can be compared directly.
+    """
+    from catalyst.setup.credentials import credentials_path, load_credentials
+
+    from pathlib import Path
+
+    path = credentials_path()
+    if not Path(path).exists():
+        # A fresh machine before anyone has filled the form in. Normal,
+        # and emphatically not a fault - the install script hands the
+        # owner this exact state on purpose.
+        return [Check(
+            "Saved credentials", "The bot itself", UNKNOWN,
+            "setup has not been completed yet",
+            "No credentials file exists. Open the setup page and enter "
+            "your Alpaca and Anthropic details; nothing trades until then.",
+            raw="")]
+    try:
+        creds = load_credentials()
+    except Exception as exc:  # noqa: BLE001 - the state IS the answer
+        return [Check(
+            "Saved credentials", "The bot itself", FAIL,
+            f"the file exists but could not be read: {type(exc).__name__}",
+            "This is NOT the same as having entered nothing - a file that "
+            "cannot be read would make every 'not entered' below a guess. "
+            "Usual cause is ownership or permissions on the file.",
+            raw=f"{path}: {exc}")]
+
+    prints = creds.fingerprints()
+    out = [Check(
+        "Saved credentials", "The bot itself", OK,
+        f"readable, last saved {creds.saved_at or 'at an unrecorded time'}",
+        "Read straight from the file the bot itself uses. No network "
+        "call, so this answers 'did it save', never 'does it work'.",
+        raw="")]
+    for label, name, needed in (
+            ("Alpaca key", "alpaca_key", True),
+            ("Alpaca secret", "alpaca_secret", True),
+            ("Anthropic research key", "anthropic_key", True),
+            ("Anthropic billing key (admin)", "anthropic_admin_key", False)):
+        fp = prints.get(name) or ""
+        out.append(Check(
+            f"{label} - stored?", "The bot itself",
+            OK if fp else (FAIL if needed else UNKNOWN),
+            (f"stored, fingerprint {fp}" if fp
+             else "not stored" if needed else "not stored (optional)"),
+            "The fingerprint is a one-way hash of the saved value, so it "
+            "is safe to read out and to send in a bug report. The setup "
+            "page prints the same fingerprint when it saves - if the two "
+            "match, the key you typed is the key the bot has."
+            if fp else
+            "Nothing is saved under this name. If you believe you entered "
+            "one, the save did not reach the file.",
+            raw=""))
+    return out
+
+
 def passive_checks(db) -> list[Check]:
-    out: list[Check] = []
+    out: list[Check] = list(stored_credentials_checks())
 
     def one(sql, params=()):
         try:

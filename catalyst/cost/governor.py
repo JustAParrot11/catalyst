@@ -37,22 +37,31 @@ BASE_CAP_CENTS = Decimal("500")                     # $5/month, hard (BUILD-BRIE
 # month walks the cap toward that line (audit F5).
 GOVERNOR_MAX_CAP_CENTS = Decimal("800")
 
-# HARD BOUND, and a DIFFERENT one: the most a HUMAN may deliberately
-# set from the dashboard. The two ceilings above and below were one
-# number until the owner asked to set the budget themselves, and they
-# do different jobs:
+# The owner sets their own budget, and there is deliberately NO fixed
+# ceiling on it. The two limits do different jobs and only one of them
+# is a safety bound:
 #
 #   GOVERNOR_MAX_CAP_CENTS  bounds what the SYSTEM hands itself out of
 #                           its own realised profit - the anti-ratchet,
 #                           so a lucky month cannot walk the cap upward.
-#   OWNER_MAX_CAP_CENTS     bounds what a PERSON can choose on purpose.
+#                           This one never moves by itself, ever.
+#   the owner's figure      is a person deciding how much of their own
+#                           money to spend. That is not a safety
+#                           question, and a hard-coded number cannot
+#                           make it one - it can only make the product
+#                           wrong as the account grows.
 #
-# A human deciding to spend more is a decision; a system paying itself
-# more is a ratchet, and only the first is safe to allow. $25/month is
-# BUILD-BRIEF's absolute ceiling (~GBP 20), at which the strategy must
-# beat roughly 30%/year merely to match holding cash - which is why the
-# dashboard prints that hurdle beside the field rather than burying it.
-OWNER_MAX_CAP_CENTS = Decimal("2500")
+# What replaces the ceiling is INFORMED CONSENT, enforced where the
+# number is entered rather than here: the form prints the annual hurdle
+# the strategy must clear at the figure chosen, and a value far above
+# the current one has to be confirmed, so a slipped keyboard cannot
+# become a spending limit. See setup/first_run.py.
+#
+# BUILD-BRIEF's GBP 20 / ~$25 is still the figure at which the strategy
+# must beat roughly 30%/year merely to match cash. It is now advice
+# printed at the point of choosing rather than a wall.
+OWNER_TYPO_GUARD_FACTOR = Decimal("10")     # entry-time only, see first_run
+OWNER_SOFT_ADVICE_CENTS = Decimal("2500")   # where the hurdle warning sharpens
 
 MANUAL_SPEND_CAP_CENTS_PER_MONTH = Decimal("2000")  # $20/month, human-set, never adaptive
 MANUAL_LIFETIME_BUDGET_CENTS = Decimal("20000")     # the $200 one-off build budget
@@ -66,6 +75,41 @@ MANUAL_LIFETIME_BUDGET_CENTS = Decimal("20000")     # the $200 one-off build bud
 DEFAULT_GOVERNOR_PROFIT_SHARE = Decimal("0.10")
 
 
+def scheduled_cap_cents(
+    conn: sqlite3.Connection,
+    governor_profit_share: Decimal,
+    as_of: date | None = None,
+    owner_monthly_cap_cents: Decimal | None = None,
+) -> tuple[Decimal, str]:
+    """The scheduled cap in force, and which bound set it.
+
+    ONE SOURCE OF TRUTH, and that is the whole point of this function
+    existing. The dashboard used to print BASE_CAP_CENTS while the
+    governor spent against a different number, so an owner who raised
+    their budget saw "$0.00 of $5.00" forever and reasonably concluded
+    the setting did nothing (owner-reported 2026-08-10). Anything that
+    displays the cap must call this, not the constants.
+
+    Returns (cap, reason_suffix) where the suffix names the bound for
+    the governor's audit row.
+    """
+    as_of = as_of or datetime.now(timezone.utc).date()
+    if owner_monthly_cap_cents is not None:
+        # A deliberate human decision REPLACES the base, up or down. The
+        # only thing clamped here is the direction: a negative reads as
+        # "stop", never as "no limit". There is no fixed upper ceiling -
+        # the owner sets their own budget - but the number is sanity
+        # checked where it is ENTERED, so a slipped keyboard cannot
+        # become a spending limit.
+        return max(owner_monthly_cap_cents, Decimal("0")), "_owner_set"
+    uncapped = BASE_CAP_CENTS + (
+        net_realized_profit_cents_prior_month(conn, as_of) * governor_profit_share
+    )
+    if uncapped > GOVERNOR_MAX_CAP_CENTS:
+        return GOVERNOR_MAX_CAP_CENTS, "_hard_capped"
+    return uncapped, ""
+
+
 def authorize(
     estimate: CostEstimate,
     conn: sqlite3.Connection,
@@ -76,12 +120,19 @@ def authorize(
 ) -> GovernorDecision:
     """owner_monthly_cap_cents is the number the owner typed into the
     setup page ("the bot will not go past it"). It REPLACES the base
-    cap, upward or downward, and is then clamped to OWNER_MAX_CAP_CENTS
-    - a person choosing to spend more is a decision, where a system
-    paying itself more out of its own profit is a ratchet, so only the
-    first is allowed above the base. (Stress stage-8 E1: the field was
-    collected and read by nobody, which made the setup page's promise
-    false. It is read here.)"""
+    cap, upward or downward, with NO fixed ceiling - a person choosing
+    to spend more is a decision, where a system paying itself more out
+    of its own profit is a ratchet, and only the second needs a wall.
+    The figure is sanity checked where it is ENTERED (first_run.py), so
+    a slipped keyboard cannot arrive here as a budget.
+
+    The cap itself is computed by scheduled_cap_cents(), which anything
+    DISPLAYING the cap must also call - the dashboard printed the base
+    constant while the governor spent against this number, so a raised
+    budget never appeared on screen (owner-reported 2026-08-10).
+
+    (Stress stage-8 E1: the field was collected and read by nobody,
+    which made the setup page's promise false. It is read here.)"""
     as_of = as_of or datetime.now(timezone.utc).date()
     spent = month_to_date_cents(estimate.kind, conn, as_of)
 
@@ -101,21 +152,8 @@ def authorize(
             return decision
 
     if estimate.kind == "scheduled":
-        uncapped = BASE_CAP_CENTS + (
-            net_realized_profit_cents_prior_month(conn, as_of) * governor_profit_share
-        )
-        cap = min(uncapped, GOVERNOR_MAX_CAP_CENTS)
-        reason_suffix = "_hard_capped" if uncapped > GOVERNOR_MAX_CAP_CENTS else ""
-        if owner_monthly_cap_cents is not None:
-            # The owner's figure REPLACES the base, up or down - it is a
-            # deliberate human decision, not the system rewarding itself
-            # - and is bounded by the human ceiling. A mistyped 99999
-            # must not become a 99999-cent budget, and a negative must
-            # read as "stop", never as "no limit".
-            owner = min(max(owner_monthly_cap_cents, Decimal("0")),
-                        OWNER_MAX_CAP_CENTS)
-            cap = owner
-            reason_suffix = "_owner_capped"
+        cap, reason_suffix = scheduled_cap_cents(
+            conn, governor_profit_share, as_of, owner_monthly_cap_cents)
         would_be = spent + estimate.estimated_cents
         if would_be > cap:
             decision = GovernorDecision(

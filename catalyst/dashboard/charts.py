@@ -560,11 +560,18 @@ def decision_spider(
 
         for li, (leaf_label, detail) in enumerate(leaves):
             lx, ly = place(li)
+            tip = (f"{glabel}: {leaf_label}"
+                   + (f" - {detail}" if detail else ""))
             out.append(
-                f'<line x1="{hx:.1f}" y1="{hy:.1f}" x2="{lx:.1f}" y2="{ly:.1f}" '
-                f'stroke="{colour}" stroke-width="1.4" opacity="0.75">'
-                f"<title>{glabel}: {leaf_label}"
-                + (f" - {detail}" if detail else "") + "</title></line>")
+                f'<g class="edge-wrap">'
+                f'<line class="edge" x1="{hx:.1f}" y1="{hy:.1f}" '
+                f'x2="{lx:.1f}" y2="{ly:.1f}" '
+                f'stroke="{colour}" stroke-width="1.4" opacity="0.75" '
+                f'pointer-events="none"/>'
+                f'<line class="edge-hit" x1="{hx:.1f}" y1="{hy:.1f}" '
+                f'x2="{lx:.1f}" y2="{ly:.1f}" stroke="transparent" '
+                f'stroke-width="16" pointer-events="stroke">'
+                f"<title>{tip}</title></line></g>")
 
         # Leaf boxes, painted after every line in the arm so they sit on top.
         for li, (leaf_label, detail) in enumerate(leaves):
@@ -574,19 +581,20 @@ def decision_spider(
             box_h = 15 + 13 * len(lines)
             bx, by = lx - box_w / 2, ly - box_h / 2
             # A 2px surface ring keeps overlapping marks separable.
+            tip = (f"{glabel}: {leaf_label}"
+                   + (f" - {detail}" if detail else ""))
             out.append(
+                f'<g class="node"><title>{tip}</title>'
                 f'<rect x="{bx:.1f}" y="{by:.1f}" width="{box_w:.1f}" '
                 f'height="{box_h:.1f}" rx="5" fill="var(--surface-2)" '
                 f'stroke="{colour}" stroke-width="1.4" '
-                f'paint-order="stroke" '
-                f'style="stroke-linejoin:round">'
-                f"<title>{glabel}: {leaf_label}"
-                + (f" - {detail}" if detail else "") + "</title></rect>")
-            for j, ln in enumerate(lines):
-                out.append(
+                f'paint-order="stroke" style="stroke-linejoin:round"/>'
+                + "".join(
                     f'<text x="{lx:.1f}" y="{by + 14 + 13 * j:.1f}" '
                     f'font-size="{FONT_SIZE}" text-anchor="middle" '
-                    f'fill="var(--ink-2)">{ln}</text>')
+                    f'fill="var(--ink-2)">{ln}</text>'
+                    for j, ln in enumerate(lines))
+                + "</g>")
 
         # The hub, and its spoke to the centre. Drawn after the leaves so
         # the arm's label is never buried under a fact.
@@ -649,6 +657,7 @@ def neural_map(
     chart_id: str,
     width: int = 1180,
     row_gap: int = 34,
+    links: dict | None = None,   # node_id -> href, for clickable nodes
 ) -> str:
     """The system's live wiring, drawn as connected layers.
 
@@ -719,14 +728,34 @@ def neural_map(
         x2, y2 = pos[dst]
         cxa, cxb = x1 + (x2 - x1) * 0.45, x2 - (x2 - x1) * 0.45
         opacity = 0.22 + 0.55 * (weight / max_e)
+        # TWO paths per edge. A 1.1px line is close to unhittable with a
+        # mouse and impossible with a finger, so the owner reported that
+        # nothing happened on hover at all. The first path is a fat,
+        # invisible hit area; the second is the line you see. Both carry
+        # the <title>, so the tooltip fires anywhere near the strand.
+        d = (f'M{x1:.1f},{y1:.1f} C{cxa:.1f},{y1:.1f} {cxb:.1f},{y2:.1f} '
+             f'{x2:.1f},{y2:.1f}')
+        # ONE GROUP per edge, and the fat transparent hit path LAST.
+        # Two things had to be true before hovering did anything, and
+        # both were found in a browser rather than in the markup:
+        #   1. pointer-events="stroke" - the default is visiblePainted,
+        #      under which a fully transparent stroke is not painted and
+        #      so cannot be hit at all.
+        #   2. the hit path on top and the highlight driven by GROUP
+        #      hover - with the visible line painted last it was the
+        #      element under the pointer, so a sibling selector on the
+        #      hit path never matched.
         out.append(
-            f'<path d="M{x1:.1f},{y1:.1f} C{cxa:.1f},{y1:.1f} {cxb:.1f},{y2:.1f} '
-            f'{x2:.1f},{y2:.1f}" fill="none" stroke="var(--accent)" '
-            f'stroke-width="1.1" opacity="{opacity:.2f}">'
-            f"<title>{title}</title></path>")
+            f'<g class="edge-wrap">'
+            f'<path class="edge" d="{d}" fill="none" stroke="var(--accent)" '
+            f'stroke-width="1.1" opacity="{opacity:.2f}" pointer-events="none"/>'
+            f'<path class="edge-hit" d="{d}" fill="none" stroke="transparent" '
+            f'stroke-width="14" pointer-events="stroke">'
+            f"<title>{title}</title></path></g>")
         drawn += 1
 
     # Nodes last, so no connector crosses a label.
+    links = links or {}
     for ci, (label, nodes, _) in enumerate(kept):
         colour = NEURAL_STEPS[min(ci, len(NEURAL_STEPS) - 1)]
         left_side = ci >= n_cols / 2
@@ -734,9 +763,13 @@ def neural_map(
             x, y = pos[nid]
             r = radius[nid]
             out.append(
+                f'<g class="node"><circle cx="{x:.1f}" cy="{y:.1f}" '
+                f'r="{max(r + 9, 13):.1f}" fill="transparent" '
+                f'pointer-events="all">'
+                f"<title>{node_label} - {weight} link(s)</title></circle>"
                 f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{r:.1f}" fill="{colour}" '
-                f'stroke="var(--page)" stroke-width="2">'
-                f"<title>{node_label} ({weight} link(s))</title></circle>")
+                f'stroke="var(--page)" stroke-width="2" '
+                f'pointer-events="none"/></g>')
             tx = x - r - 7 if left_side else x + r + 7
             anchor = "end" if left_side else "start"
             text = node_label if len(node_label) <= 20 else node_label[:19] + "…"
@@ -744,11 +777,20 @@ def neural_map(
             # label is crossed by three of them and reads as struck
             # through - painting the page colour as a stroke UNDER the
             # glyphs cuts a clean gap in every line behind it.
-            out.append(
+            label_svg = (
                 f'<text x="{tx:.1f}" y="{y + 3.5:.1f}" font-size="{FONT_SIZE - 1}" '
                 f'text-anchor="{anchor}" fill="var(--ink-2)" '
                 f'stroke="var(--page)" stroke-width="3.5" paint-order="stroke" '
                 f'style="stroke-linejoin:round">{text}</text>')
+            href = links.get(nid)
+            if href:
+                # A node that maps to a page is a LINK, so clicking it
+                # goes there. Hovering tells you what it is; clicking
+                # takes you to the record behind it.
+                out.append(f'<a href="{href}">{label_svg}'
+                           f"<title>Open {node_label}</title></a>")
+            else:
+                out.append(label_svg)
 
     out.append(
         f'<text x="{width - 10}" y="{height - 10}" font-size="{FONT_SIZE - 1}" '
