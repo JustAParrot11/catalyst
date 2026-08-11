@@ -1267,3 +1267,152 @@ def brain(db: Db, limit: int = 60) -> Brain:
     b.node_count = sum(len(n) for _, n in b.layers)
     b.edge_count = len(b.edges)
     return b
+
+
+# --------------------------------------------------------------------------
+# The news map: what was said, about whom, and what the bot did about it
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class NewsMap:
+    layers: list = field(default_factory=list)
+    edges: list = field(default_factory=list)
+    node_links: dict = field(default_factory=dict)
+    story_count: int = 0
+    ticker_count: int = 0
+    query: QueryResult | None = None
+    filters: dict = field(default_factory=dict)
+    #: Tickers where news agreed with a FILING feed. These are the ones
+    #: worth looking at, and they are rare on purpose.
+    cross_feed_tickers: tuple = ()
+
+
+#: Ticker column cap. A firehose day carries 450+ symbols and drawing
+#: them is not a map, it is a smear - the owner asked for "filters so the
+#: network doesnt get hug etc". Ordered by how much evidence each ticker
+#: carries, so the cap keeps the interesting end.
+MAP_MAX_TICKERS = 14
+MAP_MAX_STORIES = 26
+
+
+def news_map(db: Db, *, days: int = 3, kind: str = "",
+             ticker: str = "", only_linked: bool = False) -> NewsMap:
+    """News stories -> tickers -> what happened next, as recorded rows.
+
+    EVERY EDGE IS A ROW. A story connects to a ticker because
+    raw_events.payload_raw named that ticker; a ticker connects to a
+    candidate because the candidate's source_event_ids contains that
+    event's id. Nothing is inferred to make the picture denser - a
+    connector nobody can trace back to a row is decoration that looks
+    like evidence.
+    """
+    since = (datetime.now(timezone.utc) - timedelta(days=max(1, days))).isoformat()
+    res = db.q(
+        "SELECT source_id, fetched_at, payload_raw FROM raw_events "
+        "WHERE source = 'alpaca_news' AND fetched_at >= ? "
+        "ORDER BY fetched_at DESC LIMIT 4000", (since,))
+
+    stories: list = []
+    by_ticker: dict = {}
+    for row in res.rows:
+        payload = jload(row["payload_raw"], {}) or {}
+        tick = str(payload.get("ticker") or "").strip().upper()
+        if not tick:
+            continue
+        catalyst = str(payload.get("catalyst_type") or "news")
+        if kind and catalyst != kind:
+            continue
+        if ticker and tick != ticker.strip().upper():
+            continue
+        stories.append({
+            "id": str(row["source_id"]),
+            "ticker": tick,
+            "headline": str(payload.get("headline") or "")[:110],
+            "catalyst": catalyst,
+            "hint": int(payload.get("direction_hint") or 0),
+            "publisher": str(payload.get("publisher") or ""),
+            "when": str(payload.get("filed_date") or "")[:10],
+        })
+        by_ticker.setdefault(tick, []).append(stories[-1])
+
+    # Which tickers ALSO have evidence from a filing feed? Those are the
+    # cross-feed conjunctions - the whole point - so they are marked and
+    # sorted first, and `only_linked` reduces the map to just them.
+    linked: set = set()
+    if by_ticker:
+        marks = ",".join("?" * len(by_ticker))
+        others = db.q(
+            f"SELECT payload_raw FROM raw_events "
+            f"WHERE source != 'alpaca_news' AND fetched_at >= ? LIMIT 8000",
+            (since,))
+        for row in others.rows:
+            payload = jload(row["payload_raw"], {}) or {}
+            other = str(payload.get("ticker") or payload.get("symbol")
+                        or "").strip().upper()
+            if other in by_ticker:
+                linked.add(other)
+
+    if only_linked:
+        by_ticker = {t: v for t, v in by_ticker.items() if t in linked}
+        stories = [s for s in stories if s["ticker"] in by_ticker]
+
+    # Which tickers became candidates, and what happened to them.
+    outcomes: dict = {}
+    if by_ticker:
+        marks = ",".join("?" * len(by_ticker))
+        got = db.q(
+            "SELECT c.ticker, c.id, "
+            "  COALESCE(d.action, CASE WHEN v.candidate_id IS NOT NULL "
+            "                          THEN 'researched' ELSE 'seen' END) act "
+            "FROM candidates c "
+            "LEFT JOIN research_views v ON v.candidate_id = c.id "
+            "LEFT JOIN risk_decisions d ON d.candidate_id = c.id "
+            f"WHERE c.ticker IN ({marks})", tuple(by_ticker))
+        for row in got.rows:
+            outcomes.setdefault(str(row["ticker"]).upper(), set()).add(
+                str(row["act"]))
+
+    ordered = sorted(
+        by_ticker.items(),
+        key=lambda kv: (kv[0] not in linked, -len(kv[1]), kv[0]))[:MAP_MAX_TICKERS]
+    keep_tickers = {t for t, _ in ordered}
+    shown_stories = [s for s in stories
+                     if s["ticker"] in keep_tickers][:MAP_MAX_STORIES]
+
+    story_nodes = [(f"st-{s['id']}",
+                    (s["headline"] or s["catalyst"])[:58],
+                    1.0 + abs(s["hint"])) for s in shown_stories]
+    ticker_nodes = [(f"tk-{t}", t + (" *" if t in linked else ""),
+                     1.0 + min(3, len(rows)))
+                    for t, rows in ordered]
+    act_labels = {"trade": "traded", "skip": "declined by the risk engine",
+                  "researched": "researched, no decision yet",
+                  "seen": "seen, not researched"}
+    acts: dict = {}
+    for t in keep_tickers:
+        for act in (outcomes.get(t) or {"seen"}):
+            acts.setdefault(act, []).append(t)
+    act_nodes = [(f"ac-{a}", act_labels.get(a, a), 1.0 + len(ts))
+                 for a, ts in sorted(acts.items())]
+
+    edges = [(f"st-{s['id']}", f"tk-{s['ticker']}", 1.0 + abs(s["hint"]),
+              f"{s['when']} {s['publisher']}: {s['headline']}")
+             for s in shown_stories]
+    for act, ts in acts.items():
+        for t in ts:
+            edges.append((f"tk-{t}", f"ac-{act}", 1.0,
+                          f"{t} -> {act_labels.get(act, act)}"))
+
+    return NewsMap(
+        layers=[("What was said", story_nodes),
+                ("About whom", ticker_nodes),
+                ("What the bot did", act_nodes)],
+        edges=edges,
+        node_links={f"tk-{t}": f"/logs?q={t}" for t in keep_tickers},
+        story_count=len(stories), ticker_count=len(by_ticker),
+        query=res,
+        filters={"days": days, "kind": kind, "ticker": ticker,
+                 "only_linked": only_linked},
+        cross_feed_tickers=tuple(sorted(linked)),
+    )

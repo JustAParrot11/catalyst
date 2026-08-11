@@ -557,6 +557,7 @@ NAV_GROUPS = [
     ]),
     ("Investigate", [
         ("/brain", "The brain", "Everything it has linked, as one map"),
+        ("/newsmap", "News map", "What was said, about whom"),
         ("/decisions", "Decisions", "Why each trade was taken or declined"),
         ("/refusals", "Refusals", "What declined candidates went on to do"),
         ("/logs", "Logs", "Searchable event log"),

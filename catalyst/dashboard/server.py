@@ -195,6 +195,13 @@ def route_brain(db: Db, params: dict) -> str:
                        subtitle="Every line is one recorded link")
 
 
+def route_newsmap(db: Db, params: dict) -> str:
+    return render_page("News map", panels.news_map_panel(db, params,
+                                                         p="newsmap"),
+                       "/newsmap", db.path, db=db,
+                       subtitle="Every line is one stored story")
+
+
 def route_refusals(db: Db, params: dict) -> str:
     # Simple by default, same as Decisions: the map answers "is a reason
     # refusing money" by following a strand; the table makes you compute
@@ -371,6 +378,7 @@ HTML_ROUTES = {
     "/decisions": route_decisions,
     "/decision": route_decision,
     "/brain": route_brain,
+    "/newsmap": route_newsmap,
     "/refusals": route_refusals,
     "/logs": route_logs,
     "/maintenance": route_maintenance,

@@ -2344,3 +2344,97 @@ def brain_panel(db: Db, p: str = "brain") -> str:
             table(f"{p}-nodes", ["layer", "node", "links"], rows,
                   numeric_cols={2})))
     return section(f"{p}-section", "The brain", "".join(out))
+
+
+def news_map_panel(db: Db, params: dict | None = None, p: str = "newsmap") -> str:
+    """What the news said, about whom, and what the bot did about it.
+
+    Owner-asked: "I also wanted a second neural network for new linking
+    news feeds e.g. CEO appointed or something like that to see links
+    and connections, filters so the network doesnt get hug etc."
+
+    EVERY LINE IS A ROW. A story joins a ticker because the stored
+    payload named it; a ticker joins an outcome because a candidate row
+    carries that ticker. Nothing is inferred to thicken the picture - a
+    connector nobody can trace back to a row is decoration that looks
+    like evidence, and this dashboard's whole claim is that it never
+    draws one.
+    """
+    params = params or {}
+
+    def one(key, default=""):
+        got = params.get(key)
+        return (got[0] if isinstance(got, list) else got) or default
+
+    try:
+        days = max(1, min(30, int(one("days", "3"))))
+    except (TypeError, ValueError):
+        days = 3
+    kind = str(one("kind"))[:40]
+    ticker = str(one("ticker"))[:12]
+    only_linked = one("linked") in ("1", "on", "true")
+
+    m = queries.news_map(db, days=days, kind=kind, ticker=ticker,
+                         only_linked=only_linked)
+    out: list[str] = [note(
+        "Read left to right: <b>a story</b> was published, it was "
+        "<b>about a company</b>, and the bot <b>did something or "
+        "nothing</b> about it. A ticker marked <b>*</b> is one where a "
+        "FILING feed said something too &mdash; those are the "
+        "cross-feed links worth looking at, because a story and a filing "
+        "agreeing is two independent observations rather than one "
+        "newsroom. Hover any line for the headline behind it.")]
+
+    kinds = sorted({str((n[1] or "")) for _lbl, nodes in m.layers[:1]
+                    for n in nodes}) if m.layers else []
+    out.append(
+        f'<form class="inline" id="{p}-filters" method="get" action="/newsmap">'
+        f'<label class="prov">days <input type="number" name="days" min="1" '
+        f'max="30" value="{days}" style="width:5em"></label> '
+        f'<label class="prov">ticker <input type="text" name="ticker" '
+        f'value="{esc(ticker)}" placeholder="any" style="width:7em"></label> '
+        f'<label class="prov">kind <input type="text" name="kind" '
+        f'value="{esc(kind)}" placeholder="e.g. dilution" '
+        f'style="width:10em"></label> '
+        f'<label class="prov"><input type="checkbox" name="linked" value="1"'
+        + (" checked" if only_linked else "")
+        + "> only tickers a filing feed also mentioned</label> "
+        '<button type="submit">Redraw</button></form>')
+
+    out.append(tiles(f"{p}-tiles", [
+        ("Stories", f"{m.story_count:,}",
+         f"news items stored in the last {days} day(s)"),
+        ("Companies", f"{m.ticker_count:,}", "distinct tickers mentioned"),
+        ("Cross-feed", str(len(m.cross_feed_tickers)),
+         "also named by a filing feed - the links worth reading"),
+    ]))
+
+    story_nodes = m.layers[0][1] if m.layers else []
+    if story_nodes:
+        out.append(charts.neural_map(
+            m.layers, m.edges, chart_id=f"{p}-map", links=m.node_links))
+        out.append(prov(
+            f"Drawn from {len(m.edges)} recorded link(s). The story column "
+            f"is capped at {queries.MAP_MAX_STORIES} and the ticker column "
+            f"at {queries.MAP_MAX_TICKERS}, ordered so cross-feed tickers "
+            "come first - a firehose day carries 450+ symbols and drawing "
+            "them all is a smear, not a map. Narrow the window or filter by "
+            "ticker to see the rest."))
+    else:
+        out.append(zero_block(
+            f"{p}-empty", m.query,
+            meaning=("no news has been stored in this window yet. The news "
+                     "feed reaches discovery from build a244e894 onward, so "
+                     "an install upgraded before that has nothing here until "
+                     "the next cycle runs.")))
+
+    if m.cross_feed_tickers:
+        out.append(note(
+            "<b>Cross-feed right now:</b> "
+            + ", ".join(esc(t) for t in m.cross_feed_tickers[:24])
+            + ". These are the tickers where news and filings independently "
+            "landed on the same company. That is what earns a candidate a "
+            "bigger research budget, and it is the only kind of link the "
+            "bot treats as more than coincidence."))
+    return section(f"{p}-section", "News map: what was said, about whom",
+                   "".join(out))
