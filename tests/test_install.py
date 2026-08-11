@@ -1360,3 +1360,60 @@ def test_the_package_version_and_the_project_version_agree():
                      (REPO_ROOT / "pyproject.toml").read_text(),
                      re.M).group(1)
     assert pkg == proj, f"catalyst.__version__ is {pkg}, pyproject says {proj}"
+
+
+# ==========================================================================
+# The suite must be hermetic, not merely offline.
+#
+# Reported 2026-08-11: one test passed here and failed on the owner's
+# server, failing the upgrade gate. Cause: conftest used
+# os.environ.setdefault for CATALYST_CREDENTIALS and CATALYST_DB, which
+# KEEPS whatever the environment already holds - on an installed machine
+# the real /etc/catalyst/credentials.json. So the "fully offline" suite
+# was reading live credentials and its results depended on the machine.
+#
+# Same defect as the bar-cache one before it, and the same lesson: a
+# test whose result depends on the machine is not a test.
+# ==========================================================================
+
+
+class TestTheSuiteCannotReachTheInstalledSystem:
+    @pytest.mark.parametrize("var", ["CATALYST_CREDENTIALS", "CATALYST_DB",
+                                     "CATALYST_LOCK", "CATALYST_BARS"])
+    def test_no_path_variable_can_reach_the_installed_system(self, var):
+        """A test may legitimately repoint these at its OWN temp dir.
+        What none of them may ever do is address the real installation."""
+        import os
+        import tempfile
+
+        value = os.environ.get(var, "")
+        assert value, f"{var} must be pinned by conftest, not left to chance"
+        for real in ("/etc/catalyst", "/var/lib/catalyst", "/var/backups"):
+            assert not value.startswith(real), (
+                f"{var}={value!r} addresses the installed system")
+        assert value.startswith(tempfile.gettempdir()), (
+            f"{var}={value!r} is outside any temporary directory")
+
+    def test_conftest_assigns_rather_than_defaulting(self):
+        """setdefault is the specific mistake: it silently exempts a
+        variable from the isolation rule stated two lines above it, so
+        an installed machine's own paths survive into the suite."""
+        text = (REPO_ROOT / "tests" / "conftest.py").read_text()
+        block = text.split("sandbox = ")[1]
+        code = "\n".join(ln for ln in block.splitlines()
+                          if not ln.strip().startswith("#"))
+        for var in ("CATALYST_CREDENTIALS", "CATALYST_DB", "CATALYST_LOCK",
+                    "CATALYST_BARS"):
+            assert f'os.environ["{var}"]' in code, (
+                f"{var} must be ASSIGNED; setdefault keeps the installed "
+                "machine's own value")
+        assert "setdefault" not in code
+
+    def test_loading_credentials_in_a_test_never_reaches_a_real_file(self):
+        import tempfile
+
+        from catalyst.setup.credentials import credentials_path
+
+        path = str(credentials_path())
+        assert path.startswith(tempfile.gettempdir())
+        assert not path.startswith("/etc/")

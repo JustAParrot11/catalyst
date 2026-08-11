@@ -62,10 +62,19 @@ def pytest_configure(config):
     # test that forgets to override a path still cannot reach /var/lib.
     config._catalyst_tmp = tempfile.TemporaryDirectory(prefix="catalyst-tests-")
     sandbox = config._catalyst_tmp.name
+    # ASSIGNMENT, NEVER setdefault. setdefault keeps whatever the
+    # environment already holds, which on an installed machine is the
+    # real /etc/catalyst/credentials.json - so the "fully offline" suite
+    # read the owner's live credentials and its results depended on
+    # which machine it ran on. Reported 2026-08-11 as a test that passed
+    # here and failed on the server, and it is the same defect the bar
+    # cache comment below records: a test whose result depends on the
+    # machine is not a test. The stated rule directly above was already
+    # right; setdefault silently exempted these two from it.
     os.environ["CATALYST_LOCK"] = os.path.join(sandbox, "catalyst.lock")
-    os.environ.setdefault("CATALYST_DB", os.path.join(sandbox, "catalyst.db"))
-    os.environ.setdefault("CATALYST_CREDENTIALS",
-                          os.path.join(sandbox, "credentials.json"))
+    os.environ["CATALYST_DB"] = os.path.join(sandbox, "catalyst.db")
+    os.environ["CATALYST_CREDENTIALS"] = os.path.join(sandbox,
+                                                      "credentials.json")
     # The bar cache too. data/ is gitignored, so whether it exists is a
     # property of the MACHINE, not of the code - and a test whose result
     # depends on that is not a test. One did: it passed on a dev box

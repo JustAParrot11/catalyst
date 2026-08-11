@@ -719,3 +719,13 @@ change kept from this session is the strengthened assertion block in
   the hit path was the element receiving hover, so a sibling selector
   never matched. Both now have tests; the fix is group hover plus
   explicit pointer-events on both paths.
+- Test isolation (2026-08-11, owner-reported upgrade failure). conftest
+  used os.environ.setdefault for CATALYST_CREDENTIALS and CATALYST_DB,
+  which KEEPS the installed machine's own paths - so the "fully offline"
+  suite read the real /etc/catalyst/credentials.json and its results
+  depended on the machine. Reproduced exactly by exporting the variable
+  and re-running. Sabotage: setdefault restored, which reproduces the
+  owner's failure verbatim and is caught by
+  test_conftest_assigns_rather_than_defaulting. Restored; the whole
+  suite now passes both with and without a hostile CATALYST_CREDENTIALS
+  in the environment.
