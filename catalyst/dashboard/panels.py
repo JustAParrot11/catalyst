@@ -6,6 +6,7 @@ duplicated ids once meant one panel silently received another's data and
 both rendered blank.
 """
 
+import re
 from decimal import Decimal
 
 from catalyst.dashboard import charts, queries
@@ -264,6 +265,38 @@ def performance_panel(db: Db, p: str = "perf") -> str:
 # --------------------------------------------------------------------------
 
 
+#: Upstream failures the owner should read as sentences, not as markup.
+_FAULT_GISTS = (
+    ("Request Rate Threshold Exceeded",
+     "sec.gov rate-limited this machine. The bot stops calling SEC "
+     "endpoints for 15 minutes on purpose - requesting during the "
+     "timeout extends it. It resumes on its own; nothing to do."),
+    ("Undeclared Automated Tool",
+     "sec.gov rejected the request as an undeclared automated tool - "
+     "the contact User-Agent is missing or malformed."),
+    ("AccessDenied",
+     "the file is not published (a weekend, a holiday, or before the "
+     "evening publish). Not a fault."),
+    ("timeout", "the source did not answer in time."),
+)
+
+
+def _fault_gist(detail) -> str:
+    """One readable sentence for an upstream failure.
+
+    A raw body is evidence, not an explanation. sec.gov's block page is
+    a 4KB HTML document; printing it where a sentence belongs is how
+    the panel became unreadable.
+    """
+    text = str(detail or "")
+    for marker, gist in _FAULT_GISTS:
+        if marker.lower() in text.lower():
+            return gist
+    stripped = " ".join(re.sub(r"<[^>]+>", " ", text).split())
+    return (stripped[:200] + "...") if len(stripped) > 200 else (
+        stripped or "no detail was returned")
+
+
 def funnel_panel(db: Db, p: str = "funnel") -> str:
     """Where every candidate ended up, as one narrowing population.
 
@@ -446,9 +479,18 @@ def funnel_panel(db: Db, p: str = "funnel") -> str:
          "each with the upstream error text below"),
     ]))
     if data.feed_faults:
+        # THE UPSTREAM BODY CAN BE A 4KB HTML PAGE. sec.gov's rate-limit
+        # notice is a full document, and rendering it inline turned the
+        # panel into a wall of markup (owner-reported 2026-08-11: "this
+        # error is squished in dashboard"). House rule 3 still holds -
+        # the raw text is kept verbatim - it just moves one click away,
+        # with a readable summary in front of it.
         items = "".join(
             f'<li><span class="funnel-why-n">{esc(n)}</span> {esc(reason)}'
-            + (f' <span class="prov">{esc(detail)}</span>' if detail else "")
+            + (f'<span class="prov">{esc(_fault_gist(detail))}</span>'
+               f'<details class="raw-fold"><summary>the exact response '
+               f'from the server</summary><pre>{esc(str(detail)[:4000])}'
+               "</pre></details>" if detail else "")
             + "</li>"
             for reason, n, detail in data.feed_faults)
         feed.append(

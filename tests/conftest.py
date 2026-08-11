@@ -131,3 +131,16 @@ def tmp_db(tmp_path):
     conn = init_db(str(db_file))
     yield conn
     conn.close()
+
+
+@pytest.fixture(autouse=True)
+def _no_sec_block_leaks_between_tests():
+    """The SEC pacer is process-wide by design (one IP budget). A test
+    that records a rate-limit block would otherwise make every later
+    test refuse its SEC calls - a test-ordering bug wearing a code
+    bug's clothes."""
+    from catalyst.data.sources.edgar_form4 import reset_sec_pacer
+
+    reset_sec_pacer()
+    yield
+    reset_sec_pacer()

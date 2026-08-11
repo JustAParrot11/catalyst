@@ -242,3 +242,69 @@ class TestTheMissingSpyLineIsDiagnosable:
         assert "IEX" in check.summary
         assert "consolidated tape" in check.detail
         db.close()
+
+
+class TestTheSecRateLimitBlock:
+    """Owner-reported live, after upgrading: "SEC.gov | Request Rate
+    Threshold Exceeded ... Your access to SEC.gov will be limited for 10
+    minutes." Plus: "Also this error is squished in dashboard".
+
+    The pacer held 5 req/s, under the 10/s ceiling. The volume was the
+    problem: ~2,815 requests per pass, 9.4 minutes of continuous traffic
+    inside a 15-minute cycle."""
+
+    def test_the_block_page_becomes_a_sentence_not_a_wall_of_markup(self):
+        from catalyst.dashboard.panels import _fault_gist
+
+        block = ('<!DOCTYPE html><html><head><title>SEC.gov | Request Rate '
+                 'Threshold Exceeded</title><style>html {height:100%}'
+                 '</style></head><body>You have exceeded...</body></html>')
+        gist = _fault_gist(block)
+        assert "<" not in gist and "{" not in gist
+        assert "rate-limited" in gist
+        assert "resumes on its own" in gist
+        assert len(gist) < 300
+
+    def test_an_absent_file_is_not_called_a_fault(self):
+        from catalyst.dashboard.panels import _fault_gist
+
+        assert "Not a fault" in _fault_gist(
+            "<Error><Code>AccessDenied</Code></Error>")
+
+    def test_an_unknown_body_is_stripped_and_truncated(self):
+        from catalyst.dashboard.panels import _fault_gist
+
+        gist = _fault_gist("<p>" + ("x" * 900) + "</p>")
+        assert len(gist) <= 205 and "<p>" not in gist
+
+    def test_the_raw_body_is_still_there_verbatim(self):
+        """House rule 3. Folded, never deleted."""
+        import sqlite3
+
+        from catalyst.dashboard import panels
+        from catalyst.dashboard.db import Db
+
+        path = str(_tmp_db_with_feed_error())
+        db = Db(path)
+        html_out = panels.funnel_panel(db, p="f")
+        assert "Threshold Exceeded" in html_out, "the raw body was dropped"
+        assert "raw-fold" in html_out, "it must be folded, not inline"
+        assert "the exact response from the server" in html_out
+        db.close()
+
+
+def _tmp_db_with_feed_error():
+    import sqlite3
+    import tempfile
+    from pathlib import Path
+
+    path = Path(tempfile.mkdtemp()) / "fe.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(open("catalyst/storage/schema.sql").read())
+    conn.execute("INSERT INTO raw_events_errors VALUES (?,?,?)",
+                 ("edgar_form4", "2026-08-11T12:00:00+00:00",
+                  "<html><title>SEC.gov | Request Rate Threshold Exceeded"
+                  "</title><body>" + ("padding " * 400) + "</body></html>"))
+    conn.commit()
+    conn.close()
+    return path

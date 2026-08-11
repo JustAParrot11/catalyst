@@ -342,3 +342,18 @@ CREATE TABLE IF NOT EXISTS position_reviews (
 );
 CREATE INDEX IF NOT EXISTS idx_position_reviews_pos
     ON position_reviews (position_id, reviewed_at);
+
+-- Form 4 filings already downloaded, so a pass never re-fetches one.
+-- WITHOUT THIS the feed made ~2,815 requests every 15-minute cycle -
+-- 9.4 minutes of continuous traffic, a 63% duty cycle - and sec.gov
+-- rate-limited the bot's IP on 2026-08-11. The parsed filing is stored
+-- verbatim so it can be REPLAYED into the window rather than skipped:
+-- insider-cluster detection needs every purchase in the window to count
+-- distinct owners, so skipping would break the strategy silently.
+CREATE TABLE IF NOT EXISTS edgar_filings (
+    accession   TEXT PRIMARY KEY,
+    parsed_json TEXT NOT NULL,
+    fetched_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_edgar_filings_fetched
+    ON edgar_filings (fetched_at);

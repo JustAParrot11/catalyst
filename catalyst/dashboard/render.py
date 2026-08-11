@@ -530,6 +530,15 @@ button { background: var(--series-1); color: #fff; border-color: transparent;
    developer, never competing with the English. */
 .funnel-why .prov, .funnel-fault .prov { display: block; margin: 1px 0 0 0;
                                          font-size: 11px; }
+/* A raw upstream body can be a 4KB HTML page. Kept verbatim (house rule
+   3) but folded, and forced to wrap and scroll rather than stretching
+   the panel to the width of the longest unbroken line. */
+.raw-fold { margin: 4px 0 0 0; }
+.raw-fold summary { font-size: 11px; color: var(--muted); }
+.raw-fold pre { max-height: 16em; overflow: auto; white-space: pre-wrap;
+                overflow-wrap: anywhere; font-size: 10.5px;
+                background: var(--surface-2); border: 1px solid var(--hairline);
+                border-radius: 3px; padding: 6px 8px; margin: 4px 0 0 0; }
 .funnel-fault .funnel-why-n { color: var(--serious); }
 .fault-chip { display: inline-block; background: var(--serious); color: #fff;
               border-radius: 2px; padding: 0 5px; font-size: 10px;

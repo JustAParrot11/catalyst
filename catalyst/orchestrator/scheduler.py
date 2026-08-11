@@ -20,12 +20,14 @@ the loop continues.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import signal
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 
 DEFAULT_DB = "/var/lib/catalyst/catalyst.db"
 DEFAULT_CYCLE_SECONDS = 900       # 15 minutes
@@ -393,6 +395,46 @@ def _run_one_cycle(db_file: str):
     transport = (_anthropic_transport(creds.anthropic_key)
                  if creds.anthropic_key else None)
 
+    def _filing_cache(conn_path):
+        """(already_have, on_fetched) backed by edgar_filings.
+
+        This pair is what stops the feed re-downloading its whole window
+        every cycle. Measured before it existed: 2,815 requests a pass,
+        9.4 minutes of continuous sec.gov traffic inside a 15-minute
+        cycle, and a rate-limit block on 2026-08-11.
+        """
+        import sqlite3 as _sq
+
+        def already_have(accession):
+            try:
+                c = _sq.connect(conn_path, timeout=5.0)
+                try:
+                    row = c.execute(
+                        "SELECT parsed_json FROM edgar_filings WHERE "
+                        "accession = ?", (accession,)).fetchone()
+                finally:
+                    c.close()
+                return json.loads(row[0]) if row else None
+            except Exception:  # noqa: BLE001 - a cache miss is never fatal
+                return None
+
+        def on_fetched(accession, parsed):
+            try:
+                c = _sq.connect(conn_path, timeout=5.0)
+                try:
+                    c.execute(
+                        "INSERT OR REPLACE INTO edgar_filings "
+                        "(accession, parsed_json, fetched_at) VALUES (?,?,?)",
+                        (accession, json.dumps(parsed, default=str),
+                         datetime.now(timezone.utc).isoformat()))
+                    c.commit()
+                finally:
+                    c.close()
+            except Exception:  # noqa: BLE001 - storing is best effort
+                pass
+
+        return already_have, on_fetched
+
     def feed(since, until):
         """All three feeds. Form 4 is the only one that may fail the pass.
 
@@ -405,20 +447,47 @@ def _run_one_cycle(db_file: str):
         correctness. Letting either take the cycle down would trade a
         working strategy for a new one's outage.
         """
-        events = list(flatten_form4_events(fetch_events(since, until)))
+        from catalyst.data.sources.edgar_form4 import (
+            RateLimitBlocked, fetch_form4,
+        )
+
+        have, store = _filing_cache(db_file)
+        try:
+            got = fetch_form4(since, until, already_have=have,
+                              on_fetched=store)
+            _log.info(
+                "Form 4: %d request(s), %d filing(s) replayed from local "
+                "storage. Cache hits cost nothing and are what keeps this "
+                "inside sec.gov's fair-use limits.",
+                got.requests_made, got.from_cache)
+            events = list(flatten_form4_events(got.events))
+        except RateLimitBlocked as exc:
+            # NOT a feed error to log and continue past. sec.gov blocked
+            # this IP and every further request extends the timeout, so
+            # the whole pass stops touching SEC endpoints - full-text
+            # search below shares the same budget and is skipped too.
+            _log.error("sec.gov rate-limited this IP; skipping every SEC "
+                       "feed this pass. %s", exc)
+            return []
 
         try:
             from catalyst.data.sources import edgar_fts
 
             fts = edgar_fts.fetch_events(since, until)
-            events.extend(fts.events)
-            for err in fts.errors:
-                _log.warning("Full-text search query %r failed: %s",
-                             err.get("query"), str(err.get("error"))[:300])
+        except RateLimitBlocked as exc:
+            _log.error("sec.gov rate-limited this IP during full-text "
+                       "search; no further SEC request this pass. %s", exc)
+            fts = None
         except Exception:  # noqa: BLE001 - breadth is not correctness
             _log.exception(
                 "EDGAR full-text search failed; the pass continues on the "
                 "other feeds. Cross-feed conjunctions will be thinner.")
+            fts = None
+        if fts is not None:
+            events.extend(fts.events)
+            for err in fts.errors:
+                _log.warning("Full-text search query %r failed: %s",
+                             err.get("query"), str(err.get("error"))[:300])
 
         try:
             from catalyst.data.sources import alpaca_news
