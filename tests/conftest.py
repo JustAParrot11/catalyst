@@ -81,6 +81,36 @@ def pytest_configure(config):
     # that had run scripts/fetch_history.py and failed on the owner's
     # server, which failed the upgrade gate and rolled the release back.
     os.environ["CATALYST_BARS"] = os.path.join(sandbox, "bars")
+    _PINNED.update({name: os.environ[name] for name in (
+        "CATALYST_LOCK", "CATALYST_DB", "CATALYST_CREDENTIALS",
+        "CATALYST_BARS")})
+
+
+#: The sandbox paths, snapshotted once so they can be put back after
+#: every test. Filled in by pytest_configure.
+_PINNED: dict = {}
+
+
+@pytest.fixture(autouse=True)
+def _sandbox_paths_survive_every_test():
+    """Restore the pinned paths after EVERY test, whatever it did.
+
+    Pinning them once at session start is not enough. A test that set
+    CATALYST_CREDENTIALS itself and cleaned up with
+    os.environ.pop(...) deleted the pin rather than restoring it, and
+    every test that ran afterwards fell back to the real
+    /etc/catalyst/credentials.json. On a machine without one that is
+    invisible; on the owner's server it read a live $20 budget and
+    failed the upgrade gate.
+
+    Individual tests should use monkeypatch. This is the backstop that
+    makes forgetting harmless, because the failure it prevents does not
+    show up on the machine the test was written on.
+    """
+    yield
+    for name, value in _PINNED.items():
+        if os.environ.get(name) != value:
+            os.environ[name] = value
 
 
 def pytest_unconfigure(config):
