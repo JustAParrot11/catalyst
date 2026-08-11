@@ -14,6 +14,10 @@ def connect(db_path: str) -> sqlite3.Connection:
     return conn
 
 
+#: The dashboard owns its own log table, but SOMETHING has to create
+#: it. Nothing did: the table, the page and the query all existed and no
+#: code ever ran the schema, so the Logs page was blank forever and the
+#: brief's "searchable from the browser, no SSH" was not true.
 def init_db(db_path: str) -> sqlite3.Connection:
     conn = connect(db_path)
     conn.executescript(SCHEMA_PATH.read_text())

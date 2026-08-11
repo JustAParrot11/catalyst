@@ -1850,3 +1850,90 @@ class TestThePageReadsAsAnInstrumentNotAnEssay:
         assert figures >= 8
         assert self._visible_words(html_out) / figures < 75, (
             "the page is still an essay with numbers in it")
+
+
+class TestLogsActuallyReachTheDatabase:
+    """Owner-reported 2026-08-11: "The logs section is blank i cant pull
+    any logs." The table, the page and the query all existed. Nothing
+    ever created the table and nothing ever wrote a row, so the brief's
+    "searchable from the browser, no SSH required" was simply untrue."""
+
+    def test_the_table_was_never_the_problem(self, tmp_path):
+        """Checked before writing a line of fix, and worth recording: the
+        main schema has always created this table. Nothing ever wrote a
+        row to it, which is a different bug with a different fix - and I
+        briefly shipped a redundant schema load before verifying which
+        of the two it was."""
+        import sqlite3 as _sq
+        from catalyst.storage import init_db
+
+        path = str(tmp_path / "l.db")
+        init_db(path).close()
+        conn = _sq.connect(path)
+        names = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        conn.close()
+        assert "logs" in names
+
+    def test_a_log_line_lands_in_the_database_redacted(self, tmp_path, monkeypatch):
+        import logging
+        import sqlite3 as _sq
+
+        from catalyst.orchestrator import scheduler
+        from catalyst.storage import init_db
+
+        path = str(tmp_path / "l.db")
+        monkeypatch.setenv("CATALYST_DB", path)
+        init_db(path).close()
+        scheduler.configure_logging()
+        logging.getLogger("catalyst.test").info(
+            "hello with a key sk-ant-SECRETVALUE12345")
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            logging.getLogger("catalyst.test").exception("it failed")
+
+        conn = _sq.connect(path)
+        rows = conn.execute(
+            "SELECT level, component, message, traceback_text FROM logs "
+            "ORDER BY ts").fetchall()
+        conn.close()
+        for h in list(logging.getLogger().handlers):
+            if type(h).__name__ == "_DbLogHandler":
+                logging.getLogger().removeHandler(h)
+
+        assert len(rows) >= 2
+        blob = " ".join(str(x) for r in rows for x in r)
+        assert "SECRETVALUE12345" not in blob, "a log line carried a secret"
+        assert any(r[0] == "ERROR" and r[3] and "ValueError" in r[3]
+                   for r in rows), "an exception must carry its traceback"
+
+    def test_the_handler_never_raises_out_of_a_log_call(self, monkeypatch, tmp_path):
+        """A logger that raises takes down whatever it was reporting on."""
+        import logging
+
+        from catalyst.orchestrator import scheduler
+
+        monkeypatch.setenv("CATALYST_DB", str(tmp_path / "does" / "not" / "exist.db"))
+        handler = scheduler._DbLogHandler()
+        rec = logging.LogRecord("x", logging.INFO, __file__, 1, "m", None, None)
+        handler.emit(rec)          # must not raise
+
+
+def test_maintenance_runs_its_free_checks_without_being_asked(seeded):
+    """Owner-reported: "why do i need to click check outside services
+    now, why cant it just load". Every active check is free, and the one
+    that would cost money - the ordinary Anthropic key - is deliberately
+    never probed."""
+    from catalyst.dashboard import maintenance
+
+    called = {"n": 0}
+
+    def probe():
+        called["n"] += 1
+        return True, "ok", "", 1
+
+    report = maintenance.build_report(
+        Db(seeded), None, run_active=True, edgar_probe=probe)
+    assert report.ran_active
+    assert called["n"] >= 1

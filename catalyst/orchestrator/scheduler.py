@@ -49,6 +49,61 @@ def configure_logging(level: str | None = None) -> None:
         force=True,
     )
     install_redacting_filter()
+    _install_db_log_handler()
+
+
+class _DbLogHandler(logging.Handler):
+    """Every log line into the database as well as the journal.
+
+    The brief asks for logs searchable from the browser so nobody has to
+    SSH in to troubleshoot. The table and the page both existed; nothing
+    ever wrote a row, so the Logs page was permanently blank and the
+    promise was false (owner-reported 2026-08-11).
+
+    Opens its own connection per emit. That is not the fast choice, but
+    a logging handler that holds a connection across threads is how a
+    logger starts corrupting the database it is reporting on, and this
+    runs a few times a minute.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            import sqlite3
+            from datetime import datetime, timezone
+
+            from catalyst.dashboard.redact import redact
+
+            tb = ""
+            if record.exc_info:
+                tb = redact(logging.Formatter().formatException(record.exc_info))
+            conn = sqlite3.connect(db_path(), timeout=2.0)
+            try:
+                conn.execute(
+                    "INSERT INTO logs (ts, level, component, message, "
+                    "cycle_id, candidate_id, traceback_text, context_json) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (datetime.now(timezone.utc).isoformat(),
+                     record.levelname, record.name,
+                     redact(record.getMessage()),
+                     getattr(record, "cycle_id", None),
+                     getattr(record, "candidate_id", None),
+                     tb or None, None))
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001
+            # A logger that raises takes down whatever it was reporting
+            # on. Never. The journal still has the line either way.
+            pass
+
+
+def _install_db_log_handler() -> None:
+    root = logging.getLogger()
+    if any(isinstance(h, _DbLogHandler) for h in root.handlers):
+        return
+    handler = _DbLogHandler()
+    handler.setLevel(logging.INFO)
+    root.addHandler(handler)
 
 
 def db_path() -> str:
