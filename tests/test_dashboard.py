@@ -2090,6 +2090,51 @@ def test_the_paused_spend_message_says_what_to_do(seeded):
     human review, does this need doing daily, its not clear what it
     wants me to do"."""
     html_out = panels.cost_panel(Db(seeded), p="cost")
-    assert "WHAT THIS IS" in html_out and "WHAT TO DO" in html_out
+    assert "WHAT THE TWO NUMBERS ARE" in html_out and "WHAT TO DO" in html_out
     assert "not a daily chore" in html_out.lower()
     assert "type your name to acknowledge" in html_out
+
+
+class TestReconciliationExplainsItself:
+    """Owner-reported 2026-08-11: "Still a bit confused on this. What
+    does local mean? The API has been used prior so ideally it needs to
+    disregard old usage... I am worried about doing something manual i
+    dont understand and breaking something."
+
+    The root problem was not the wording: the Cost API reports the whole
+    ORGANISATION's bill while the local ledger holds only what this bot
+    spent, so any day the bot did not run compared $0.00 against the
+    owner's own API use and demanded an acknowledgement for it."""
+
+    # The behaviour - never reconciling a day before the bot's first
+    # recorded spend - is pinned by running the scheduler, in
+    # test_cost_api_adapter.py::TestNightlyReconcileWiring. Reading the
+    # source for a phrase would pass against code that does nothing.
+
+    def test_the_panel_says_what_local_means(self, seeded):
+        html_out = panels.cost_panel(Db(seeded), p="cost")
+        assert "what THIS BOT" in html_out
+        assert "whole ORGANISATION" in html_out
+
+    def test_it_says_acknowledging_changes_no_figure(self, seeded):
+        """The owner's actual fear: that clicking it would alter a
+        number and break something."""
+        html_out = panels.cost_panel(Db(seeded), p="cost")
+        assert "changes no " in html_out
+        assert "cannot break anything" in html_out
+
+    def test_it_distinguishes_a_real_problem_from_your_own_api_use(self, seeded):
+        html_out = panels.cost_panel(Db(seeded), p="cost")
+        assert "not drift in" in html_out
+        assert "on a day the bot DID run" in html_out
+
+    def test_the_price_box_says_the_real_bill_still_wins(self, seeded):
+        """Owner-asked: "Ensure that if i do manually update cost itll
+        still prioritize API pulling API costs unless drastically
+        wrong." It does - overrides are never retroactive and the
+        nightly check pauses on a wrong rate - but nothing beside the
+        box said so."""
+        html_out = panels.cost_panel(Db(seeded), p="cost")
+        assert "estimate for calls not yet billed" in html_out
+        assert "can never overwrite what Anthropic" in html_out
+        assert "pauses scheduled spending" in html_out

@@ -229,9 +229,28 @@ def _maybe_reconcile_yesterday(db_file: str) -> None:
         from catalyst.cost.cost_api import fetch_cost_api_day
         from catalyst.cost.tracker import reconcile_day
 
+        # NEVER RECONCILE A DAY BEFORE THE BOT'S FIRST SPEND. The Cost
+        # API reports the whole ORGANISATION's bill; the local ledger
+        # holds only what this bot spent. On any day the bot did not run,
+        # the honest comparison is $0.00 against whatever else the key
+        # was used for - which is not a discrepancy, it is two different
+        # questions. The owner was shown three of those and asked to
+        # acknowledge them without understanding what they meant
+        # (2026-08-11).
+        first_row = conn.execute(
+            "SELECT MIN(priced_at) FROM cost_events").fetchone()
+        first_day = None
+        if first_row and first_row[0]:
+            try:
+                first_day = datetime.fromisoformat(str(first_row[0])).date()
+            except ValueError:
+                first_day = None
+
         # oldest first, so the drift window accumulates in date order
         for days_back in range(RECONCILE_BACKFILL_DAYS, 0, -1):
             day = today - timedelta(days=days_back)
+            if first_day is None or day < first_day:
+                continue
             done = conn.execute(
                 "SELECT 1 FROM cost_reconciliation_events "
                 "WHERE target_date = ? AND action_taken != 'check_failed'",
