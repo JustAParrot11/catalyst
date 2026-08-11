@@ -184,11 +184,21 @@ def investigate(
     transport: Transport,
     model: str = RESEARCH_MODEL,
     graph_context: str | None = None,
+    signals: list | None = None,
 ) -> ResearchCallLog:
+    """`signals` is what each independent feed said about this ticker.
+
+    Passing them turns a link the grouping code computed into something
+    the model can actually weigh: it changes the question from "is this
+    insider cluster priced in" to "do these unrelated things connect",
+    and it earns a larger search budget because that question is open.
+    None means an ordinary single-feed candidate, unchanged.
+    """
     call_id = str(uuid.uuid4())
     conn = cost_context.conn
     started = time.monotonic()
-    prompt = prompts.render_research_prompt(candidate, graph_context=graph_context)
+    prompt = prompts.render_research_prompt(
+        candidate, graph_context=graph_context, signals=signals)
     # The schema tool is offered DURING exploration as well as in the
     # forced turn. If the model submits its view while it still has the
     # search results in hand, the extraction turn - which re-sends the
@@ -198,7 +208,13 @@ def investigate(
     # tool_choice stays `auto` here, so the model is never pushed into
     # concluding before it has searched, and the forced turn still runs
     # whenever no valid view arrives early.
-    tools = list(prompts.exploration_tools()) + [SUBMIT_RESEARCH_VIEW_TOOL]
+    # The search budget follows the EVIDENCE. A conjunction - two or
+    # more independent feeds agreeing on this ticker - earns a larger
+    # allowance because its question ("do these connect?") is genuinely
+    # open and the answer lives in reporting the feeds do not carry.
+    # An ordinary candidate keeps the base allowance.
+    tools = list(prompts.exploration_tools(
+        prompts.searches_for(candidate, signals))) + [SUBMIT_RESEARCH_VIEW_TOOL]
     tools_offered = tuple(t.get("name", t.get("type", "?")) for t in tools)
 
     turns: list[APITurn] = []

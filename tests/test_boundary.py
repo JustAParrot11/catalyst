@@ -31,14 +31,17 @@ def db(tmp_path):
 
 @pytest.fixture(autouse=True)
 def stub_prompts(monkeypatch):
+    # **kwargs rather than a fixed signature - these stubs exist to make
+    # the prompt cheap and deterministic, not to pin its parameter list.
     monkeypatch.setattr(
         prompts, "render_research_prompt",
-        lambda c, graph_context=None: f"research {c.ticker}"
+        lambda c, graph_context=None, **kw: f"research {c.ticker}"
         + (f"\n{graph_context}" if graph_context else ""))
     monkeypatch.setattr(
         prompts, "exploration_tools",
-        lambda: [{"type": "web_search_20250305", "name": "web_search",
-                  "max_uses": 3}])
+        lambda max_searches=3, **kw: [
+            {"type": "web_search_20250305", "name": "web_search",
+             "max_uses": max_searches}])
 
 
 def candidate():

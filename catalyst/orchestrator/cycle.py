@@ -651,7 +651,8 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
                                str(params["governor_profit_share"])),
                            cycle_id=cycle_id, kind=kind,
                            owner_monthly_cap_cents=owner_monthly_cap_cents),
-            transport, graph_context=_graph_context(c, conn))
+            transport, graph_context=_graph_context(c, conn),
+            signals=_signals_for(c, events))
         if log.parsed_view is None:
             report.drop_reasons.setdefault("researched", []).append(
                 f"{c.id}: {log.skipped_reason}")
@@ -894,6 +895,24 @@ def _open_position_dicts(conn, now: datetime) -> list[dict]:
              "decision_id": r[4], "qty": qty,
              "stop_price": r[6], "due": r[3] <= today})
     return out
+
+
+def _signals_for(candidate, raw_events) -> list | None:
+    """What each independent feed said about THIS candidate's ticker.
+
+    Returns None for a candidate no feed agreed about, which keeps the
+    ordinary single-feed path byte-identical - the research prompt only
+    changes shape where there is genuinely a link to weigh.
+    """
+    try:
+        from catalyst.discovery.links import signals_from_events
+
+        found = signals_from_events(raw_events or []).get(candidate.ticker) or []
+        if len({s.source for s in found}) > 1:
+            return found
+    except Exception:  # noqa: BLE001 - research must not die on enrichment
+        pass
+    return None
 
 
 def _with_position(portfolio: PortfolioState, candidate, decision,

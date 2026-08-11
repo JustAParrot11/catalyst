@@ -50,9 +50,11 @@ def frozen_kill_switch_clock(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def stub_prompts(monkeypatch):
+    # **kwargs: this stub makes the prompt cheap, it does not pin the
+    # real function's parameter list.
     monkeypatch.setattr(prompts, "render_research_prompt",
-                        lambda c, graph_context=None: "research")
-    monkeypatch.setattr(prompts, "exploration_tools", lambda: [])
+                        lambda c, **kw: "research")
+    monkeypatch.setattr(prompts, "exploration_tools", lambda *a, **kw: [])
 
 
 ACCOUNT = {"equity": "1000", "cash": "1000", "last_equity": "1000",

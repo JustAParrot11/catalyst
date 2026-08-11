@@ -55,8 +55,46 @@ def _facts_block(candidate: Candidate) -> str:
     return "\n".join(lines)
 
 
+def _signals_block(signals: list) -> str:
+    """What each feed independently said about this ticker.
+
+    THE POINT OF SHOWING THIS. Until now the model saw one candidate and
+    one kind of evidence, and any agreement between feeds existed only
+    in the grouping code that assembled the candidate - never in the
+    model's reasoning. It could not weigh a link it was never told
+    about. This block is what lets it say "the analyst raised a target
+    two days after the offering was filed, which is odd", which is the
+    kind of connection the owner asked for.
+
+    Dates are given because the ORDER matters and the model cannot see
+    it otherwise: a downgrade before a readout means something different
+    from a downgrade after one.
+    """
+    lines = ["WHAT EACH FEED SAID, INDEPENDENTLY",
+             "These arrived from separate sources. They were not written "
+             "with each other in mind, and nothing has judged them yet:"]
+    for sig in signals:
+        detail = sig.detail or {}
+        when = sig.when.isoformat() if sig.when else "undated"
+        what = (detail.get("headline")
+                or detail.get("matched_phrase")
+                or detail.get("catalyst_type") or "")
+        hint = detail.get("direction_hint")
+        tone = ("" if not hint else
+                "  [pattern-matched as GOOD for the equity]" if hint > 0 else
+                "  [pattern-matched as BAD for the equity]")
+        lines.append(f"  - {when}  ({sig.source}) {str(what)[:180]}{tone}")
+    lines.append(
+        "The GOOD/BAD tags above are a crude keyword match done by code, "
+        "not a judgement. Disagree with them freely - saying one is wrong "
+        "is useful.")
+    return "\n".join(lines)
+
+
 def render_research_prompt(candidate: Candidate,
-                           graph_context: str | None = None) -> str:
+                           graph_context: str | None = None,
+                           signals: list | None = None) -> str:
+    searches = searches_for(candidate, signals)
     sections: list[str] = []
     sections.append(
         "You are the research step of an automated trading system, judging "
@@ -65,20 +103,51 @@ def render_research_prompt(candidate: Candidate,
         "trade, or name order types, entries, stops or exits — none of "
         "that is yours to decide."
     )
-    sections.append(
-        "CANDIDATE\n"
-        f"Ticker: {candidate.ticker}\n"
-        f"Sector: {candidate.sector}\n"
-        f"Catalyst type: {candidate.catalyst_type} — at least "
-        f"{MIN_INSIDERS} distinct insiders bought their own company's "
-        f"stock on the open market (Form 4, code P, 10b5-1-flagged plan "
-        f"trades excluded) within {CLUSTER_WINDOW_DAYS} calendar days, "
-        f"combined value at least ${MIN_TOTAL_VALUE_USD:,.0f}.\n"
-        f"Cluster completed (last Form 4 filing date): "
-        f"{candidate.catalyst_date.isoformat()}\n"
-        f"Source filings: {', '.join(candidate.source_event_ids)}\n\n"
-        + _facts_block(candidate)
-    )
+    if signals:
+        # A CONJUNCTION IS A DIFFERENT QUESTION, so it gets a different
+        # brief. The insider-cluster framing below asks "is this cluster
+        # already priced in"; that is the wrong question for a ticker
+        # surfaced because two unrelated feeds agreed.
+        kinds = sorted({s.catalyst_type for s in signals})
+        feeds = sorted({s.source for s in signals})
+        sections.append(
+            "WHY THIS ONE\n"
+            f"{candidate.ticker} was surfaced because {len(kinds)} "
+            f"unrelated kinds of evidence, from {len(feeds)} independent "
+            "feeds, landed on it in the same window. Nothing has judged "
+            "whether that means anything - that is what you are for.\n\n"
+            "Your question is: DO THESE CONNECT? Say plainly if they do "
+            "not. Two things happening at once is also what coincidence "
+            "looks like, and with thousands of tickers some pair up by "
+            "chance every week. A confident no_trade on a coincidence is "
+            "worth more than a thesis stretched to fit."
+        )
+        sections.append(_signals_block(signals))
+        sections.append(
+            "CANDIDATE\n"
+            f"Ticker: {candidate.ticker}\n"
+            f"Sector (SIC): {candidate.sector}\n"
+            f"Grouped as: {candidate.catalyst_type}\n"
+            f"Newest signal: {candidate.catalyst_date.isoformat()}\n"
+            "NOTE: that is when the newest piece of evidence LANDED, not "
+            "a resolution date. Nothing here has read the body of the "
+            "filings, so if the timing matters to your thesis, check it."
+        )
+    else:
+        sections.append(
+            "CANDIDATE\n"
+            f"Ticker: {candidate.ticker}\n"
+            f"Sector: {candidate.sector}\n"
+            f"Catalyst type: {candidate.catalyst_type} — at least "
+            f"{MIN_INSIDERS} distinct insiders bought their own company's "
+            f"stock on the open market (Form 4, code P, 10b5-1-flagged plan "
+            f"trades excluded) within {CLUSTER_WINDOW_DAYS} calendar days, "
+            f"combined value at least ${MIN_TOTAL_VALUE_USD:,.0f}.\n"
+            f"Cluster completed (last Form 4 filing date): "
+            f"{candidate.catalyst_date.isoformat()}\n"
+            f"Source filings: {', '.join(candidate.source_event_ids)}\n\n"
+            + _facts_block(candidate)
+        )
     if graph_context is not None:
         sections.append(
             f"{GRAPH_CONTEXT_HEADER}\n"
@@ -110,8 +179,9 @@ def render_research_prompt(candidate: Candidate,
         "- Insider buying is public information. Your question is whether "
         "THIS cluster is still under-consumed by the market, not whether "
         "insider buying works in general.\n"
-        "- You may use web_search at most 3 times. Each search costs real "
-        "money; search only when the result could change your answer.\n"
+        f"- You may use web_search at most {searches} times. Each search "
+        "costs real money; search only when the result could change your "
+        "answer.\n"
         "- Report judgements, not instructions: nothing about how much to "
         "trade, and no order, entry, stop or exit levels.\n"
         "- When asked, submit your conclusion via the submit_research_view "
@@ -120,12 +190,42 @@ def render_research_prompt(candidate: Candidate,
     return "\n\n".join(sections)
 
 
-def exploration_tools() -> list[dict]:
+#: Searches for an ordinary candidate. One feed said one thing; the
+#: question is narrow and more searching does not sharpen it.
+BASE_SEARCHES = 3
+#: Searches for a CONJUNCTION - two or more independent feeds agreeing.
+#: The question is genuinely open ("do these connect?") and the answer
+#: lives in reporting the feeds do not carry, so this is the one place
+#: where more searching plausibly changes the answer.
+#:
+#: THE ARITHMETIC, because the budget is small and near-fixed. Measured
+#: live 2026-08-11: 48 cross-feed conjunctions in three weeks, capped at
+#: 12 candidates a pass. At the extra 7 searches below that is $0.07 a
+#: candidate, so even 30 conjunctions a month is ~$2.10 of search on top
+#: of tokens. The free structured feeds do the filtering; the paid model
+#: pass only fires where two unrelated sources already agree.
+CONJUNCTION_SEARCHES = 10
+
+
+def searches_for(candidate=None, signals=None) -> int:
+    """How many searches this candidate has EARNED.
+
+    Evidence buys budget, never hope. A candidate is given the larger
+    allowance only when independent feeds already agree about it - which
+    is measured, free, and computed before any model call.
+    """
+    if signals and len({getattr(s, "source", "") for s in signals}) > 1:
+        return CONJUNCTION_SEARCHES
+    return BASE_SEARCHES
+
+
+def exploration_tools(max_searches: int = BASE_SEARCHES) -> list[dict]:
     """Tools available during exploration turns.
 
     Server-side web search only. COST: $10 per 1,000 searches (TRAPS.md)
-    = $0.01 per search on top of tokens; max_uses=3 caps one
-    investigation's search spend at 3 cents, and boundary.py's
-    per-turn governor authorization is the hard gate above that.
+    = $0.01 per search on top of tokens, so max_uses IS the search
+    budget for one investigation. boundary.py's per-turn governor
+    authorization is the hard gate above it.
     """
-    return [{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}]
+    return [{"type": "web_search_20250305", "name": "web_search",
+             "max_uses": int(max_searches)}]
