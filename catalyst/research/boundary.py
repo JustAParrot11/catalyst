@@ -96,6 +96,66 @@ def _assistant_echo(turn) -> dict | None:
     return {"role": "assistant", "content": content}
 
 
+#: Message shapes the Messages API rejects with a 400. Checked LOCALLY,
+#: before the request, so the funnel names the actual defect instead of
+#: showing a status code the owner has to guess at.
+#:
+#: The empty-content case (fff78e1, 2026-08-10) killed four of five live
+#: research calls. Fixing that one instance is not the same as fixing
+#: the class: any future shape that violates the contract would again
+#: surface as a bare "400 Bad Request", cost a paid call, and take a
+#: whole investigation with it. The owner reported the 400s as "quite
+#: prevalent" a day later, which is exactly what an opaque error looks
+#: like whether or not it is still happening.
+def invalid_payload_reason(payload: dict) -> str | None:
+    """Why the Messages API would reject this, or None if it looks sound.
+
+    Deliberately conservative: it rejects only shapes that are certainly
+    invalid. A false positive here silently skips a candidate that would
+    have worked, which is worse than the 400 it is trying to prevent.
+    """
+    messages = payload.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return "messages is empty - the API requires at least one message"
+    for i, message in enumerate(messages):
+        if not isinstance(message, dict):
+            return f"message {i} is not an object: {type(message).__name__}"
+        role = message.get("role")
+        if role not in ("user", "assistant"):
+            return f"message {i} has role {role!r}, not 'user' or 'assistant'"
+        content = message.get("content")
+        if isinstance(content, str):
+            if not content.strip():
+                return f"message {i} ({role}) has empty text content"
+            continue
+        if not isinstance(content, list):
+            return (f"message {i} ({role}) content is "
+                    f"{type(content).__name__}, not a list or a string")
+        if not content:
+            # THE ONE THAT ACTUALLY HAPPENED.
+            return (f"message {i} ({role}) has an EMPTY content array - the "
+                    "Messages API rejects this, and a pause_turn or a "
+                    "server-tool turn can return no content blocks")
+        for j, block in enumerate(content):
+            if not isinstance(block, dict):
+                return (f"message {i} content block {j} is not an object: "
+                        f"{type(block).__name__}")
+            if not block.get("type"):
+                return f"message {i} content block {j} has no 'type'"
+    if messages[-1].get("role") == "assistant":
+        # A trailing assistant message asks the API to CONTINUE it, which
+        # is valid but never what this loop intends - it means an echo
+        # was appended without the follow-up user turn, and the model
+        # would be prompted with nothing to answer.
+        return ("the last message is from the assistant with no user turn "
+                "after it - a continuation was appended without its prompt")
+    if not payload.get("model"):
+        return "no model in the payload"
+    if not isinstance(payload.get("max_tokens"), int) or payload["max_tokens"] < 1:
+        return f"max_tokens is {payload.get('max_tokens')!r}, not a positive int"
+    return None
+
+
 
 def _record_findings(call_id: str, tool_input: dict, conn) -> None:
     """Persist the evidence links the pass already produced.
@@ -159,8 +219,16 @@ def investigate(
         return log
 
     def run_turn(payload: dict) -> APITurn | None:
-        """authorize -> call -> record -> price. None = budget denied."""
+        """validate -> authorize -> call -> record -> price. None = stop."""
         nonlocal cost_cents
+        # BEFORE SPENDING ANYTHING. A payload the API will certainly
+        # reject must not consume a paid call and must not come back as
+        # a status code the owner has to guess at - it names itself, in
+        # the funnel, in English.
+        bad = invalid_payload_reason(payload)
+        if bad is not None:
+            transport_errors.append(f"invalid_request_not_sent: {bad}")
+            return None
         forced = (payload.get("tool_choice") or {}).get("type") == "tool"
         estimate = CostEstimate(
             estimated_cents=(EXTRACTION_TURN_ESTIMATE_CENTS if forced

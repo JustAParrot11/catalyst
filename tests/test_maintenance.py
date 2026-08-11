@@ -17,7 +17,7 @@ Sabotage log (house rule 4) at the bottom.
 """
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -108,10 +108,21 @@ class TestProbesNeverRaise:
 
 
 class TestPassiveChecks:
-    def _stale_feed(self, db, now):
+    def _stale_feed(self, db, now, hours_ago=None):
+        """A feed whose newest row is `hours_ago` old as of `now`.
+
+        The age used to be a hardcoded 2026-01-01 - 222 days before the
+        cases that call this - so "an overnight gap is fine" was asserted
+        against a feed that had been dead for seven months. That test
+        would have passed with the feed dead for a year, which is the
+        opposite of what it is named for. Each case now states the age
+        it actually means.
+        """
+        when = (now - timedelta(hours=hours_ago)) if hours_ago else \
+            datetime(2026, 1, 1, tzinfo=timezone.utc)
         conn = sqlite3.connect(db.path)
         conn.execute("INSERT INTO raw_events VALUES (?,?,?,?)",
-                     ("edgar", "acc-1", "2026-01-01T00:00:00+00:00", "{}"))
+                     ("edgar", "acc-1", when.isoformat(), "{}"))
         conn.commit(); conn.close()
         checks = maintenance.passive_checks(db, now=now)
         return next(c for c in checks if "Filing feed" in c.name)
@@ -125,18 +136,26 @@ class TestPassiveChecks:
         assert "ago" in feed.summary
         assert "may be stuck" in feed.summary
 
-    @pytest.mark.parametrize("when, why", [
-        (datetime(2026, 8, 11, 3, 0, tzinfo=timezone.utc), "overnight"),
-        (datetime(2026, 8, 15, 14, 0, tzinfo=timezone.utc), "a Saturday"),
+    @pytest.mark.parametrize("when, hours, why", [
+        (datetime(2026, 8, 11, 3, 0, tzinfo=timezone.utc), 10, "overnight"),
+        (datetime(2026, 8, 15, 14, 0, tzinfo=timezone.utc), 40, "a Saturday"),
     ])
-    def test_a_quiet_feed_out_of_hours_is_not_a_fault(self, db, when, why):
+    def test_a_quiet_feed_out_of_hours_is_not_a_fault(self, db, when, hours, why):
         """EDGAR publishes on business days, roughly 06:00-22:00 New
         York. The bot fetches every cycle regardless, but no filings are
         published to store - so the newest row ages exactly as it should.
         This check used to cry wolf every single night."""
-        feed = self._stale_feed(db, when)
+        feed = self._stale_feed(db, when, hours_ago=hours)
         assert feed.state == "ok", why
         assert "not publishing at this hour" in feed.summary
+
+    def test_a_feed_silent_for_MONTHS_is_broken_whatever_the_hour(self, db):
+        """The out-of-hours reassurance must be bounded. Without this,
+        "it is 3am" excuses a feed that died in January."""
+        feed = self._stale_feed(
+            db, datetime(2026, 8, 11, 3, 0, tzinfo=timezone.utc))
+        assert feed.state == "warn"
+        assert "may be stuck" in feed.summary
 
     def test_unpriced_cost_rows_are_a_hard_problem(self, db):
         conn = sqlite3.connect(db.path)
