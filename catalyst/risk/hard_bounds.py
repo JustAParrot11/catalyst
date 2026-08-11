@@ -31,6 +31,7 @@ class HardBounds:
                                          # half-spread; the worst decile of
                                          # C's universe individually breaches
                                          # the pre-registered kill gate
+    max_hold_days: int                   # see the note below
 
 
 HARD_BOUNDS = HardBounds(
@@ -41,4 +42,20 @@ HARD_BOUNDS = HardBounds(
     drawdown_kill_pct=Decimal("0.12"),
     max_correlated_cluster_pct=Decimal("0.35"),
     max_entry_half_spread_bp=Decimal("20"),
+    # "HOLD DAYS TO WEEKS, NEVER MONTHS" IS A REQUIREMENT, SO IT NEEDS A
+    # BOUND RATHER THAN A STARTING VALUE.
+    #
+    # Until now that rule was enforced only by holding_period_estimate
+    # defaulting to 12 days. But that parameter is ADAPTIVE: it moves up
+    # to 2 days per adjustment on measured evidence, and nothing here
+    # capped it. Enough adjustments in one direction and a "days to
+    # weeks" strategy quietly becomes a multi-month one - which is
+    # exactly the two-tier failure the brief describes, where a lucky
+    # run loosens a limit that then meets an unlucky one.
+    #
+    # 31 days, because the owner's own words are "weeks or at most a
+    # month". A position still open at the bound is closed regardless of
+    # what anything believes about it. Raising this is a human decision
+    # with risk-reviewer sign-off, like every other bound in this file.
+    max_hold_days=31,
 )

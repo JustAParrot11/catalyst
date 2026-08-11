@@ -319,3 +319,26 @@ CREATE TABLE IF NOT EXISTS pricing_overrides (
 
 CREATE INDEX IF NOT EXISTS idx_pricing_overrides_lookup
     ON pricing_overrides (model, effective_from DESC);
+
+-- Periodic re-check of an OPEN position against fresh news. A review can
+-- only ever bring an exit date FORWARD (research/position_review.py), so
+-- these rows explain early exits and, just as importantly, record the
+-- times the model was asked and said the thesis was intact.
+CREATE TABLE IF NOT EXISTS position_reviews (
+    id                     TEXT PRIMARY KEY,
+    position_id            TEXT NOT NULL REFERENCES positions(id),
+    ticker                 TEXT NOT NULL,
+    action                 TEXT NOT NULL
+                           CHECK (action IN ('hold','exit_now','no_opinion')),
+    invalidation_triggered INTEGER NOT NULL,
+    reasoning              TEXT NOT NULL,
+    what_changed_json      TEXT,
+    prompt_rendered        TEXT,      -- what the model saw (BUILD-BRIEF)
+    raw_response_json      TEXT,      -- verbatim, never named fields only
+    model                  TEXT,
+    cost_cents             TEXT,
+    skipped_reason         TEXT,      -- set when no call was made at all
+    reviewed_at            TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_position_reviews_pos
+    ON position_reviews (position_id, reviewed_at);
