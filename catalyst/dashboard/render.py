@@ -19,7 +19,13 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from html.parser import HTMLParser
 
-from catalyst.dashboard.build import BUILD_HASH
+from catalyst.dashboard.build import BUILD_HASH, build_manifest
+
+#: Where the RUNNING dashboard was loaded from. Printed in the sidebar
+#: beside the build hash, because a repo on disk and the copy the
+#: service actually imports can be different things - and when they are,
+#: the page is the only place that can say which one you are reading.
+_SOURCE_DIR = build_manifest()["directory"]
 from catalyst.dashboard.db import QueryResult
 from catalyst.dashboard.redact import redact
 
@@ -542,6 +548,13 @@ def page(title: str, body: str, active: str, db_path: str, notes: str = "",
         "&#9679;</span>catalyst</a>"
         f'<nav aria-label="Sections">{"".join(groups)}</nav>'
         f'<p class="sidebar-foot">build <code>{esc(BUILD_HASH)}</code><br>'
+        # THE DIRECTORY, not just the hash. Owner-reported 2026-08-11: the
+        # repo on disk was byte-for-byte current while the service ran an
+        # older copy from somewhere else, and the page could not say so.
+        # "The repo says X" is a different claim from "the running code
+        # is X", and only the second one is what you are looking at.
+        f'<code title="the directory this page was loaded from">'
+        f'{esc(_SOURCE_DIR)}</code><br>'
         f"{esc(generated)}</p>"
         "</aside>"
         '<div class="content">'

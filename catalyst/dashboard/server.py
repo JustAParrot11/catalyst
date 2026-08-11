@@ -330,6 +330,11 @@ def diagnostics_bundle(db: Db) -> dict:
 def health(db: Db) -> dict:
     return {
         "build_hash": BUILD_HASH,
+        # Which copy of the code answered. install.sh polls this, and it
+        # is the one place reachable with curl that can tell "the repo is
+        # current" from "the running service is current" - they were not
+        # the same thing on the owner's machine (2026-08-11).
+        "source_dir": build_manifest()["directory"],
         "db_path": db.path,
         "db_open_error": db.open_error,
         "tables": sorted(db.tables()),
