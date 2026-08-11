@@ -15,6 +15,7 @@ Two rules are enforced structurally rather than remembered:
 
 import html
 import json
+import re
 from datetime import datetime, timezone
 from decimal import Decimal
 from html.parser import HTMLParser
@@ -285,13 +286,22 @@ section > h2 { font-size: 10.5px; margin: 0 0 12px 0; text-transform: uppercase;
 section > *:not(h2) { margin-left: 14px; margin-right: 14px; }
 section > .scroll-x, section > .chart-wrap { margin-left: 0; margin-right: 0; }
 section > .scroll-x table { border-left: none; border-right: none; }
-h3 { font-size: 11px; margin: 18px 0 6px 0; text-transform: uppercase;
+h3 { font-size: 11px; margin: 14px 0 5px 0; text-transform: uppercase;
      letter-spacing: .11em; color: var(--ink-2); font-weight: 700; }
-.prov { color: var(--muted); font-size: var(--t-fine); margin: 5px 0;
-        line-height: 1.5; }
+.prov { color: var(--muted); font-size: var(--t-fine); margin: 4px 0;
+        line-height: 1.45; }
 /* The one-sentence read. Sits above the detail on every page that has
    a simple view, and is the only prose allowed to outweigh a figure. */
 .lede-line { font-size: var(--t-lead); }
+/* The glance. One line, above every panel, answering "is anything
+   wrong, is anything open, did anything happen" before the reader has
+   to navigate for it. */
+.state-line { font-size: var(--t-lead); line-height: 1.6; margin: 0 0 12px 0;
+              padding: 10px 14px; background: var(--surface);
+              border: 1px solid var(--hairline);
+              border-left: 3px solid var(--accent); }
+.state-line b { font-variant-numeric: tabular-nums;
+                font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .caveat { background: var(--warn-wash); border-left: 3px solid var(--warning);
           padding: 9px 11px; margin: 9px 0; font-size: 13px; border-radius: 0; }
 .alarm { background: var(--crit-wash); border-left: 3px solid var(--critical);
@@ -338,6 +348,16 @@ h3 { font-size: 11px; margin: 18px 0 6px 0; text-transform: uppercase;
 .key-1 { background: var(--series-1); }
 .key-2 { background: var(--series-2); }
 .key-3 { background: var(--series-3); }
+/* Provenance, folded. The rule is unchanged - every figure says where
+   it came from - but it says so on request rather than in the middle of
+   the page. Closed it costs one line; open it is the same text as
+   before. */
+.workings { margin: 10px 14px 4px 14px; border-top: 1px solid var(--hairline);
+            padding-top: 6px; }
+.workings > summary { font-size: var(--t-fine); color: var(--muted);
+                      letter-spacing: .04em; }
+.workings[open] > summary { color: var(--ink-2); margin-bottom: 4px; }
+.workings .prov { margin: 6px 0; }
 .note { background: var(--surface-2); border-left: 3px solid var(--accent);
         padding: 9px 11px; margin: 9px 0; font-size: 13px; border-radius: 0; }
 .empty { background: var(--surface-2); border: 1px dashed var(--baseline);
@@ -345,13 +365,21 @@ h3 { font-size: 11px; margin: 18px 0 6px 0; text-transform: uppercase;
 .big { font-size: var(--t-hero); font-weight: 650; letter-spacing: -.025em;
        line-height: 1.1; font-feature-settings: "tnum" 1, "zero" 1; }
 .pos { color: var(--pos); } .neg { color: var(--neg); }
+/* A figure that is not a verdict: absent because it is early,
+   not absent because something broke. */
+.muted-fig { color: var(--muted); }
 
 /* KPI tiles - the at-a-glance row. Every tile carries its own
    provenance line, so a number can never be read without its source. */
-.tiles { display: grid; gap: 1px; margin: 12px 0 14px 0;
+/* Density. Tiles were 190px wide with 9px of padding, so four figures
+   filled a screen and the eye travelled a long way between them. A
+   trading desk packs more into the same glance: narrower minimum,
+   tighter padding, so a KPI row reads as one instrument rather than as
+   four cards. */
+.tiles { display: grid; gap: 1px; margin: 8px 0 10px 0;
          background: var(--hairline); border: 1px solid var(--hairline);
-         grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
-.tile { background: var(--surface-2); padding: 9px 12px; }
+         grid-template-columns: repeat(auto-fit, minmax(158px, 1fr)); }
+.tile { background: var(--surface-2); padding: 7px 10px; }
 .tile-label { font-size: var(--t-micro); text-transform: uppercase; letter-spacing: .13em;
               color: var(--muted); margin: 0 0 4px 0; font-weight: 700; }
 .tile-value { font-size: var(--t-fig); font-weight: 600; letter-spacing: -.02em;
@@ -572,7 +600,34 @@ def page(title: str, body: str, active: str, db_path: str, notes: str = "",
     )
 
 
+#: Matches a provenance paragraph, including its id when it carries one.
+_PROV_RE = re.compile(r'<p class="prov"[^>]*>.*?</p>', re.S)
+
+
 def section(sid: str, title: str, body: str) -> str:
+    """A panel, with its provenance FOLDED rather than inline.
+
+    Every number on this dashboard has to say where it came from, and it
+    still does - but the owner measured the cost of printing all of it
+    at once: 94 words of prose per figure on the Overview, 291 on the
+    Cost page. A trading desk runs nearer ten. The page read as an essay
+    with numbers in it rather than an instrument.
+
+    So the rule is unchanged and the default view is not: every
+    provenance line in this section is collected into one disclosure at
+    the foot of it, one click from the figure it explains. Warnings,
+    alarms and empty-result blocks stay inline - those are not
+    provenance, they are the page telling you something is wrong.
+
+    Done here, in the one place every panel already passes through, so
+    no panel has to remember to do it.
+    """
+    provs = _PROV_RE.findall(body)
+    if len(provs) > 1:
+        body = _PROV_RE.sub("", body)
+        body += (f'<details class="workings" id="{esc(sid)}-workings">'
+                 f"<summary>Where these {len(provs)} figures came from"
+                 "</summary>" + "".join(provs) + "</details>")
     return f'<section id="{esc(sid)}"><h2>{esc(title)}</h2>{body}</section>'
 
 

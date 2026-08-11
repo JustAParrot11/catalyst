@@ -126,7 +126,8 @@ def route_overview(db: Db, params: dict) -> str:
     # a performance panel that leads with a comparison unavailable in the
     # account's first days.
     body = (
-        panels.value_reconciliation_panel(db, p="ovval")
+        panels.state_line(db, p="state")
+        + panels.value_reconciliation_panel(db, p="ovval")
         + panels.performance_panel(db, p="perf")
         + panels.funnel_panel(db, p="funnel")
         + panels.cost_panel(db, p="ovcost", compact=True)
