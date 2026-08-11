@@ -771,3 +771,15 @@ change kept from this session is the strengthened assertion block in
   checking for a venv (which would break a first install), and removing
   the delegation. Both caught. Both paths were run for real - a fresh
   machine still installs, a second run hands over.
+- UI overhaul (2026-08-11). Density measured before changing anything:
+  94 words of visible prose per figure on the Overview, 291 on Cost. A
+  trading desk runs nearer ten. Provenance is now folded into one
+  disclosure per section - the rule is unchanged, the default view is
+  not - taking the Overview to 56 and Cost to 188.
+  Sabotages: the fold removed; the state line unwired; the "merely
+  early" headline reverted to alarm-red "unavailable". All caught.
+  PROCESS NOTE, learned the hard way this run: `git checkout <file>` to
+  undo a sabotage DESTROYS uncommitted work, because it restores to
+  HEAD rather than to the pre-sabotage state. It wiped an hour of the
+  overhaul. Always restore from a file copy taken immediately before
+  the sabotage, never from git, while the work is uncommitted.

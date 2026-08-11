@@ -1774,3 +1774,77 @@ class TestThePageSaysWhichCopyIsRunning:
         foot = html_out.split('class="sidebar-foot"')[1][:400]
         assert BUILD_HASH in foot
         assert "dashboard" in foot
+
+
+def test_the_headline_and_the_tile_agree_when_it_is_merely_early(
+        tmp_path, monkeypatch):
+    """Found by stress-testing the rendered pages: the tile said "too
+    early to compare" while the headline shouted "unavailable" in alarm
+    red, so the page contradicted itself about whether anything was
+    wrong."""
+    db = _perf_with_window(tmp_path, monkeypatch,
+                           ["2026-08-05", "2026-08-06", "2026-08-07"],
+                           "2026-08-09")
+    html_out = panels.performance_panel(db, p="perf")
+    headline = html_out.split(f'id="perf-headline"')[1].split("</p>")[0]
+    assert "unavailable" not in headline
+    assert "not yet" in headline
+    assert 'class="neg"' not in headline, "early is not an alarm"
+
+
+class TestThePageReadsAsAnInstrumentNotAnEssay:
+    """Owner: "it still doesnt feel like an enterprise peice of trading
+    software". Measured before touching anything: 94 words of prose per
+    figure on the Overview, 291 on the Cost page. A trading desk runs
+    nearer ten. The brief's rule - every number says where it came from -
+    is unchanged; what changed is that it says so on request."""
+
+    def _visible_words(self, html_out: str) -> int:
+        body = html_out.split("<main")[1] if "<main" in html_out else html_out
+        visible = re.sub(r"<details.*?</details>", " ", body, flags=re.S)
+        return len(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", visible)).split())
+
+    def test_provenance_is_folded_into_one_disclosure_per_section(self, seeded):
+        html_out = panels.cost_panel(Db(seeded), p="cost")
+        assert 'class="workings"' in html_out
+        assert "Where these" in html_out
+
+    def test_the_provenance_is_still_there_word_for_word(self, seeded):
+        """Folded, never deleted. The rule is that every figure says
+        where it came from, and it still does."""
+        html_out = panels.cost_panel(Db(seeded), p="cost")
+        fold = html_out.split('class="workings"')[1]
+        assert 'class="prov"' in fold
+        assert "Pricing table provenance" in fold
+
+    def test_a_lone_provenance_line_is_left_where_it_is(self, seeded):
+        """Folding one line behind a disclosure costs a click and saves
+        nothing."""
+        from catalyst.dashboard.render import section
+        out = section("x", "T", '<p class="prov">only one</p>')
+        assert "workings" not in out
+        assert "only one" in out
+
+    def test_warnings_are_never_folded_away(self, seeded):
+        """An alarm is not provenance. Hiding one behind a disclosure is
+        how a page stops reporting that something is wrong."""
+        html_out = panels.cost_panel(Db(seeded), p="cost")
+        before_fold = html_out.split('class="workings"')[0]
+        assert 'class="alarm"' in before_fold
+
+    def test_the_overview_opens_with_one_line_of_state(self, seeded):
+        html_out = server.route_overview(Db(seeded), {})
+        assert 'id="state-line"' in html_out
+        line = html_out.split('id="state-line"')[1].split("</p>")[0]
+        assert "positions" in line and "after costs" in line
+        # it comes before every panel
+        assert html_out.index('id="state-line"') < html_out.index("-section")
+
+    def test_the_overview_is_no_longer_mostly_prose(self, seeded):
+        """The number that started this. Not a styling opinion - a count
+        of words the reader has to walk past to reach a figure."""
+        html_out = server.route_overview(Db(seeded), {})
+        figures = len(re.findall(r'class="(?:tile-value|big|funnel-n)"', html_out))
+        assert figures >= 8
+        assert self._visible_words(html_out) / figures < 75, (
+            "the page is still an essay with numbers in it")

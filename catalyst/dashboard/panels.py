@@ -49,10 +49,17 @@ def performance_panel(db: Db, p: str = "perf") -> str:
     if perf.bot_points:
         excess = perf.excess_pp
         cls = "pos" if (excess or 0) >= 0 else "neg"
-        excess_text = (
-            f'<span class="{cls}">{esc(signed_pp(excess))}</span>' if excess is not None
-            else '<span class="neg">unavailable</span>'
-        )
+        if excess is not None:
+            excess_text = f'<span class="{cls}">{esc(signed_pp(excess))}</span>'
+        elif perf.spy_window_too_short:
+            # The tile beside this already says "too early to compare".
+            # The headline shouted "unavailable" in alarm red at the same
+            # time, so the page contradicted itself about whether
+            # anything was wrong (found by stress-testing the rendered
+            # pages, not by reading the code).
+            excess_text = '<span class="muted-fig">not yet</span>'
+        else:
+            excess_text = '<span class="neg">unavailable</span>' 
         out.append(
             f'<p id="{p}-headline"><span class="big">{excess_text}</span> '
             f"excess return against SPY, both series indexed to 100 at "
@@ -1997,6 +2004,57 @@ def value_reconciliation_panel(db: Db, p: str = "val") -> str:
 # --------------------------------------------------------------------------
 # The brain
 # --------------------------------------------------------------------------
+
+
+def state_line(db: Db, p: str = "state") -> str:
+    """What is happening, in one sentence, before anything else.
+
+    The owner checks in twice a day and asked for something that reads
+    like a trading desk. A desk answers "is anything wrong, is anything
+    open, did anything happen" in a glance; this page answered it only
+    after four panels and a thousand words. This is that glance, and
+    every clause of it is a figure already computed elsewhere - it
+    reads, it never decides.
+    """
+    bits = []
+    try:
+        open_q = db.q("SELECT COUNT(*) n FROM positions WHERE status = 'open'")
+        n_open = int(open_q.rows[0]["n"]) if open_q.rows else 0
+    except Exception:  # noqa: BLE001
+        n_open = 0
+    bits.append(f"holding <b>{n_open}</b> of 5 positions")
+
+    try:
+        perf = queries.performance(db)
+        bits.append(f"account <b>{dollars(perf.net_equity_cents)}</b> "
+                    f"after costs")
+        if perf.n_closed:
+            bits.append(f"<b>{perf.n_closed}</b> closed trade(s)")
+        else:
+            bits.append("nothing closed yet")
+    except Exception:  # noqa: BLE001
+        bits.append("account value unavailable")
+
+    try:
+        c = queries.cost_panel(db)
+        bits.append(f"spent <b>{dollars(c.scheduled_mtd_cents)}</b> of "
+                    f"{dollars(c.base_cap_cents)} this month")
+    except Exception:  # noqa: BLE001
+        pass
+
+    # The one thing that should interrupt a glance.
+    try:
+        blocked = db.q("SELECT COUNT(*) n FROM cost_reconciliation_events "
+                       "WHERE action_taken = 'scheduled_paused' "
+                       "AND acknowledged_by IS NULL")
+        if blocked.rows and int(blocked.rows[0]["n"]):
+            bits.append('<b class="neg">spending is PAUSED pending a '
+                        "reconciliation you need to acknowledge</b>")
+    except Exception:  # noqa: BLE001
+        pass
+
+    return (f'<p class="state-line" id="{p}-line">'
+            + " &middot; ".join(bits) + "</p>")
 
 
 def brain_panel(db: Db, p: str = "brain") -> str:
