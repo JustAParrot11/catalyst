@@ -201,6 +201,30 @@ def performance(db: Db) -> Performance:
 # --------------------------------------------------------------------------
 
 
+def _last_seen(last_at, first_at=None) -> str:
+    """When a drop reason last happened, in words that age.
+
+    A bare count cannot say "this stopped". The owner read a wall of
+    400 Bad Request errors as a live fault days after the bug behind
+    them was fixed, because the page showed only how many there had
+    ever been.
+    """
+    day = _as_date(last_at)
+    if day is None:
+        return ""
+    age = (datetime.now(timezone.utc).date() - day).days
+    when = ("last seen today" if age <= 0 else
+            "last seen yesterday" if age == 1 else
+            f"last seen {age} days ago")
+    span = ""
+    first = _as_date(first_at)
+    if first is not None and first != day:
+        span = f", first {first}"
+    if age >= 2:
+        when += " - NOT since, so this may be history rather than a live fault"
+    return f"{when} ({day}{span})"
+
+
 @dataclass
 class Stage:
     key: str
@@ -246,17 +270,23 @@ def funnel(db: Db) -> Funnel:
     researched_q = db.q(
         "SELECT COUNT(DISTINCT candidate_id) FROM research_calls WHERE skipped_reason IS NULL"
     )
+    # DATE EVERY DROP REASON. Owner-reported 2026-08-10: a wall of 400
+    # Bad Request errors from a bug fixed days earlier still read as
+    # current, because a count with no date cannot say "this stopped
+    # happening". Every reason now carries when it was last seen.
     skip_q = _grouped(db,
-        "SELECT skipped_reason, COUNT(*) n FROM research_calls "
+        "SELECT skipped_reason, COUNT(*) n, MIN(called_at) first_at, "
+        "       MAX(called_at) last_at FROM research_calls "
         "WHERE skipped_reason IS NOT NULL GROUP BY skipped_reason ORDER BY n DESC")
     gov_q = _grouped(db,
         "SELECT reason, COUNT(*) n, MIN(at) first_at, MAX(at) last_at "
         "FROM cost_governor_events WHERE decision = 'deny' "
         "GROUP BY reason ORDER BY n DESC")
-    drops = [(f"research skipped: {r['skipped_reason']}", r["n"], "") for r in skip_q.rows]
+    drops = [(f"research skipped: {r['skipped_reason']}", r["n"],
+              _last_seen(r["last_at"], r["first_at"])) for r in skip_q.rows]
     drops += [
         (f"cost governor denied: {r['reason']}", r["n"],
-         f"first {r['first_at']}, last {r['last_at']}")
+         _last_seen(r["last_at"], r["first_at"]))
         for r in gov_q.rows
     ]
     stages.append(Stage(

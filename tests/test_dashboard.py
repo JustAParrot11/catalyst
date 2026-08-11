@@ -1579,3 +1579,161 @@ def test_the_refusals_route_defaults_to_the_map(seeded):
     db = Db(seeded)
     assert 'id="refs-map"' in server.route_refusals(db, {})
     assert 'id="ref-table"' in server.route_refusals(db, {"view": ["full"]})
+
+
+# ------------------------------------------------ the diagrams respond
+
+
+class TestTheDiagramsAreActuallyInteractive:
+    """Owner-reported 2026-08-10: "I cant click to get any neural info
+    when I hover or click." The tooltips existed as SVG <title>, but a
+    <title> only fires on a real hit, and the strands were drawn 1.1px
+    wide - close to unhittable with a mouse and impossible with a
+    finger."""
+
+    def test_every_edge_carries_a_fat_invisible_hit_area(self, wired):
+        html_out = panels.brain_panel(Db(wired), p="brain")
+        svg = html_out[html_out.index("<svg"):html_out.index("</svg>")]
+        hits = svg.count('class="edge-hit"')
+        drawn = svg.count('class="edge"')
+        assert hits == drawn, "every visible strand needs a hit area"
+        assert hits > 0
+        assert 'stroke-width="14"' in svg, "the hit area must be wide"
+
+    def test_the_hit_area_is_hittable_at_all(self, wired):
+        """A transparent stroke is NOT hittable under the default
+        pointer-events: visiblePainted. Verified in a browser - without
+        this attribute the pointer sits on the strand and nothing fires,
+        while the markup looks entirely correct."""
+        svg = panels.brain_panel(Db(wired), p="brain")
+        for hit in svg.split('class="edge-hit"')[1:]:
+            assert 'pointer-events="stroke"' in hit[:220]
+
+    def test_the_visible_strand_never_swallows_the_pointer(self, wired):
+        """It is painted over the hit path, so if it takes pointer events
+        the hover lands on the wrong element and the highlight never
+        fires. Found in a browser, not in the markup."""
+        svg = panels.brain_panel(Db(wired), p="brain")
+        for edge in svg.split('class="edge"')[1:]:
+            assert 'pointer-events="none"' in edge[:220]
+
+    def test_the_hit_area_carries_the_tooltip_text(self, wired):
+        html_out = panels.brain_panel(Db(wired), p="brain")
+        seg = html_out.split('class="edge-hit"')[1][:400]
+        assert "<title>" in seg, "hovering the hit area must say something"
+
+    def test_nodes_have_a_hit_area_bigger_than_the_dot(self, wired):
+        html_out = panels.brain_panel(Db(wired), p="brain")
+        svg = html_out[html_out.index("<svg"):html_out.index("</svg>")]
+        assert 'class="node"' in svg
+        assert 'fill="transparent"' in svg
+
+    def test_a_candidate_node_links_to_its_decision(self, wired):
+        html_out = panels.brain_panel(Db(wired), p="brain")
+        assert '<a href="/decision?candidate_id=c1"' in html_out
+
+    def test_the_spider_leaves_and_lines_are_hoverable(self, rich_decision):
+        html_out = panels.trace_simple(Db(rich_decision), "c1", p="trs")
+        svg = html_out[html_out.index("<svg"):html_out.index("</svg>")]
+        assert svg.count('class="edge-hit"') == svg.count('class="edge"')
+        assert 'class="node"' in svg
+        # the leaf box and its label are ONE hoverable group, so the
+        # tooltip does not vanish when the pointer crosses the text
+        group = svg.split('<g class="node">')[1][:400]
+        assert "<title>" in group and "<rect" in group and "<text" in group
+
+    def test_the_stylesheet_makes_the_response_visible(self):
+        from catalyst.dashboard.render import _CSS
+        assert ".edge-wrap:hover .edge" in _CSS, (
+            "hovering must visibly light the strand, or the diagram still "
+            "looks dead even when it is working. GROUP hover, not a "
+            "sibling selector: the visible line is painted over the hit "
+            "path, so the pointer lands on the wrong element.")
+        assert ".node:hover" in _CSS
+        assert "cursor: help" in _CSS
+
+
+class TestFunnelDropReasonsAreDated:
+    """Owner-reported 2026-08-10: a wall of 400 Bad Request errors read
+    as a live fault days after the bug behind them was fixed. A count
+    with no date cannot say "this stopped happening"."""
+
+    def _db_with_skip(self, tmp_path, days_ago):
+        from catalyst.storage import init_db
+        path = str(tmp_path / f"f{days_ago}.db")
+        conn = init_db(path)
+        when = datetime.now(timezone.utc) - timedelta(days=days_ago)
+        conn.execute("INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?,?)",
+                     ("c1", "ACME", "x", "2026-09-01", "confirmed", "[]",
+                      when.isoformat(), "tech", "[]"))
+        conn.execute("INSERT INTO research_calls VALUES (?,?,?,?,?,?,?,?,?)",
+                     ("rc1", "c1", "claude-sonnet-5", "P", "[]", "1.0", 100,
+                      "transport_error: 400 Bad Request", when.isoformat()))
+        conn.commit()
+        conn.close()
+        return Db(path)
+
+    def test_a_reason_from_days_ago_is_marked_as_possibly_history(self, tmp_path):
+        html_out = panels.funnel_panel(self._db_with_skip(tmp_path, 5))
+        assert "last seen 5 days ago" in html_out
+        assert "may be history rather than a live fault" in html_out
+
+    def test_a_reason_from_today_is_not_softened(self, tmp_path):
+        """The distinction has to cut both ways or it is just a way of
+        explaining away every error."""
+        html_out = panels.funnel_panel(self._db_with_skip(tmp_path, 0))
+        assert "last seen today" in html_out
+        assert "may be history" not in html_out
+
+    def test_yesterday_is_still_treated_as_live(self, tmp_path):
+        html_out = panels.funnel_panel(self._db_with_skip(tmp_path, 1))
+        assert "last seen yesterday" in html_out
+        assert "may be history" not in html_out
+
+    def test_the_date_itself_is_printed_not_only_the_age(self, tmp_path):
+        """"5 days ago" is relative to when the page was opened; the date
+        is what goes in a bug report."""
+        db = self._db_with_skip(tmp_path, 5)
+        expected = (datetime.now(timezone.utc) - timedelta(days=5)).date()
+        assert str(expected) in panels.funnel_panel(db)
+
+
+class TestTypographyIsSystematic:
+    """Owner asked for a professional trading platform "optimized for my
+    eyes as a passive trader". These pin the structure that makes a page
+    scannable in a glance, not the taste."""
+
+    def test_there_is_one_type_scale_and_sizes_come_from_it(self):
+        from catalyst.dashboard.render import _CSS
+        for step in ("--t-micro", "--t-fine", "--t-base", "--t-lead",
+                     "--t-fig", "--t-hero"):
+            assert step in _CSS, step
+        assert "font-size: var(--t-hero)" in _CSS
+        assert "font-size: var(--t-fig)" in _CSS
+
+    def test_every_figure_is_monospaced_and_column_aligned(self):
+        """Proportional digits make the eye do arithmetic it should not
+        have to when comparing a column of money."""
+        from catalyst.dashboard.render import _CSS
+        block = _CSS.split("tabular-nums")[0]
+        for cls in (".tile-value", ".funnel-n", "td.num", ".rail-value", ".big"):
+            assert cls in block, cls
+
+    def test_zeros_are_unambiguous_in_figures(self):
+        """A slashed zero is the difference between 0 and O at 11px in a
+        column of identifiers."""
+        from catalyst.dashboard.render import _CSS
+        assert '"zero" 1' in _CSS
+
+    def test_a_scanned_column_marks_the_row_and_keeps_its_header(self):
+        from catalyst.dashboard.render import _CSS
+        assert "tbody tr:hover" in _CSS
+        assert "position: sticky" in _CSS
+
+    def test_prose_never_outweighs_a_number(self, seeded):
+        """The hero figure is the read; the provenance is the proof. If
+        they are the same size the page is a wall of text."""
+        from catalyst.dashboard.render import _CSS
+        hero = _CSS.split(".big {")[1].split("}")[0]
+        prov = _CSS.split(".prov {")[1].split("}")[0]
+        assert "--t-hero" in hero and "--t-fine" in prov

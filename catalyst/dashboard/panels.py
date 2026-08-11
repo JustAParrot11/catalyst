@@ -1639,11 +1639,12 @@ def refusals_simple(db: Db, p: str = "refs") -> str:
                               for k, v in sorted(outcome_hits.items(),
                                                  key=lambda kv: -kv[1])]),
     ]
+    links = {esc(k): f"/decision?candidate_id={esc(k[2:])}" for k in cand_hits}
     out.append('<div class="chart-wrap">' + charts.neural_map(
         [(esc(lbl), [(esc(a), esc(b_), w) for a, b_, w in ns])
          for lbl, ns in layers],
         [(esc(a), esc(b_), w, esc(t)) for a, b_, w, t in edges],
-        chart_id=f"{p}-map") + "</div>")
+        chart_id=f"{p}-map", links=links) + "</div>")
     out.append(prov(
         "Left is the rule that declined it, middle is the candidate, right is "
         "what the price did afterwards. A reason with most of its strands "
@@ -2026,11 +2027,15 @@ def brain_panel(db: Db, p: str = "brain") -> str:
         "filing takes to become a trade: what the bot read, what it built from "
         "it, what it linked, what the model made of it, what the code decided, "
         "and what actually happened.</p>")
+    # Candidate nodes go somewhere: clicking one opens its decision.
+    links = {esc(nid): f"/decision?candidate_id={esc(nid[5:])}"
+             for label, nodes in b.layers if label == "Candidates"
+             for nid, _, _ in nodes}
     out.append('<div class="chart-wrap">' + charts.neural_map(
         [(esc(label), [(esc(nid), esc(nlabel), w) for nid, nlabel, w in nodes])
          for label, nodes in b.layers],
         [(esc(s), esc(d), w, esc(t)) for s, d, w, t in b.edges],
-        chart_id=f"{p}-map") + "</div>")
+        chart_id=f"{p}-map", links=links) + "</div>")
     out.append(prov(
         "Every line is one recorded relationship - a source event named by a "
         "candidate, an assertion in the evidence graph, a view against a "

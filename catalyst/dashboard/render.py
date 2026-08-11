@@ -159,10 +159,26 @@ _CSS = """
     --focus-ring: #6da7ec;
   }
 }
+/* --- type scale -----------------------------------------------------
+   One ratio, six steps, so nothing on the page is sized by eye. A
+   passive trader reads this in glances: the hierarchy has to do the
+   work of telling a headline figure from its supporting detail before
+   a single word is read. Prose sits at --t-base and never competes
+   with a number. */
+:root {
+  --t-micro: 9.5px;   /* uppercase micro-labels */
+  --t-fine:  11px;    /* provenance, captions */
+  --t-base:  13px;    /* body, table cells */
+  --t-lead:  15px;    /* the one-sentence read at the top of a section */
+  --t-fig:   22px;    /* tile figures */
+  --t-hero:  34px;    /* one per section, no more */
+  --gap:     4px;
+}
 * { box-sizing: border-box; }
-body { font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+body { font: var(--t-base)/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
        margin: 0; color: var(--ink); background: var(--page);
-       -webkit-font-smoothing: antialiased; }
+       -webkit-font-smoothing: antialiased;
+       text-rendering: optimizeLegibility; }
 /* Terminal register: every FIGURE is monospaced and column-aligned, and
    every micro-label is uppercase and letterspaced. Prose stays in the
    UI sans - a trading desk sets its data in mono, not its sentences. */
@@ -265,7 +281,11 @@ section > .scroll-x, section > .chart-wrap { margin-left: 0; margin-right: 0; }
 section > .scroll-x table { border-left: none; border-right: none; }
 h3 { font-size: 11px; margin: 18px 0 6px 0; text-transform: uppercase;
      letter-spacing: .11em; color: var(--ink-2); font-weight: 700; }
-.prov { color: var(--muted); font-size: 12px; margin: 5px 0; }
+.prov { color: var(--muted); font-size: var(--t-fine); margin: 5px 0;
+        line-height: 1.5; }
+/* The one-sentence read. Sits above the detail on every page that has
+   a simple view, and is the only prose allowed to outweigh a figure. */
+.lede-line { font-size: var(--t-lead); }
 .caveat { background: var(--warn-wash); border-left: 3px solid var(--warning);
           padding: 9px 11px; margin: 9px 0; font-size: 13px; border-radius: 0; }
 .alarm { background: var(--crit-wash); border-left: 3px solid var(--critical);
@@ -290,6 +310,23 @@ h3 { font-size: 11px; margin: 18px 0 6px 0; text-transform: uppercase;
              max-width: 74ch; margin: 4px 0 14px 0; }
 /* Legend keys. The spider's three arms are labelled on the diagram too -
    these repeat the identity in text so it is never colour alone. */
+/* Diagram interaction. SVG <title> is the tooltip, but it only fires
+   on a real hit - and a 1.1px line is close to unhittable with a mouse
+   and impossible with a finger, which is why the owner reported that
+   nothing happened at all. Wide transparent hit paths sit under each
+   stroke; these rules make the response visible as well as functional,
+   so it is obvious the diagram IS interactive. */
+.chart .edge { transition: opacity .12s ease, stroke-width .12s ease; }
+.chart .edge-hit { cursor: help; }
+.chart .edge-wrap:hover .edge { opacity: 1 !important; stroke-width: 2.6; }
+.chart .node { cursor: help; }
+.chart .node:hover rect { filter: brightness(1.35); }
+.chart .node:hover circle { filter: brightness(1.35); }
+.chart a:hover text { text-decoration: underline; }
+.chart a { cursor: pointer; }
+@media (prefers-reduced-motion: reduce) {
+  .chart .edge { transition: none; }
+}
 .key { display: inline-block; width: 9px; height: 9px; border-radius: 2px;
        margin: 0 5px 0 12px; vertical-align: baseline; }
 .key-1 { background: var(--series-1); }
@@ -299,7 +336,8 @@ h3 { font-size: 11px; margin: 18px 0 6px 0; text-transform: uppercase;
         padding: 9px 11px; margin: 9px 0; font-size: 13px; border-radius: 0; }
 .empty { background: var(--surface-2); border: 1px dashed var(--baseline);
          padding: 10px 12px; margin: 9px 0; font-size: 12px; border-radius: 2px; }
-.big { font-size: 30px; font-weight: 650; letter-spacing: -.02em; }
+.big { font-size: var(--t-hero); font-weight: 650; letter-spacing: -.025em;
+       line-height: 1.1; font-feature-settings: "tnum" 1, "zero" 1; }
 .pos { color: var(--pos); } .neg { color: var(--neg); }
 
 /* KPI tiles - the at-a-glance row. Every tile carries its own
@@ -308,11 +346,11 @@ h3 { font-size: 11px; margin: 18px 0 6px 0; text-transform: uppercase;
          background: var(--hairline); border: 1px solid var(--hairline);
          grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
 .tile { background: var(--surface-2); padding: 9px 12px; }
-.tile-label { font-size: 9.5px; text-transform: uppercase; letter-spacing: .13em;
+.tile-label { font-size: var(--t-micro); text-transform: uppercase; letter-spacing: .13em;
               color: var(--muted); margin: 0 0 4px 0; font-weight: 700; }
-.tile-value { font-size: 21px; font-weight: 600; letter-spacing: -.02em;
+.tile-value { font-size: var(--t-fig); font-weight: 600; letter-spacing: -.02em;
               margin: 0; line-height: 1.15; }
-.tile-sub { font-size: 11px; color: var(--ink-2); margin: 5px 0 0 0; }
+.tile-sub { font-size: var(--t-fine); color: var(--ink-2); margin: 5px 0 0 0; }
 /* A pill followed by prose on one line reads as a run-on. */
 .tile-sub .pill { display: flex; width: fit-content; margin-bottom: 3px; }
 .pill { display: inline-flex; align-items: center; gap: 5px; font-size: 12px;
@@ -335,7 +373,14 @@ th { background: var(--grid-head); font-weight: 700; font-size: 9.5px;
      border-bottom: 1px solid var(--accent); position: sticky; top: 0; }
 tbody tr:hover { background: var(--surface-2); }
 tbody tr:hover td { border-bottom-color: var(--baseline); }
-td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums;
+                 font-feature-settings: "tnum" 1, "zero" 1; }
+/* Scanning a column is the core motion on this page, so the row under
+   the pointer is marked and the header stays put while it scrolls. */
+tbody tr:hover { background: var(--surface-2); }
+thead th { position: sticky; top: 0; background: var(--grid-head);
+           z-index: 1; }
+.scroll-x { max-height: 70vh; }
 .scroll-x { overflow-x: auto; max-width: 100%; }
 .scroll-x table { min-width: 520px; }
 pre { background: #14140f; color: #e8e8e0; padding: 10px; overflow-x: auto;
