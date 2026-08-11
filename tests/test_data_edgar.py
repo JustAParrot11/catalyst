@@ -765,12 +765,21 @@ def test_4xx_raises_immediately_and_is_never_retried():
 
 def test_403_block_page_is_fatal_and_names_the_ip_block():
     """A real rate-limit block and an absent file are both 403. Confusing
-    them either screams every weekend or swallows the block."""
+    them either screams every weekend or swallows the block.
+
+    A block now raises RateLimitBlocked rather than FeedError, and the
+    distinction is the whole point: every per-filing loop in the module
+    catches FeedError and CONTINUES to the next filing. Doing that
+    during a block sends 2,800 more requests and extends the timeout,
+    which is what happened live on 2026-08-11."""
     clock = FakeClock()
     recorder = Recorder({}, clock, default=FakeResponse(403, BLOCKED_BODY))
-    with pytest.raises(feed.FeedError, match="IP block"):
+    with pytest.raises(feed.RateLimitBlocked, match="rate-limited"):
         one_trading_day(recorder, clock)
     assert len(recorder.calls) == 1, "still a 4xx: not retried"
+    assert not issubclass(feed.RateLimitBlocked, feed.FeedError), (
+        "a block caught as a FeedError would be swallowed by the "
+        "per-filing loop and the pass would carry on through the block")
 
 
 def test_absent_daily_index_403_is_a_missing_date_not_an_error():
@@ -996,3 +1005,63 @@ def test_the_pacer_still_spaces_requests_across_threads():
     gaps = [b - a for a, b in zip(stamps, stamps[1:])]
     assert len(gaps) == 7
     assert all(gap > 0.05 for gap in gaps), f"burst: gaps {gaps}"
+
+
+# ---------------------------------------------------------------------------
+# The live block, 2026-08-11
+# ---------------------------------------------------------------------------
+
+
+class TestTheSecBlockDoesNotExtendItself:
+    """Owner-reported live: "SEC.gov | Request Rate Threshold Exceeded ...
+    Your access to SEC.gov will be limited for 10 minutes."
+
+    The pacer held 5 req/s, under the 10 req/s ceiling - but a Form 4
+    pass makes ~2,815 requests over a 5-day window, which is 9.4 minutes
+    of CONTINUOUS traffic inside a 15-minute cycle: a 63% duty cycle,
+    and squarely what "we reserve the right to block IP addresses that
+    submit excessive requests" is aimed at.
+
+    The acute defect was the response to it. The SEC's own notice says
+    continuing during a timeout EXTENDS the timeout, and the per-filing
+    loop caught the error and carried on to the next filing."""
+
+    def test_the_block_page_is_recognised_whatever_status_carries_it(self):
+        for status in (200, 403, 429):
+            assert feed.looks_rate_limited(status, BLOCKED_BODY), status
+        assert not feed.looks_rate_limited(403, ABSENT_INDEX_BODY)
+        assert not feed.looks_rate_limited(200, "<ownershipDocument/>")
+
+    def test_a_block_starts_a_cooldown_that_REFUSES_further_requests(self):
+        """Refuse, not sleep. Sleeping would let the same sustained burst
+        resume the moment it expired."""
+        pacer = feed.RateLimiter(5.0)
+        pacer.acquire()
+        pacer.note_block()
+        with pytest.raises(feed.RateLimitBlocked, match="cooldown left"):
+            pacer.acquire()
+
+    def test_the_cooldown_is_at_least_the_secs_stated_timeout(self):
+        assert feed.BLOCK_COOLDOWN_SECONDS >= 10 * 60, (
+            "the SEC says 10 minutes; anything shorter walks straight "
+            "back into the block and extends it")
+
+    def test_the_cooldown_clears_itself(self):
+        """A permanent block would be worse than the outage it prevents."""
+        clock = FakeClock()
+        pacer = feed.RateLimiter(5.0, monotonic=clock.monotonic,
+                                 sleep=clock.sleep)
+        pacer.note_block()
+        with pytest.raises(feed.RateLimitBlocked):
+            pacer.acquire()
+        clock.t += feed.BLOCK_COOLDOWN_SECONDS + 1
+        pacer.acquire()          # must not raise
+
+    def test_the_cooldown_stops_EVERY_sec_caller_not_just_the_one_told(self):
+        """One IP budget. The dashboard probe must not keep poking
+        sec.gov because the feed was the one that got blocked."""
+        feed.reset_sec_pacer()
+        feed.sec_pacer().note_block()
+        with pytest.raises(feed.RateLimitBlocked):
+            feed.sec_pacer().acquire()
+        feed.reset_sec_pacer()

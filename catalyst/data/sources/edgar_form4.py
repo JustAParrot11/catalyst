@@ -149,6 +149,53 @@ class HttpResponse(Protocol):
 HttpGet = Callable[[str, dict], HttpResponse]
 
 
+class RateLimitBlocked(RuntimeError):
+    """SEC.gov has rate-limited this IP. A GLOBAL condition, not a
+    per-request failure.
+
+    Raised on the block page, and deliberately NOT a FeedError subclass:
+    every per-filing loop in this module catches FeedError and continues
+    to the next filing, which is exactly the wrong response here. The
+    SEC's own notice says so:
+
+        "Continuing to exceed the SEC's maximum allowable request rate
+         during the time-out period will extend the duration of the
+         time-out period."
+
+    So a block must abort the whole pass and start a cooldown, not carry
+    on through 2,800 more filings extending the ban with each one.
+    Owner-reported 2026-08-11, live, after exactly that.
+    """
+
+    def __init__(self, message: str, raw_text: str = ""):
+        super().__init__(message)
+        self.raw_text = raw_text
+
+
+#: The SEC's stated timeout, plus margin. Requests during the block
+#: extend it, so the margin is not politeness - it is the difference
+#: between a ten-minute outage and an open-ended one.
+BLOCK_COOLDOWN_SECONDS = 15 * 60
+
+#: Markers in SEC.gov's own block pages.
+_BLOCK_MARKERS = (
+    "Request Rate Threshold Exceeded",
+    "Exceeded the SEC",
+    "Undeclared Automated Tool",
+    "your request rate has exceeded",
+)
+
+
+def looks_rate_limited(status: int, body: str) -> bool:
+    """Is this the SEC saying "you are blocked"?
+
+    Matched on the BODY rather than the status, because the block page
+    has arrived as 403 and as 200 depending on which edge served it.
+    """
+    text = (body or "")
+    return any(m.lower() in text.lower() for m in _BLOCK_MARKERS)
+
+
 class FeedError(RuntimeError):
     """A source could not be read. Carries the raw upstream evidence.
 
@@ -222,15 +269,51 @@ class RateLimiter:
         self._sleep = sleep
         self._next_at: float | None = None
         self._lock = threading.Lock()
+        self._blocked_until: float | None = None
         self.acquisitions = 0
+        self.blocks = 0
         self.waits: list[float] = []
 
+    def note_block(self) -> None:
+        """SEC.gov said we are rate limited. Shut the whole feed down for
+        the cooldown - EVERY caller, not just the one that was told."""
+        with self._lock:
+            self.blocks += 1
+            self._blocked_until = self._monotonic() + BLOCK_COOLDOWN_SECONDS
+
+    def blocked_for(self) -> float:
+        """Seconds remaining on a cooldown, 0 if clear."""
+        with self._lock:
+            if self._blocked_until is None:
+                return 0.0
+            left = self._blocked_until - self._monotonic()
+            if left <= 0:
+                self._blocked_until = None
+                return 0.0
+            return left
+
     def acquire(self) -> None:
+        # REFUSE OUTRIGHT DURING A COOLDOWN. Not sleep - refuse. Sleeping
+        # would let the pass carry on afterwards and re-enter the same
+        # sustained burst that caused the block; and a request made
+        # during the timeout extends it.
         # Locked, because the SEC ceiling is per IP and this process runs
         # the dashboard's probes on request threads while the trading
         # cycle is fetching. Two threads reading _next_at between the
         # read and the write is exactly how a paced client emits a burst.
+        # The cooldown check shares the lock so acquire() takes it once.
         with self._lock:
+            if self._blocked_until is not None:
+                left = self._blocked_until - self._monotonic()
+                if left > 0:
+                    # REFUSE, not sleep. A request during the timeout
+                    # extends it, and sleeping would let the same
+                    # sustained burst resume the moment it expired.
+                    raise RateLimitBlocked(
+                        f"sec.gov blocked this IP; {left / 60:.1f} minute(s) "
+                        "of cooldown left. No SEC request is made until it "
+                        "expires - requesting during the timeout extends it.")
+                self._blocked_until = None
             now = self._monotonic()
             if self._next_at is None:
                 self._next_at = now
@@ -255,6 +338,15 @@ class RateLimiter:
 #: pacer matter rather than being a formality.
 _SEC_PACER: "RateLimiter | None" = None
 _SEC_PACER_LOCK = threading.Lock()
+
+
+def reset_sec_pacer() -> None:
+    """Drop the process-wide pacer. FOR TESTS ONLY - a block recorded by
+    one test would otherwise refuse every SEC call in the ones after
+    it, which is a test-ordering bug that looks like a code bug."""
+    global _SEC_PACER
+    with _SEC_PACER_LOCK:
+        _SEC_PACER = None
 
 
 def sec_pacer() -> "RateLimiter":
@@ -428,6 +520,12 @@ class FetchResult:
     unique_accessions: int = 0
     requests_made: int = 0
     truncated_at: int | None = None
+    #: Filings replayed from local storage rather than re-downloaded.
+    #: The gap between this and requests_made IS the rate-limit fix.
+    from_cache: int = 0
+    #: Set when sec.gov blocked this IP mid-pass. The pass stops there
+    #: on purpose: further requests extend the timeout.
+    rate_limited: str = ""
 
     def why_empty(self) -> str:
         """One line a human can read off the dashboard when there is
@@ -776,9 +874,28 @@ def _request(
             ) from exc
 
         status = int(response.status_code)
+        body_peek = ""
+        if status != 200:
+            body_peek = _response_text(response)
+        elif "text/html" in str(
+                (getattr(response, "headers", None) or {}).get(
+                    "Content-Type", "")).lower():
+            # A 200 carrying HTML where an .idx or a submission text file
+            # was expected is the block page served by an edge that did
+            # not set a 4xx. Reading it as data would parse to zero rows
+            # and look like a quiet day.
+            body_peek = _response_text(response)
+        if body_peek and looks_rate_limited(status, body_peek):
+            sec_pacer().note_block()
+            raise RateLimitBlocked(
+                f"SEC.gov rate-limited this IP (HTTP {status}). Every further "
+                "request during the timeout EXTENDS it, so this pass stops "
+                f"here and nothing touches sec.gov for "
+                f"{BLOCK_COOLDOWN_SECONDS // 60} minutes.",
+                raw_text=body_peek[:2000])
         if status == 200:
             return response
-        body = _response_text(response)
+        body = body_peek or _response_text(response)
         if status in tolerated:
             return response
         if status in RETRYABLE_STATUSES or 500 <= status < 600:
@@ -831,6 +948,8 @@ def fetch_form4(
     now: Callable[[], datetime] | None = None,
     include_amendments: bool = False,
     max_filings: int | None = None,
+    already_have: Callable[[str], dict | None] | None = None,
+    on_fetched: Callable[[str, dict], None] | None = None,
 ) -> FetchResult:
     """Fetch Form 4 filings disseminated between ``since`` and ``until``.
 
@@ -842,6 +961,23 @@ def fetch_form4(
 
     ``max_filings`` bounds the request count; hitting it sets
     ``FetchResult.truncated_at`` rather than silently dropping filings.
+
+    ``already_have(accession)`` RETURNS A STORED PARSED FILING, OR None.
+    This is the difference between a feed and a denial-of-service on
+    sec.gov. Without it every pass re-downloads every filing in the
+    window: measured 2,815 requests for five days, 9.4 minutes of
+    continuous traffic inside a 15-minute cycle - a 63% duty cycle, and
+    the reason the SEC rate-limited this bot on 2026-08-11. With it a
+    steady-state pass fetches the daily indexes plus only genuinely new
+    filings, which is a few dozen a day.
+
+    The stored filing is REPLAYED into the result rather than skipped,
+    so the returned events are still the complete window. Skipping would
+    silently break insider-cluster detection, which needs every purchase
+    in the window to count distinct owners.
+
+    ``on_fetched(accession, parsed)`` is called for each filing actually
+    downloaded, so the caller can store it for next time.
     """
     getter = http_get or _default_http_get
     clock = now or (lambda: datetime.now(timezone.utc))
@@ -921,6 +1057,21 @@ def fetch_form4(
     attempted = 0
     for row in ordered:
         attempted += 1
+        # ALREADY HAVE IT? Replay it and spend no request. See the
+        # docstring - this is what keeps a pass from re-downloading the
+        # whole window every fifteen minutes.
+        if already_have is not None:
+            try:
+                cached = already_have(row.accession)
+            except Exception:  # noqa: BLE001 - a cache miss is never fatal
+                cached = None
+            if cached:
+                result.from_cache += 1
+                result.events.append(RawEvent(
+                    source=SOURCE, source_id=row.accession,
+                    fetched_at=clock(),
+                    payload_raw=dict(cached, replayed_from_cache=True)))
+                continue
         try:
             response = _request(
                 row.url,
@@ -963,6 +1114,14 @@ def fetch_form4(
             "submission_text": body,          # verbatim, never trimmed
             "parsed": parsed.to_payload(),    # beside it, never instead
         }
+        # Store the FINISHED payload, not the parsed dataclass: it is
+        # what the event carries, it is JSON-serialisable, and replaying
+        # it reproduces the event exactly.
+        if on_fetched is not None:
+            try:
+                on_fetched(row.accession, payload)
+            except Exception:  # noqa: BLE001 - storing is best effort
+                pass
         result.events.append(
             RawEvent(
                 source=SOURCE,
