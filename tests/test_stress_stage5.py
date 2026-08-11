@@ -91,9 +91,13 @@ def frozen_kill_switch_clock(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def stub_prompts(monkeypatch):
+    # **kwargs, not a fixed signature: this stub exists to make the
+    # prompt cheap, not to pin its parameters. Spelling them out meant
+    # every stress test broke the moment the real function grew one,
+    # which tests nothing about the behaviour under stress.
     monkeypatch.setattr(prompts, "render_research_prompt",
-                        lambda c, graph_context=None: "research")
-    monkeypatch.setattr(prompts, "exploration_tools", lambda: [])
+                        lambda c, **kw: "research")
+    monkeypatch.setattr(prompts, "exploration_tools", lambda *a, **kw: [])
 
 
 def brk(handler):

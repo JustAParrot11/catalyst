@@ -394,13 +394,85 @@ def _run_one_cycle(db_file: str):
                  if creds.anthropic_key else None)
 
     def feed(since, until):
-        return flatten_form4_events(fetch_events(since, until))
+        """All three feeds. Form 4 is the only one that may fail the pass.
+
+        THE TWO NEW FEEDS ARE ADDITIVE AND NEVER FATAL. Form 4 is the
+        graded strategy - the one the backtest measured over 2016-2026 -
+        so a Form 4 outage is a real discovery failure and propagates,
+        exactly as it always has. EDGAR full-text search and the news
+        firehose ENRICH: they create candidates only where they agree
+        with something else, so losing one of them costs breadth, not
+        correctness. Letting either take the cycle down would trade a
+        working strategy for a new one's outage.
+        """
+        events = list(flatten_form4_events(fetch_events(since, until)))
+
+        try:
+            from catalyst.data.sources import edgar_fts
+
+            fts = edgar_fts.fetch_events(since, until)
+            events.extend(fts.events)
+            for err in fts.errors:
+                _log.warning("Full-text search query %r failed: %s",
+                             err.get("query"), str(err.get("error"))[:300])
+        except Exception:  # noqa: BLE001 - breadth is not correctness
+            _log.exception(
+                "EDGAR full-text search failed; the pass continues on the "
+                "other feeds. Cross-feed conjunctions will be thinner.")
+
+        try:
+            from catalyst.data.sources import alpaca_news
+
+            news_start, news_end = alpaca_news.default_window(days=3)
+            news = alpaca_news.fetch_events(
+                news_start, news_end,
+                alpaca_key=creds.alpaca_key,
+                alpaca_secret=creds.alpaca_secret)
+            events.extend(news.events)
+            if news.error:
+                _log.warning("News feed: %s", news.error[:300])
+        except Exception:  # noqa: BLE001
+            _log.exception(
+                "The news feed failed; the pass continues on the other "
+                "feeds. Sentiment and news links will be missing.")
+        return events
+
+    def build_candidates_all(raw_events, as_of):
+        """Form 4 clusters, PLUS candidates from cross-feed agreement.
+
+        The two builders are kept apart deliberately. build_candidates is
+        line-for-line the backtest arm and must stay that way for its
+        measured edge to mean anything; conjunctions are a different
+        claim on different evidence. A conjunction never re-derives a
+        Form 4 cluster, so one piece of evidence cannot produce two rows
+        on the funnel.
+        """
+        from catalyst.discovery.conjunctions import build_conjunction_candidates
+
+        out = list(build_candidates(raw_events, as_of))
+        seen = {c.id for c in out}
+        try:
+            extra, dropped = build_conjunction_candidates(raw_events, as_of)
+            for cand in extra:
+                if cand.id not in seen:
+                    seen.add(cand.id)
+                    out.append(cand)
+            _log.info("Conjunctions: %d candidate(s) from cross-feed "
+                      "agreement, %d considered and dropped.",
+                      len(extra), len(dropped))
+            for ticker, why in dropped[:10]:
+                _log.debug("Conjunction dropped %s: %s", ticker, why)
+        except Exception:  # noqa: BLE001 - never lose the graded strategy
+            _log.exception(
+                "Conjunction discovery failed; the Form 4 candidates from "
+                "this pass are unaffected.")
+        return out
 
     conn = sqlite3.connect(db_file)
     try:
         owner_cap = _owner_cap_cents((creds.settings or {}).get("monthly_budget_usd"))
         return run_cycle(conn, broker, transport, feed,
-                         build_candidates, cluster,
+                         build_candidates_all, cluster,
                          account_mode=account_mode,
                          owner_monthly_cap_cents=owner_cap)
     finally:
