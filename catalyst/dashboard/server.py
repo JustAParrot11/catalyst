@@ -232,7 +232,9 @@ def route_maintenance(db: Db, params: dict) -> str:
         except Exception:  # noqa: BLE001 - unconfigured is a state, not an error
             creds = None
     report = maintenance.build_report(db, creds, run_active=run_active)
-    return render_page("Maintenance", panels.maintenance_panel(report, p="maint"),
+    return render_page("Maintenance",
+                       panels.maintenance_panel(report, p="maint")
+                       + panels.schedule_panel(db, p="sched"),
                        "/maintenance", db.path, db=db)
 
 

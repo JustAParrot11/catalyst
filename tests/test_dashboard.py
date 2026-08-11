@@ -1937,3 +1937,132 @@ def test_maintenance_runs_its_free_checks_without_being_asked(seeded):
         Db(seeded), None, run_active=True, edgar_probe=probe)
     assert report.ran_active
     assert called["n"] >= 1
+
+
+class TestTheFourOwnerItems:
+    """All four from 2026-08-11, pinned so they cannot quietly regress."""
+
+    def test_the_map_untangles_itself(self):
+        """The map was drawn in whatever order the query returned, so a
+        node's neighbours could sit at the far end of the next column."""
+        import itertools
+
+        from catalyst.dashboard import charts
+
+        layers = [("A", [(f"a{i}", f"a{i}", 1) for i in range(6)]),
+                  ("B", [(f"b{i}", f"b{i}", 1) for i in range(6)])]
+        # Deliberately crossed: a0->b5, a1->b4, ...
+        edges = [(f"a{i}", f"b{5 - i}", 1, "t") for i in range(6)]
+
+        def crossings(kept):
+            pos = {nid: i for _, nodes, _ in kept
+                   for i, (nid, _, _) in enumerate(nodes)}
+            es = [(s, d) for s, d, _, _ in edges]
+            return sum(1 for (a1, b1), (a2, b2) in itertools.combinations(es, 2)
+                       if (pos[a1] - pos[a2]) * (pos[b1] - pos[b2]) < 0)
+
+        before = [[l, list(n), 0] for l, n in layers]
+        after = charts._untangle([list(x) for x in before], edges)
+        assert crossings(after) < crossings(before), "the map was not untangled"
+
+    def test_untangling_is_deterministic(self):
+        """Same graph, same picture - or two screenshots of one database
+        cannot be compared."""
+        from catalyst.dashboard import charts
+
+        layers = [["A", [(f"a{i}", f"a{i}", 1) for i in range(5)], 0],
+                  ["B", [(f"b{i}", f"b{i}", 1) for i in range(5)], 0]]
+        edges = [(f"a{i}", f"b{(i * 3) % 5}", 1, "t") for i in range(5)]
+        one = charts._untangle([list(x) for x in layers], edges)
+        two = charts._untangle([list(x) for x in layers], edges)
+        assert [n for _, ns, _ in one for n in ns] == \
+               [n for _, ns, _ in two for n in ns]
+
+    def test_untangling_never_adds_or_loses_a_node(self):
+        from catalyst.dashboard import charts
+
+        layers = [["A", [("a", "a", 1), ("b", "b", 1)], 0],
+                  ["B", [("c", "c", 1)], 0]]
+        out = charts._untangle([list(x) for x in layers], [("a", "c", 1, "t")])
+        assert sorted(n[0] for _, ns, _ in out for n in ns) == ["a", "b", "c"]
+
+    def test_a_stale_funnel_reason_is_not_painted_as_a_live_error(self, tmp_path):
+        from catalyst.storage import init_db
+
+        path = str(tmp_path / "f.db")
+        conn = init_db(path)
+        when = datetime.now(timezone.utc) - timedelta(days=5)
+        conn.execute("INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?,?)",
+                     ("c1", "ACME", "x", "2026-09-01", "confirmed", "[]",
+                      when.isoformat(), "tech", "[]"))
+        conn.execute("INSERT INTO research_calls VALUES (?,?,?,?,?,?,?,?,?)",
+                     ("rc1", "c1", "claude-sonnet-5", "P", "[]", "1.0", 100,
+                      "transport_error: 400", when.isoformat()))
+        conn.commit()
+        conn.close()
+        html_out = panels.funnel_panel(Db(path))
+        li = next(x for x in html_out.split("<li")
+                  if "research skipped" in x and 'class="drop-' in x)
+        assert "drop-stale" in li
+        assert "drop-live" not in li, (
+            "a reason not seen for days still wears the colour that "
+            "means something is wrong right now")
+
+    def test_a_todays_funnel_reason_stays_loud(self, tmp_path):
+        from catalyst.storage import init_db
+
+        path = str(tmp_path / "f2.db")
+        conn = init_db(path)
+        now = datetime.now(timezone.utc)
+        conn.execute("INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?,?)",
+                     ("c1", "ACME", "x", "2026-09-01", "confirmed", "[]",
+                      now.isoformat(), "tech", "[]"))
+        conn.execute("INSERT INTO research_calls VALUES (?,?,?,?,?,?,?,?,?)",
+                     ("rc1", "c1", "claude-sonnet-5", "P", "[]", "1.0", 100,
+                      "transport_error: 400", now.isoformat()))
+        conn.commit()
+        conn.close()
+        html_out = panels.funnel_panel(Db(path))
+        li = next(x for x in html_out.split("<li")
+                  if "research skipped" in x and 'class="drop-' in x)
+        assert "drop-live" in li
+
+    @pytest.mark.parametrize("reason, expect", [
+        ("market_closed", "market shut"),
+        ("cap_exceeded_owner_set", "spending cap reached"),
+        ("transport_error: HTTPStatusError 400", "the model call failed"),
+        ("unprotected_position_blocks_entries", "blocks new entries"),
+    ])
+    def test_decisions_name_the_gate_not_just_not_researched(
+            self, tmp_path, reason, expect):
+        """"not researched" is true and useless: it does not say whether
+        the market was shut, the governor refused, or the call failed."""
+        from catalyst.storage import init_db
+
+        path = str(tmp_path / f"d{abs(hash(reason))}.db")
+        conn = init_db(path)
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute("INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?,?)",
+                     ("c1", "ACME", "x", "2026-09-01", "confirmed", "[]",
+                      now, "tech", "[]"))
+        conn.execute("INSERT INTO research_calls VALUES (?,?,?,?,?,?,?,?,?)",
+                     ("rc1", "c1", "claude-sonnet-5", "P", "[]", "1.0", 100,
+                      reason, now))
+        conn.commit()
+        conn.close()
+        html_out = panels.decisions_index(Db(path))
+        assert expect in html_out, f"{reason} -> {expect}"
+
+    def test_the_schedule_is_in_both_clocks(self, bare):
+        html_out = panels.schedule_panel(Db(bare), p="sched")
+        assert "UK time" in html_out and "New York time" in html_out
+        assert "14:30-21:00 UK" in html_out       # US market hours in UK time
+        assert "09:30-16:00 New York" in html_out
+        assert "every 15 minutes" in html_out.lower()
+        assert "EDGAR" in html_out
+
+    def test_the_schedule_says_what_is_gated_and_what_is_not(self, bare):
+        """The distinction the owner kept having to ask about."""
+        html_out = panels.schedule_panel(Db(bare), p="sched")
+        assert "ONLY window in which the bot may open a position" in html_out
+        assert "fetches every cycle regardless" in html_out

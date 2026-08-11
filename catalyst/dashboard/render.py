@@ -436,6 +436,11 @@ footer { color: var(--muted); font-size: 11.5px;
 .funnel-n { text-align: right; font-variant-numeric: tabular-nums;
             font-weight: 650; font-size: 15px; }
 .funnel-drop { color: var(--serious); font-size: 12px; }
+/* A reason that has not recurred is history, and must not keep wearing
+   the colour that means "something is wrong right now". */
+.funnel-drop .drop-live { color: var(--serious); }
+.funnel-drop .drop-stale { color: var(--muted); }
+.funnel-drop .drop-stale b { color: var(--ink-2); }
 .blame { background: var(--crit-wash); border-left: 3px solid var(--critical);
          padding: 9px 11px; font-size: 13px; margin: 9px 0;
          border-radius: 0; }
