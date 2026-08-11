@@ -338,8 +338,14 @@ def funnel_panel(db: Db, p: str = "funnel") -> str:
         # rejections is a contradiction the owner had to read twice.
         starved = stage.count == 0 and prev == 0 and not stage.drops
         if stage.drops:
+            # COLOUR FOLLOWS "IS THIS STILL HAPPENING", not "did this
+            # ever happen". Owner-reported 2026-08-11: the 400s were
+            # painted as live errors days after the bug behind them was
+            # fixed, and the colour was doing the shouting. A reason not
+            # seen for two days is history and reads as history.
             drops = "".join(
-                f"<li>{esc(reason)} &mdash; <b>{esc(n)}</b>"
+                f'<li class="{"drop-stale" if "may be history" in str(detail) else "drop-live"}">'
+                f"{esc(reason)} &mdash; <b>{esc(n)}</b>"
                 + (f" <span class='prov'>{raw(detail)}</span>" if detail else "")
                 + "</li>"
                 for reason, n, detail in stage.drops
@@ -907,6 +913,37 @@ def alerts_panel(db: Db, p: str = "alerts") -> str:
 # --------------------------------------------------------------------------
 
 
+def _why_not_researched(db: Db, candidate_id: str) -> str:
+    """Which gate stopped this candidate, in words.
+
+    A research_call row with a skipped_reason is the bot's own record of
+    why it did not spend; without one, nothing has reached the model yet
+    at all, which usually means the cycle has not got to it.
+    """
+    res = db.q("SELECT skipped_reason FROM research_calls "
+               "WHERE candidate_id = ? AND skipped_reason IS NOT NULL "
+               "ORDER BY called_at DESC LIMIT 1", (candidate_id,))
+    if not res.rows:
+        return "not researched yet"
+    reason = str(res.rows[0]["skipped_reason"] or "")
+    friendly = {
+        "market_closed": "not researched - market shut",
+        "market_clock_unavailable": "not researched - broker clock unreadable",
+        "unprotected_position_blocks_entries":
+            "not researched - an unprotected position blocks new entries",
+        "unconfirmed_submit_blocks_entries":
+            "not researched - an unconfirmed order blocks new entries",
+    }
+    for key, text in friendly.items():
+        if key in reason:
+            return text
+    if "cap_exceeded" in reason or "governor" in reason:
+        return "not researched - spending cap reached"
+    if "transport_error" in reason or "HTTPStatusError" in reason:
+        return "not researched - the model call failed"
+    return f"not researched - {reason[:48]}"
+
+
 def decisions_index(db: Db, p: str = "dec") -> str:
     res = queries.decision_list(db)
     if res.is_empty:
@@ -915,7 +952,12 @@ def decisions_index(db: Db, p: str = "dec") -> str:
                                    meaning="no candidate has ever been discovered"))
     rows = []
     for r in res.rows:
-        status = r["action"] or ("researched" if r["n_calls"] else "not researched")
+        # NAME THE GATE. "not researched" is true and useless: it does
+        # not say whether the market was shut, the governor refused, or
+        # the model call failed. The skip reason is already recorded -
+        # it just was not being read here (owner-reported 2026-08-11).
+        status = r["action"] or ("researched" if r["n_calls"]
+                                 else _why_not_researched(db, r["id"]))
         if r["n_orders"]:
             status = f"traded ({r['n_orders']} order(s))"
         elif r["action"] == "skip":
@@ -2014,6 +2056,67 @@ def value_reconciliation_panel(db: Db, p: str = "val") -> str:
 # --------------------------------------------------------------------------
 # The brain
 # --------------------------------------------------------------------------
+
+
+#: What runs when. Every row is a fact from the code, not a plan:
+#: DEFAULT_CYCLE_SECONDS is 900, discovery is step 4 of run_cycle and is
+#: never gated on market hours, entries are gated on the broker clock,
+#: and the benchmark and the bill check each run once a day.
+SCHEDULE = [
+    ("Every 15 minutes, all day and night", "same",
+     "One cycle: check the kill switches, reconcile with the broker, "
+     "move stops and take time-based exits, fetch new filings, build "
+     "candidates."),
+    ("14:30-21:00 UK", "09:30-16:00 New York",
+     "US market hours. This is the ONLY window in which the bot may "
+     "open a position, and the only window in which it pays Claude to "
+     "research one - research is gated on the same clock, so nothing is "
+     "spent while the market is shut."),
+    ("11:00-03:00 UK", "06:00-22:00 New York",
+     "EDGAR's own publishing window, business days. The bot fetches "
+     "every cycle regardless; outside this window there is simply "
+     "nothing new to fetch."),
+    ("Shortly after 00:00 UK", "shortly after 19:00 New York",
+     "The nightly bill check: yesterday's spend is read from the "
+     "Anthropic Cost API and compared with the bot's own ledger. "
+     "Anthropic reports whole days only, so it can never check today."),
+    ("Once a day, first cycle after midnight UTC", "same",
+     "The SPY benchmark series is topped up from Alpaca, so the "
+     "performance comparison stays current."),
+    ("Weekends and US holidays", "same",
+     "Cycles keep running - stops, exits and reconciliation still "
+     "matter - but the market is shut, so no position is opened and no "
+     "research is paid for."),
+]
+
+
+def schedule_panel(db: Db, p: str = "sched") -> str:
+    """What the bot does, and when, in both clocks.
+
+    Owner asked for "a logic run down e.g. what it does at each time US
+    and UK time". UK first because that is where the owner is; New York
+    beside it because that is the clock the market keeps. The two drift
+    by an hour twice a year when the daylight-saving changes land on
+    different dates - the market hours are the fixed ones, so those are
+    the anchor and the UK column is what moves.
+    """
+    rows = [[esc(uk), esc(us if us != "same" else uk), esc(what)]
+            for uk, us, what in SCHEDULE]
+    out = [
+        f'<p class="lede-line" id="{p}-lede">A cycle every 15 minutes, '
+        "around the clock. What changes through the day is what a cycle "
+        "is <b>allowed</b> to do.</p>",
+        table(f"{p}-table", ["UK time", "New York time", "What happens"], rows),
+        prov("Every row is read from the code rather than written down "
+             "beside it: the cycle interval is DEFAULT_CYCLE_SECONDS, "
+             "discovery is step 4 of run_cycle and is never gated on "
+             "market hours, and entries and research are both gated on "
+             "the broker's own clock. UK times shift by an hour when "
+             "British Summer Time and US daylight saving fall out of "
+             "step; the New York column is the anchor."),
+    ]
+    return section(f"{p}-section", "What the bot does, and when",
+                   "".join(out))
 
 
 def state_line(db: Db, p: str = "state") -> str:

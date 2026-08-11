@@ -605,7 +605,8 @@ def decision_list(db: Db, limit: int = 200) -> QueryResult:
         "        ORDER BY d.decided_at DESC LIMIT 1) AS action, "
         "       (SELECT COUNT(*) FROM orders o "
         "        WHERE o.decision_id = c.id) AS n_orders, "
-        "       (SELECT COUNT(*) FROM research_calls rc WHERE rc.candidate_id = c.id) AS n_calls "
+        "       (SELECT COUNT(*) FROM research_calls rc WHERE rc.candidate_id = c.id "
+        "        AND rc.skipped_reason IS NULL) AS n_calls "
         "FROM candidates c LEFT JOIN research_views v ON v.candidate_id = c.id "
         "ORDER BY c.discovered_at DESC LIMIT ?",
         (limit,),

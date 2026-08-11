@@ -649,6 +649,63 @@ NEURAL_STEPS = ("var(--step-1)", "var(--step-2)", "var(--step-3)",
 
 MAX_NODES_PER_LAYER = 14
 
+#: Sweeps of the barycentre pass. Two forward and two back settles a
+#: graph this size; more buys nothing and costs determinism nothing.
+UNTANGLE_SWEEPS = 2
+
+
+def _untangle(kept: list, edges: list) -> list:
+    """Order each layer so its strands cross as little as possible.
+
+    Nodes were drawn in whatever order the query returned them, so a
+    node's neighbours could be at the far end of the next column and the
+    map read as a tangle rather than as a flow (owner-reported
+    2026-08-11: "the neural map still isnt easy to navigate and
+    understand it feels jumbled").
+
+    This is the barycentre heuristic: put each node at the average
+    position of the nodes it connects to, sweep forward and back a few
+    times, and crossings fall out. It is deterministic - same graph,
+    same picture - because ties break on the node's existing index, and
+    it never adds, removes or relabels anything. Only the vertical order
+    changes.
+    """
+    adjacency: dict = {}
+    for src, dst, _, _ in edges:
+        adjacency.setdefault(src, []).append(dst)
+        adjacency.setdefault(dst, []).append(src)
+
+    def normalised() -> dict:
+        """Every node's vertical position as 0..1, so layers of
+        different heights can be compared without one dominating."""
+        out = {}
+        for _, nodes, _ in kept:
+            last = max(len(nodes) - 1, 1)
+            for i, (nid, _, _) in enumerate(nodes):
+                out[nid] = i / last
+        return out
+
+    for _ in range(UNTANGLE_SWEEPS):
+        for order in (range(len(kept)), range(len(kept) - 1, -1, -1)):
+            for ci in order:
+                # RECOMPUTED PER LAYER. Reading one snapshot for the
+                # whole sweep let two layers reorder against each other's
+                # OLD positions, so a straight reversal reversed both and
+                # left every crossing exactly where it was.
+                pos = normalised()
+                def key(item, pos=pos):
+                    nid, _, _ = item
+                    # BOTH sides. Sorting against one neighbouring layer
+                    # leaves the other free to tangle, which is why the
+                    # first version of this only removed 18% of the
+                    # crossings.
+                    seen = [pos[n] for n in adjacency.get(nid, []) if n in pos]
+                    return (sum(seen) / len(seen)) if seen else 2.0
+                indexed = list(enumerate(kept[ci][1]))
+                indexed.sort(key=lambda pair: (key(pair[1]), pair[0]))
+                kept[ci][1] = [n for _, n in indexed]
+    return [(label, nodes, extra) for label, nodes, extra in kept]
+
 
 def neural_map(
     layers: list,       # [(layer_label, [(node_id, node_label, weight)])]
@@ -675,9 +732,10 @@ def neural_map(
     kept = []
     for label, nodes in layers:
         shown = list(nodes)[:MAX_NODES_PER_LAYER]
-        kept.append((label, shown, max(0, len(nodes) - len(shown))))
+        kept.append([label, shown, max(0, len(nodes) - len(shown))])
     if not any(nodes for _, nodes, _ in kept):
         raise ValueError("neural_map needs at least one node; use placeholder()")
+    kept = _untangle(kept, edges)
 
     n_cols = len(kept)
     tallest = max((len(nodes) for _, nodes, _ in kept), default=1)
