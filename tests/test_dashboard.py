@@ -2066,3 +2066,30 @@ class TestTheFourOwnerItems:
         html_out = panels.schedule_panel(Db(bare), p="sched")
         assert "ONLY window in which the bot may open a position" in html_out
         assert "fetches every cycle regardless" in html_out
+
+
+def test_the_market_data_probe_uses_the_same_feeds_as_the_benchmark():
+    """The probe pinned feed=sip while the benchmark had already learned
+    to fall back to IEX, so an account without the entitlement was told
+    its market data was broken while the bot read it happily. A check
+    that disagrees with the code it checks is worse than no check."""
+    import inspect
+
+    from catalyst.dashboard import maintenance
+
+    src = inspect.getsource(maintenance._default_market_data_probe)
+    assert "FEED_PREFERENCE" in src
+    assert '"feed": "sip"' not in src
+    assert "start" in src and "end" in src, (
+        "asking for the latest bar with no window returns nothing until "
+        "the market has closed, so the probe failed every morning")
+
+
+def test_the_paused_spend_message_says_what_to_do(seeded):
+    """Owner-reported: "What is this schedule spend being paused for
+    human review, does this need doing daily, its not clear what it
+    wants me to do"."""
+    html_out = panels.cost_panel(Db(seeded), p="cost")
+    assert "WHAT THIS IS" in html_out and "WHAT TO DO" in html_out
+    assert "not a daily chore" in html_out.lower()
+    assert "type your name to acknowledge" in html_out

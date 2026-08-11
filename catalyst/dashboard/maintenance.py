@@ -468,23 +468,50 @@ def _default_alpaca_probe(creds):
 
 
 def _default_market_data_probe(creds):
+    """Ask the same question the benchmark asks, the same way.
+
+    This probe pinned feed=sip while the benchmark had already learned
+    to fall back to IEX, so an account without the SIP entitlement was
+    told its market data was BROKEN when the bot was reading it happily
+    (owner-reported 2026-08-11, twice). A check that disagrees with the
+    code it is checking is worse than no check.
+    """
     def probe():
         import httpx
-        resp = httpx.get(
-            "https://data.alpaca.markets/v2/stocks/bars",
-            params={"symbols": "SPY", "timeframe": "1Day", "limit": 1,
-                    "feed": "sip", "adjustment": "all"},
-            headers={"APCA-API-KEY-ID": creds.alpaca_key,
-                     "APCA-API-SECRET-KEY": creds.alpaca_secret},
-            timeout=PROBE_TIMEOUT_SECONDS)
-        if resp.status_code != 200:
-            return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
-        bars = (resp.json() or {}).get("bars") or {}
-        if not bars.get("SPY"):
-            return False, ("reachable, but returned no SPY bar - usually "
-                           "means this account has no SIP data "
-                           "entitlement")
-        return True, "reachable, SPY daily bar returned"
+
+        from catalyst.data.benchmark import FEED_PREFERENCE
+
+        headers = {"APCA-API-KEY-ID": creds.alpaca_key,
+                   "APCA-API-SECRET-KEY": creds.alpaca_secret}
+        # A WINDOW, not "the latest bar". Asking for limit=1 with no
+        # dates returns today's bar, which does not exist until the
+        # market has closed - so the probe reported a broken feed every
+        # morning and all weekend. Ten days always contains a session.
+        today = datetime.now(timezone.utc).date()
+        window = {"start": (today - timedelta(days=10)).isoformat(),
+                  "end": today.isoformat()}
+        last = ""
+        for feed in FEED_PREFERENCE:
+            resp = httpx.get(
+                "https://data.alpaca.markets/v2/stocks/bars",
+                params={"symbols": "SPY", "timeframe": "1Day", "limit": 10,
+                        "feed": feed, "adjustment": "all", **window},
+                headers=headers, timeout=PROBE_TIMEOUT_SECONDS)
+            if resp.status_code != 200:
+                last = f"HTTP {resp.status_code} on {feed}: {resp.text[:160]}"
+                continue
+            if ((resp.json() or {}).get("bars") or {}).get("SPY"):
+                if feed == FEED_PREFERENCE[0]:
+                    return True, f"reachable, SPY daily bar returned ({feed})"
+                return True, (
+                    f"reachable, SPY daily bar returned from the {feed.upper()} "
+                    "feed. This account is not entitled to the full "
+                    "consolidated tape, so the bot uses the best feed it can "
+                    "read - the benchmark says so on the Performance page.")
+            last = f"{feed}: reachable, no SPY bar returned"
+        return False, (
+            "reachable, but no feed returned a SPY bar. Last answer: "
+            + (last or "none"))
     return probe
 
 
