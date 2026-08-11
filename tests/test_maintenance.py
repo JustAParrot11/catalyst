@@ -17,6 +17,7 @@ Sabotage log (house rule 4) at the bottom.
 """
 
 import sqlite3
+from datetime import datetime, timezone
 
 import pytest
 
@@ -107,15 +108,35 @@ class TestProbesNeverRaise:
 
 
 class TestPassiveChecks:
-    def test_a_stale_feed_is_flagged(self, db):
+    def _stale_feed(self, db, now):
         conn = sqlite3.connect(db.path)
         conn.execute("INSERT INTO raw_events VALUES (?,?,?,?)",
                      ("edgar", "acc-1", "2026-01-01T00:00:00+00:00", "{}"))
         conn.commit(); conn.close()
-        checks = maintenance.passive_checks(db)
-        feed = next(c for c in checks if "Filing feed" in c.name)
+        checks = maintenance.passive_checks(db, now=now)
+        return next(c for c in checks if "Filing feed" in c.name)
+
+    def test_a_stale_feed_is_flagged_while_edgar_is_publishing(self, db):
+        """Tuesday 14:00 UTC is mid-morning in New York: EDGAR is
+        publishing, so silence really is a problem."""
+        feed = self._stale_feed(db, datetime(2026, 8, 11, 14, 0,
+                                             tzinfo=timezone.utc))
         assert feed.state == "warn"
         assert "ago" in feed.summary
+        assert "may be stuck" in feed.summary
+
+    @pytest.mark.parametrize("when, why", [
+        (datetime(2026, 8, 11, 3, 0, tzinfo=timezone.utc), "overnight"),
+        (datetime(2026, 8, 15, 14, 0, tzinfo=timezone.utc), "a Saturday"),
+    ])
+    def test_a_quiet_feed_out_of_hours_is_not_a_fault(self, db, when, why):
+        """EDGAR publishes on business days, roughly 06:00-22:00 New
+        York. The bot fetches every cycle regardless, but no filings are
+        published to store - so the newest row ages exactly as it should.
+        This check used to cry wolf every single night."""
+        feed = self._stale_feed(db, when)
+        assert feed.state == "ok", why
+        assert "not publishing at this hour" in feed.summary
 
     def test_unpriced_cost_rows_are_a_hard_problem(self, db):
         conn = sqlite3.connect(db.path)

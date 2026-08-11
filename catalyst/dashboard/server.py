@@ -215,7 +215,15 @@ def route_maintenance(db: Db, params: dict) -> str:
     """
     from catalyst.dashboard import maintenance
 
-    run_active = params.get("check") == ["now"]
+    # RUN THEM BY DEFAULT. Every active check is free - Alpaca and its
+    # market data are in the subscription, EDGAR is public and keyless,
+    # the Anthropic admin read costs no tokens - and the ordinary
+    # Anthropic key is deliberately never probed because that one WOULD
+    # cost money. So the click bought nothing and hid the answer behind
+    # it (owner-reported 2026-08-11: "why do i need to click check
+    # outside services now, why cant it just load"). ?check=skip is
+    # there for anyone who wants the page without the round trips.
+    run_active = params.get("check") != ["skip"]
     creds = None
     if run_active:
         try:

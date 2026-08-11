@@ -57,6 +57,11 @@ class Performance:
     #: fault. Kept as a flag rather than sniffed out of spy_error, so the
     #: page can stop calling a normal Monday morning "unavailable".
     spy_window_too_short: bool = False
+    #: Which Alpaca feed the cached bars came from. "iex" is one
+    #: exchange's prints rather than the consolidated tape - a fine daily
+    #: benchmark for an instrument as liquid as SPY, but the page has to
+    #: say so rather than let a reader assume the tape.
+    spy_feed: str = ""
     start_day: date | None = None
     end_day: date | None = None
 
@@ -97,7 +102,7 @@ def _load_spy(start: date, end: date):
         cache = BarCache(root)
         bars = cache.load_bars("SPY")
     except Exception as exc:
-        return [], f"local bar cache {root}/SPY.csv", f"{type(exc).__name__}: {exc}", 0
+        return [], f"local bar cache {root}/SPY.csv", f"{type(exc).__name__}: {exc}", 0, ""
 
     window = [b for b in bars if start <= b.day <= end]
     if not window:
@@ -106,7 +111,7 @@ def _load_spy(start: date, end: date):
             [], f"local bar cache {root}/SPY.csv",
             f"cache holds {len(bars)} bars ({span}) but none inside the bot's "
             f"window {start}..{end}",
-            len(bars),
+            len(bars), "",
         )
     base = window[0].close
     points = [
@@ -117,16 +122,18 @@ def _load_spy(start: date, end: date):
     # The label used to hardcode "feed=sip, adjustment=all"; if a refresh
     # ever wrote a different basis, the page would have gone on claiming
     # the old one - a caption that cannot be wrong is not provenance.
-    basis, meta = "basis unrecorded", ""
+    basis, meta, feed = "basis unrecorded", "", ""
     try:
         raw_meta = cache.read_meta() or {}
+        feed = str(raw_meta.get("feed") or "")
         if raw_meta.get("feed") or raw_meta.get("adjustment"):
             basis = (f"feed={raw_meta.get('feed', 'unrecorded')}, "
                      f"adjustment={raw_meta.get('adjustment', 'unrecorded')}")
         meta = f", fetched_at={raw_meta.get('fetched_at', 'unknown')}"
     except Exception:
         meta = ", cache_meta unreadable"
-    return points, f"local bar cache {root}/SPY.csv ({basis}{meta})", None, len(window)
+    return (points, f"local bar cache {root}/SPY.csv ({basis}{meta})", None,
+            len(window), feed)
 
 
 def performance(db: Db) -> Performance:
@@ -164,8 +171,8 @@ def performance(db: Db) -> Performance:
         # benchmark cache is in, so "the bot has done nothing" and "the SPY
         # cache is missing" are two different sentences on the page.
         today = datetime.now(timezone.utc).date()
-        _, source, error, rows = _load_spy(today - timedelta(days=30), today)
-        perf.spy_source, perf.spy_rows = source, rows
+        _, source, error, rows, feed = _load_spy(today - timedelta(days=30), today)
+        perf.spy_source, perf.spy_rows, perf.spy_feed = source, rows, feed
         perf.spy_error = error or (
             f"SPY cache is readable ({rows} bars in a 30-day probe window), but the "
             "bot has no closed trades and no priced cost rows, so there is no equity "
@@ -184,10 +191,9 @@ def performance(db: Db) -> Performance:
         points.append((day, index, int(running)))
     perf.bot_points = points
 
-    spy_points, source, error, rows = _load_spy(perf.start_day, perf.end_day)
-    perf.spy_points, perf.spy_source, perf.spy_error, perf.spy_rows = (
-        spy_points, source, error, rows,
-    )
+    spy_points, source, error, rows, feed = _load_spy(perf.start_day, perf.end_day)
+    (perf.spy_points, perf.spy_source, perf.spy_error, perf.spy_rows,
+     perf.spy_feed) = (spy_points, source, error, rows, feed)
     # A cache full of bars with none in a two-day window that happens to
     # be a weekend is not a broken benchmark. Distinguishing the two is
     # the whole point: one needs fixing, the other needs Tuesday.
@@ -199,6 +205,30 @@ def performance(db: Db) -> Performance:
 # --------------------------------------------------------------------------
 # 2. The candidate funnel
 # --------------------------------------------------------------------------
+
+
+#: What each feed IS, in words. The map keys are the machine names
+#: stored in raw_events.source; a diagram node reading "edgar" tells a
+#: reader who already knows what EDGAR is precisely nothing they did not
+#: know, and tells everyone else nothing at all (owner-reported
+#: 2026-08-11: "it just says edgar4 doesnt say what that means").
+SOURCE_LABELS = {
+    "edgar": "SEC filings (EDGAR)",
+    "edgar_form4": "Insider trades (SEC Form 4)",
+    "federal_register": "Government notices (Federal Register)",
+    "clinicaltrials": "Drug trials (ClinicalTrials.gov)",
+    "openfda": "FDA decisions (openFDA)",
+    "alpaca_news": "Market news (Alpaca)",
+    "alpaca": "Broker data (Alpaca)",
+    "news": "News",
+}
+
+
+def source_label(name) -> str:
+    """A feed's name in words, falling back to the machine name so a new
+    feed appears rather than disappearing."""
+    key = str(name or "").strip()
+    return SOURCE_LABELS.get(key, key.replace("_", " ") or "unknown source")
 
 
 def _last_seen(last_at, first_at=None) -> str:
@@ -1075,7 +1105,7 @@ def brain(db: Db, limit: int = 60) -> Brain:
         degree[dst] = degree.get(dst, 0) + 1
 
     b.layers = [
-        ("Sources", nodes(source_hits, "src:", lambda s: s.replace("_", " "))),
+        ("Sources", nodes(source_hits, "src:", source_label)),
         ("Candidates", [(f"cand:{c['id']}", c["ticker"] or c["id"],
                          degree.get(f"cand:{c['id']}", 0)) for c in cands
                         if degree.get(f"cand:{c['id']}", 0)]),
