@@ -204,12 +204,16 @@ class TestNightlyReconcileWiring:
     closed-days-only, idempotency, the check_failed record on failure,
     backfill of missed days, and the clean no-admin-key skip."""
 
-    def _run(self, tmp_path, monkeypatch, fetch, admin_key="sk-admin"):
+    def _run(self, tmp_path, monkeypatch, fetch, admin_key="sk-admin",
+             first_spend_days_back=None):
+        from datetime import datetime, timedelta, timezone
         from types import SimpleNamespace
 
         import catalyst.cost.cost_api as cost_api_mod
         import catalyst.setup.credentials as creds_mod
-        from catalyst.orchestrator.scheduler import _maybe_reconcile_yesterday
+        from catalyst.orchestrator.scheduler import (
+            RECONCILE_BACKFILL_DAYS, _maybe_reconcile_yesterday,
+        )
         monkeypatch.setattr(
             creds_mod, "load_credentials",
             lambda *a, **k: SimpleNamespace(anthropic_admin_key=admin_key))
@@ -217,6 +221,19 @@ class TestNightlyReconcileWiring:
         db_file = str(tmp_path / "sched.db")
         conn = sqlite3.connect(db_file)
         conn.executescript(open("catalyst/storage/schema.sql").read())
+        # The bot's first recorded spend. Days before it are not the
+        # bot's to reconcile - see _seed_first_spend's docstring.
+        if first_spend_days_back is None:
+            first_spend_days_back = RECONCILE_BACKFILL_DAYS
+        if first_spend_days_back is not False:
+            when = (datetime.now(timezone.utc)
+                    - timedelta(days=first_spend_days_back))
+            conn.execute(
+                "INSERT INTO cost_events (id, raw_usage_json, model, kind, "
+                "component, priced_cents, priced_at) VALUES "
+                "('seed-1', '{}', 'claude-sonnet-5', 'scheduled', 'research', "
+                "'1', ?)", (when.isoformat(),))
+        conn.commit()
         conn.close()
         _maybe_reconcile_yesterday(db_file)
         return db_file
@@ -239,6 +256,51 @@ class TestNightlyReconcileWiring:
         def explode(*a, **k):
             raise AssertionError("fetched without an admin key")
         db_file = self._run(tmp_path, monkeypatch, explode, admin_key="")
+        assert self._rows(db_file) == []
+
+    def test_never_reconciles_a_day_before_the_bot_ever_spent(
+            self, tmp_path, monkeypatch):
+        """Owner-reported 2026-08-11: three unacknowledged discrepancies
+        for days the bot had not run. The Cost API reports the whole
+        ORGANISATION's bill; the local ledger holds only this bot's
+        spend. Comparing them on a day the bot was idle asks two
+        different questions and calls the difference drift."""
+        from datetime import datetime, timedelta, timezone
+
+        from catalyst.orchestrator.scheduler import (
+            RECONCILE_BACKFILL_DAYS, _maybe_reconcile_yesterday,
+        )
+        calls = []
+
+        def fetch(target_date, admin_key=None):
+            calls.append(target_date)
+            return self._empty_page(target_date)
+
+        # first spend was two days ago: everything older is not ours
+        db_file = self._run(tmp_path, monkeypatch, fetch,
+                            first_spend_days_back=2)
+        for _ in range(RECONCILE_BACKFILL_DAYS * 2):
+            _maybe_reconcile_yesterday(db_file)
+        today = datetime.now(timezone.utc).date()
+        first_day = today - timedelta(days=2)
+        assert calls, "reconciled nothing at all"
+        assert min(calls) == first_day, (
+            "reconciled a day before the bot's first recorded spend")
+        assert [d for d, _ in self._rows(db_file)] == [
+            first_day.isoformat(), (today - timedelta(days=1)).isoformat()]
+
+    def test_a_bot_that_has_never_spent_reconciles_nothing(
+            self, tmp_path, monkeypatch):
+        """No local rows means no local ledger to check. Anything the
+        Cost API reports for those days is the owner's own use."""
+        from catalyst.orchestrator.scheduler import _maybe_reconcile_yesterday
+
+        def explode(*a, **k):
+            raise AssertionError("fetched with nothing of ours to compare")
+
+        db_file = self._run(tmp_path, monkeypatch, explode,
+                            first_spend_days_back=False)
+        _maybe_reconcile_yesterday(db_file)
         assert self._rows(db_file) == []
 
     def test_backfills_oldest_missing_day_one_per_cycle(

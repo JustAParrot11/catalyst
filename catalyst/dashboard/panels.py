@@ -609,18 +609,30 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
             f'<b id="{p}-unacked">{c.unacked_q.row_count} unacknowledged '
             "reconciliation discrepancy(ies). Scheduled spend is PAUSED until a "
             "human acknowledges each one.</b>"
-            "<p>WHAT THIS IS: once a day the bot compares what it recorded "
-            "spending against what Anthropic actually billed. When the two "
-            "disagree by more than the threshold it stops spending and asks "
-            "you, because a ledger that has drifted is the one number this "
-            "whole project rests on.</p>"
-            "<p>WHAT TO DO: read the two figures below, decide whether the "
-            "gap is explainable, and type your name to acknowledge it. That "
-            "records who accepted it and restarts spending on the next "
-            "cycle. It is NOT a daily chore - it only appears when the "
-            "figures actually disagree, and most days they will not. If it "
-            "keeps happening, something is wrong with the cost tracking and "
-            "it should be reported rather than clicked through.</p>"
+            "<p>WHAT THE TWO NUMBERS ARE. <b>Local</b> is what THIS BOT "
+            "recorded spending: every Claude call it made, priced from the "
+            "stored token counts. <b>Cost API</b> is what Anthropic billed "
+            "your whole ORGANISATION that day - which includes anything "
+            "else the same account was used for, by you or by any other "
+            "tool.</p>"
+            "<p>SO A GAP IS NOT AUTOMATICALLY AN ERROR. If local reads "
+            "$0.00 and the Cost API reads a few dollars on a day this bot "
+            "was not running, that is your own use of the API, not drift in "
+            "the bot's ledger. Days before the bot's first recorded spend "
+            "are no longer compared at all, because there is nothing of the "
+            "bot's to compare. Acknowledging one of these changes no "
+            "figure anywhere: it records that a human looked, and lets "
+            "scheduled spending resume. It cannot break anything.</p>"
+            "<p>WHAT WOULD BE A REAL PROBLEM is local and Cost API "
+            "disagreeing on a day the bot DID run, because then the bot's "
+            "own arithmetic has drifted from the real bill - and that "
+            "number is what decides whether this project is viable.</p>"
+            "<p>WHAT TO DO: read the two figures, decide whether the gap is "
+            "explainable, and type your name to acknowledge it. That records "
+            "who accepted it and restarts spending on the next cycle. It is NOT a daily "
+            "chore - it appears only when the figures disagree on a day the "
+            "bot ran. If that keeps happening, the cost tracking is wrong "
+            "and it should be reported rather than clicked through.</p>"
         ))
         for i, r in enumerate(c.unacked_q.rows):
             zero_note = ""
@@ -779,7 +791,22 @@ def _token_price_editor(db: Db, p: str, as_of) -> str:
     from catalyst.cost import overrides as _ovr
     from catalyst.cost.pricing import MODEL_RATES_CENTS_PER_MTOK
 
-    out: list[str] = ["<h3>Token prices &mdash; what the ledger prices at</h3>"]
+    out: list[str] = [
+        "<h3>Token prices &mdash; what the ledger prices at</h3>",
+        # Owner-asked 2026-08-11: "Surely the API pulling API costs is
+        # more accurate than our fixed cost. Ensure that if I do manually
+        # update cost it'll still prioritize API pulling API costs unless
+        # drastically wrong." It does, and the reason is worth stating
+        # where the box is rather than in a doc nobody opens.
+        note("A price you type here is only an <b>estimate for calls not "
+             "yet billed</b>. It can never overwrite what Anthropic "
+             "actually charged: the Cost API's figure is the authority, "
+             "spend already recorded keeps the rate it was priced at, and "
+             "nothing here reprices history. If a price you enter is "
+             "drastically wrong, the nightly comparison against the real "
+             "bill is what catches it &mdash; it pauses scheduled spending "
+             "rather than quietly believing you."),
+    ]
 
     # What is in force today, per model, so the form has a baseline to
     # correct rather than a blank box.
