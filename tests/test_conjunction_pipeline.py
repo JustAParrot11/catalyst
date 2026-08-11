@@ -16,7 +16,8 @@ import pytest
 
 from catalyst.data import RawEvent
 from catalyst.discovery.conjunctions import (
-    MAX_CANDIDATES_PER_PASS, MAX_SIGNAL_AGE_DAYS, build_conjunction_candidates,
+    MAX_CANDIDATES_PER_PASS, MAX_PER_SECTOR_PER_PASS, MAX_SIGNAL_AGE_DAYS,
+    build_conjunction_candidates, sector_band,
 )
 from catalyst.discovery.links import signals_from_events
 from catalyst.research import prompts
@@ -163,12 +164,108 @@ class TestConjunctionCandidates:
         assert any("dated after this pass" in why for _t, why in dropped)
 
     def test_the_pass_is_capped_and_says_what_it_dropped(self):
+        """All one sector, so the SECTOR cap bites first - which is the
+        whole point. Eighteen biotechs is one bet wearing eighteen hats,
+        and paying to research all of them is money spent before the
+        risk engine ever gets to decline them."""
         events = []
         for i in range(MAX_CANDIDATES_PER_PASS + 6):
-            events += cross(f"T{i:02d}")
+            events += cross(f"T{i:02d}")            # all SIC 2834
         cands, dropped = build_conjunction_candidates(events, NOW)
-        assert len(cands) == MAX_CANDIDATES_PER_PASS
-        assert sum(1 for _t, why in dropped if "cap" in why) == 6
+        assert len(cands) == MAX_PER_SECTOR_PER_PASS
+        assert all("already has" in why for _t, why in dropped)
+
+
+class TestNoIndustryBias:
+    """Owner-asked: "I want no industry bias i want it to find any
+    opportunity regardless from microsoft to a farming company to a
+    chemical company anything".
+
+    Measured live 2026-08-11: 10 of 12 candidates were SIC 2834. Two
+    causes, both fixed here - a query table where 3 of 7 queries could
+    only match pharma, and a selection that took the strongest twelve
+    outright."""
+
+    def _mixed(self):
+        """One conjunction each in eight different industries."""
+        sics = {"AGRI": "0100", "MINE": "1311", "CHEM": "2810",
+                "BIO": "2834", "MFG": "3711", "RETL": "5311",
+                "BANK": "6021", "TECH": "7372"}
+        events = []
+        for ticker, sic in sics.items():
+            events += [ev(ticker, "earnings", source="edgar_fts", sic=sic),
+                       ev(ticker, "insider_cluster", source="edgar_form4",
+                          sic=sic)]
+        return events
+
+    def test_every_industry_gets_a_slot_before_any_gets_a_second(self):
+        cands, _ = build_conjunction_candidates(self._mixed(), NOW)
+        bands = {sector_band(c.sector) for c in cands}
+        assert len(bands) >= 7, f"only {len(bands)} industries: {bands}"
+
+    def test_one_industry_cannot_take_the_whole_pass(self):
+        """Twenty biotechs and one chemical company: the chemical company
+        must still be researched."""
+        events = []
+        for i in range(20):
+            events += cross(f"B{i:02d}")                      # SIC 2834
+        events += [ev("CHEM", "earnings", source="edgar_fts", sic="2810"),
+                   ev("CHEM", "insider_cluster", source="edgar_form4",
+                      sic="2810")]
+        cands, _ = build_conjunction_candidates(events, NOW)
+        tickers = {c.ticker for c in cands}
+        assert "CHEM" in tickers, "the one non-biotech was crowded out"
+        biotech = sum(1 for c in cands
+                      if sector_band(c.sector) == "pharma and biotech")
+        assert biotech <= MAX_PER_SECTOR_PER_PASS
+
+    def test_the_drop_reason_names_the_industry(self):
+        events = []
+        for i in range(10):
+            events += cross(f"B{i:02d}")
+        _c, dropped = build_conjunction_candidates(events, NOW)
+        assert any("pharma and biotech already has" in why
+                   for _t, why in dropped)
+
+    def test_most_queries_are_not_pharma_only(self):
+        """The table itself. Three of seven queries could only ever
+        match pharma; that is a bias designed in, not observed."""
+        from catalyst.data.sources.edgar_fts import QUERIES
+
+        pharma_only = {"pdufa", "topline_expected", "phase3_endpoint"}
+        assert len(QUERIES) >= 14
+        assert len(pharma_only) / len(QUERIES) < 0.25
+
+    def test_every_query_carries_its_measured_volume(self):
+        """A query nobody measured is a guess that costs a request every
+        cycle - one candidate query returned zero hits in 21 days."""
+        from catalyst.data.sources.edgar_fts import QUERIES
+
+        for q in QUERIES:
+            assert q.measured_21d > 0, f"{q.key} has no measured volume"
+
+    def test_the_rejected_queries_keep_their_evidence(self):
+        """So nobody re-adds them on intuition."""
+        from catalyst.data.sources.edgar_fts import REJECTED_QUERIES
+
+        text = " ".join(why for _q, why in REJECTED_QUERIES)
+        assert "0 hits" in text and "93% pharma" in text
+
+    def test_sector_band_covers_the_owners_examples(self):
+        assert sector_band("7372") == "services and technology"   # Microsoft
+        assert sector_band("0100") == "agriculture"               # farming
+        assert sector_band("2810") == "chemicals"                 # chemicals
+        assert sector_band("2834") == "pharma and biotech"
+        assert sector_band("") == "unknown"
+
+    def test_a_pharma_label_does_not_outrank_a_real_problem(self):
+        """distress and dilution move the share count or threaten the
+        company; they must name the candidate ahead of a pending
+        readout."""
+        events = [ev("XX", "clinical_readout", source="edgar_fts"),
+                  ev("XX", "dilution", source="alpaca_news")]
+        cands, _ = build_conjunction_candidates(events, NOW)
+        assert cands[0].catalyst_type == "dilution"
 
     def test_the_id_is_stable_across_passes(self):
         """INSERT OR IGNORE makes a re-run idempotent only if the same

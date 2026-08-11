@@ -103,9 +103,22 @@ class Query:
     measured_21d: int = 0
 
 
-#: Deliberately small. Every query is a request per cycle and, far more
-#: importantly, every query is a claim that a hit means something
-#: tradeable. Adding one is a strategy decision, not a plumbing one.
+#: Every query is a request per cycle and, far more importantly, a claim
+#: that a hit means something tradeable. Adding one is a strategy
+#: decision, not a plumbing one.
+#:
+#: SECTOR BALANCE IS DESIGNED IN, NOT HOPED FOR. The first version of
+#: this table had three queries - PDUFA, topline results, Phase 3 - that
+#: can ONLY match pharma, and four that were neutral. The measured
+#: result was 10 of 12 live candidates in SIC 2834, and the owner's
+#: fair complaint: "I want no industry bias i want it to find any
+#: opportunity regardless from microsoft to a farming company to a
+#: chemical company anything".
+#:
+#: So every query below was MEASURED live on 2026-08-11 over a 21-day
+#: window, and the pharma share of its first 100 hits is recorded beside
+#: it. Two candidates were REJECTED on that evidence and are listed at
+#: the foot of this table so nobody re-adds them.
 QUERIES: tuple[Query, ...] = (
     Query("earnings_call_scheduled", '"conference call to discuss"',
           "earnings", forms="8-K", measured_21d=538),
@@ -120,6 +133,47 @@ QUERIES: tuple[Query, ...] = (
           "merger", forms="8-K", measured_21d=40),
     Query("guidance_raise", '"raises full year guidance"',
           "guidance", measured_21d=38),
+
+    # --- SECTOR-NEUTRAL. Measured pharma share of first 100 hits in
+    # brackets; every one of these is under a fifth.
+    Query("strategic_review", '"strategic alternatives"',
+          "strategic_review", measured_21d=501),          # 13% pharma
+    Query("buyback", '"share repurchase program"',
+          "buyback", forms="8-K", measured_21d=465),      # 9%
+    Query("credit_amendment", '"credit agreement" "amendment"',
+          "financing", forms="8-K", measured_21d=383),    # 8%
+    Query("asset_purchase", '"asset purchase agreement"',
+          "asset_deal", forms="8-K", measured_21d=101),   # 18%
+    Query("restructuring", '"restructuring plan"',
+          "restructuring", forms="8-K", measured_21d=84), # 12%
+    Query("ceo_change", '"appointed chief executive"',
+          "leadership_change", measured_21d=59),          # 19%
+    Query("contract_award", '"awarded a contract"',
+          "contract_award", measured_21d=24),             # 8%
+
+    # --- DELIBERATELY sector-specific, for sectors the rest of this
+    # table would otherwise never reach. These correct the balance
+    # rather than skew it.
+    Query("production_guidance", '"production guidance"',
+          "guidance", measured_21d=107),   # mining/energy: 91 of 100
+    Query("same_store_sales", '"same-store sales"',
+          "earnings_result", measured_21d=78),   # retail: 43 of 100
+)
+
+#: MEASURED AND REJECTED 2026-08-11. Recorded so the evidence survives
+#: and nobody re-adds them on intuition:
+#:   '"letter of intent"'    -> 0 hits in 21 days. A dead query costs a
+#:                              request every cycle and returns nothing.
+#:   '"regulatory approval"' -> 1,781 hits but 93% pharma, which is a
+#:                              worse concentration than the three
+#:                              pharma-only queries already here.
+#:   '"supply agreement"'    -> 35% pharma; the neutral queries above
+#:                              cover the same manufacturing ground
+#:                              without the skew.
+REJECTED_QUERIES = (
+    ('"letter of intent"', "0 hits in a 21-day window"),
+    ('"regulatory approval"', "93% pharma, worse than what it would join"),
+    ('"supply agreement"', "35% pharma, and redundant with the neutral set"),
 )
 
 #: "COMPANY NAME  (TICK)  (CIK 0001234567)". Several tickers can share

@@ -60,6 +60,56 @@ MAX_SIGNAL_AGE_DAYS = 10
 MAX_CANDIDATES_PER_PASS = 12
 
 
+#: SIC code -> a broad industry band. Deliberately coarse: the point is
+#: "is this pass all one industry", not a taxonomy. Ranges are the SEC's
+#: own major groups.
+def sector_band(sic) -> str:
+    try:
+        n = int(str(sic).strip())
+    except (TypeError, ValueError):
+        return "unknown"
+    if n < 1000:
+        return "agriculture"
+    if n < 1500:
+        return "mining and energy"
+    if n < 1800:
+        return "construction"
+    if 2000 <= n < 2100:
+        return "food"
+    if n in (2833, 2834, 2835, 2836) or n == 8731:
+        return "pharma and biotech"
+    if 2800 <= n < 2900:
+        return "chemicals"
+    if n < 4000:
+        return "manufacturing"
+    if n < 5000:
+        return "transport and utilities"
+    if n < 5200:
+        return "wholesale"
+    if n < 6000:
+        return "retail"
+    if n < 6800:
+        return "financials"
+    if n < 8000:
+        return "services and technology"
+    return "other"
+
+
+#: Most candidates one industry may take in a single pass.
+#:
+#: MEASURED, NOT ASSUMED. On the live feeds 2026-08-11, 10 of 12
+#: candidates were SIC 2834 - the owner's complaint, and a real cost:
+#: research is paid for BEFORE the risk engine sees a candidate, so the
+#: bot would pay to research ten correlated biotechs and then decline
+#: most of them on the correlated-cluster bound. Capping here spends the
+#: same money across ten industries instead of one.
+#:
+#: This is NOT the risk engine's correlation limit and does not replace
+#: it. That bound governs money at risk and is a hard bound a human owns;
+#: this one governs where research spend goes.
+MAX_PER_SECTOR_PER_PASS = 3
+
+
 def _hash_id(ticker: str, kinds, when: date) -> str:
     """Content hash, so the same conjunction on the same day is the same
     candidate across passes. Candidate ids are content hashes elsewhere
@@ -78,9 +128,11 @@ def _primary_kind(kinds: tuple) -> str:
     and an equity offering is priced by the FDA binary, because that is
     what can gap.
     """
-    for kind in ("fda_decision", "clinical_readout", "dilution", "distress",
-                 "merger", "merger_vote", "earnings", "earnings_result",
-                 "guidance", "analyst_action", "insider_cluster"):
+    for kind in ("distress", "dilution", "fda_decision", "clinical_readout",
+                 "merger", "merger_vote", "strategic_review", "restructuring",
+                 "asset_deal", "financing", "contract_award", "earnings",
+                 "earnings_result", "guidance", "buyback",
+                 "leadership_change", "analyst_action", "insider_cluster"):
         if kind in kinds:
             return kind
     return sorted(kinds)[0]
@@ -150,16 +202,48 @@ def build_conjunction_candidates(
                 (f"sic-{link.sector}",) if link.sector else ()),
         ))
 
-    # Strongest first - most independent feeds, then most kinds - so a
+    # Strongest first - most independent feeds, then most kinds - so any
     # cap keeps the best rather than the alphabetically luckiest.
     candidates.sort(key=lambda c: (-len(c.correlation_tags), c.ticker))
-    if len(candidates) > max_candidates:
-        for extra in candidates[max_candidates:]:
-            dropped.append((extra.ticker,
-                            f"past the {max_candidates}-candidate cap for "
-                            "one pass; weaker than those kept"))
-        candidates = candidates[:max_candidates]
-    return candidates, dropped
+
+    # ROUND-ROBIN BY INDUSTRY. Taking the strongest twelve outright gave
+    # ten biotechs, because biotech files more catalyst-shaped documents
+    # than anyone else - that is a property of EDGAR, not a signal about
+    # where the opportunities are. Each industry gets its first slot
+    # before any industry gets its second, so a pass covering a chemical
+    # company, a retailer and a miner beats one covering ten biotechs
+    # even when the biotechs individually score higher.
+    by_sector: dict = {}
+    for cand in candidates:
+        by_sector.setdefault(sector_band(cand.sector), []).append(cand)
+    kept: list = []
+    round_n = 0
+    while len(kept) < max_candidates:
+        took_any = False
+        for band in sorted(by_sector):
+            queue = by_sector[band]
+            if round_n < min(len(queue), MAX_PER_SECTOR_PER_PASS):
+                kept.append(queue[round_n])
+                took_any = True
+                if len(kept) >= max_candidates:
+                    break
+        if not took_any:
+            break
+        round_n += 1
+    kept_ids = {c.id for c in kept}
+    for extra in candidates:
+        if extra.id in kept_ids:
+            continue
+        band = sector_band(extra.sector)
+        taken = sum(1 for c in kept if sector_band(c.sector) == band)
+        dropped.append((extra.ticker, (
+            f"{band} already has {taken} candidate(s) this pass "
+            f"(cap {MAX_PER_SECTOR_PER_PASS}) - research spend goes to "
+            "another industry instead")
+            if taken >= MAX_PER_SECTOR_PER_PASS else (
+            f"past the {max_candidates}-candidate cap for one pass; "
+            "weaker than those kept")))
+    return kept, dropped
 
 
 def default_window(now: datetime | None = None) -> tuple[datetime, datetime]:
