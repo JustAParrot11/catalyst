@@ -263,6 +263,23 @@ class Stage:
     query: QueryResult
     drops: list = field(default_factory=list)   # [(reason, n, detail)]
     note: str = ""
+    #: What this step DOES, in a sentence a non-developer can read. The
+    #: stage labels are pipeline nouns; on their own they told the owner
+    #: nothing about what was happening to their money.
+    plain: str = ""
+    #: How many candidates arrived here. `count` is how many left. Both
+    #: are needed for the arithmetic to be checkable by eye, which is
+    #: what "200% kept" destroyed.
+    entered: int = 0
+    #: Reasons split by whether they need attention. Painting normal
+    #: attrition in error orange - and "order status: filled" with it -
+    #: is what made this panel read as a wall of faults
+    #: (owner-reported: "Funnel still has this is the orange errors?").
+    faults: list = field(default_factory=list)  # [(reason, n, detail)]
+
+    @property
+    def left(self) -> int:
+        return max(0, self.entered - self.count)
 
 
 @dataclass
@@ -270,139 +287,268 @@ class Funnel:
     stages: list
     blame: str = ""
     blame_stage: str = ""
+    #: Feed health is a SEPARATE question from candidate attrition. Raw
+    #: events and candidates are different populations from different
+    #: tables, so dividing one by the other produced "200% kept".
+    feed_events: int = 0
+    feed_query: QueryResult | None = None
+    feed_faults: list = field(default_factory=list)
+
+
+#: Risk-engine skip codes in English. The codes are what the risk engine
+#: writes and what a developer needs; on their own they told the owner
+#: nothing - "adverse_gap_assumption_exceeds_max_loss_per_position" is a
+#: sentence with the verb removed. The code is still shown beside the
+#: sentence, so nothing is lost and grep still works.
+SKIP_LABELS = {
+    "adverse_gap_assumption_exceeds_max_loss_per_position":
+        "the overnight gap it could suffer was bigger than this account "
+        "is allowed to lose on one position",
+    "sector_cluster_would_exceed_max_correlated_cluster_pct":
+        "too much of the account would have been riding on one sector",
+    "conviction_below_floor":
+        "the model was not confident enough to clear the current floor",
+    "max_positions_reached":
+        "the account already holds as many positions as it is allowed",
+    "insufficient_buying_power":
+        "there was not enough cash to take a position worth taking",
+    "spread_too_wide":
+        "the bid-ask spread would have eaten the expected move",
+    "no_stop_price":
+        "no stop could be placed, so the downside was unbounded",
+    "catalyst_date_passed":
+        "the catalyst had already happened by the time it was sized",
+}
+
+
+def _plain_skip(code: str) -> str:
+    """A risk-engine skip code as a sentence, falling back to the code
+    itself so a NEW reason appears rather than silently reading as
+    blank."""
+    key = str(code or "").strip()
+    if key in SKIP_LABELS:
+        return SKIP_LABELS[key]
+    return key.replace("_", " ") or "no reason recorded"
 
 
 def _grouped(db: Db, sql: str, params: tuple = ()) -> QueryResult:
     return db.q(sql, params)
 
 
+def _ids(db: Db, sql: str, params: tuple = ()) -> tuple[set, QueryResult]:
+    """(ids, result) - the first column of a query as a set of strings,
+    plus the QueryResult so the panel can still print the exact SQL
+    beside an empty stage (house rule 3).
+
+    Attribution is done in Python over candidate ids rather than as a
+    COUNT(*) per table, because a count cannot say WHICH candidate
+    stopped where - and without that the stages are five unrelated
+    numbers rather than a funnel."""
+    res = db.q(sql, params)
+    out = set()
+    for row in res.rows:
+        val = row[list(row.keys())[0]] if hasattr(row, "keys") else row[0]
+        if val is not None:
+            out.add(str(val))
+    return out, res
+
+
 def funnel(db: Db) -> Funnel:
+    """Where every candidate the bot has ever built ended up.
+
+    REBUILT 2026-08-11. Owner-reported: "Recreate the funnel section as
+    its very confusing on what its actually doing and it is still error
+    400." Three separate defects were behind that, and none of them was
+    wording:
+
+    ONE POPULATION, NARROWING. Stages used to be independent COUNT(*)s
+    over different tables, so "raw events fetched 1" was followed by
+    "candidates built 2 - 200% kept". Every stage is now a SUBSET of the
+    one above it, computed over candidate ids, so a count can never
+    exceed the stage above and the arithmetic checks by eye.
+
+    REASONS ATTRIBUTED TO THE CANDIDATES THAT ACTUALLY LEFT. A stage
+    reading "100% kept" listed a governor denial underneath it, and a
+    stage that lost one candidate listed reasons summing to four.
+    Reasons are now counted only over the candidates that left AT THAT
+    STEP, and anything left over is shown as an explicit unexplained
+    residual rather than hidden.
+
+    FAULTS ARE NOT ATTRITION. Feed errors and governor denials mean
+    something is wrong; a model declining a trade means the system is
+    working. They were the same shade of orange, and "order status:
+    filled" - an outright success - was orange too. They are now
+    different lists with different colours, and feed health moved out of
+    the funnel entirely because raw events are not candidates.
+    """
     stages: list[Stage] = []
 
+    # --- feed health: upstream of the funnel, and a different question
     raw_q = db.count("raw_events")
     err_q = db.q(
         "SELECT source, attempted_at, error_text FROM raw_events_errors "
         "ORDER BY attempted_at DESC LIMIT 20"
     )
+    feed_faults = [(f"{source_label(r['source'])} could not be read", 1,
+                    str(r["error_text"] or "")) for r in err_q.rows]
+
+    # --- the funnel proper, over candidate ids
+    cand_ids, cand_q = _ids(db, "SELECT id FROM candidates")
+    researched_ids, researched_q = _ids(
+        db, "SELECT DISTINCT candidate_id FROM research_calls "
+            "WHERE skipped_reason IS NULL")
+    view_ids, view_q = _ids(
+        db, "SELECT candidate_id FROM research_views WHERE direction != 'no_trade'")
+    trade_ids, trade_q = _ids(
+        db, "SELECT candidate_id FROM risk_decisions WHERE action = 'trade'")
+    order_ids, order_q = _ids(db, "SELECT DISTINCT decision_id FROM orders")
+
+    # Each stage intersects the one above, so the chain cannot widen even
+    # if a downstream table holds a row for a candidate that never
+    # reached it (a stale row, a hand-edited database, a bug).
+    s_cand = cand_ids
+    s_res = s_cand & researched_ids
+    s_view = s_res & view_ids
+    s_trade = s_view & trade_ids
+    s_order = s_trade & order_ids
+
     stages.append(Stage(
-        "raw_events", "raw events fetched", int(raw_q.scalar(0) or 0), raw_q,
-        drops=[(f"feed error: {r['source']}", 1, r["error_text"]) for r in err_q.rows],
-        note="Sources that failed are listed with their raw upstream error text.",
+        "candidates", "Candidates built", len(s_cand), cand_q,
+        entered=len(s_cand),
+        plain="A dated, tradeable event with a ticker attached. Raw feed "
+              "items that were not one of these never became a candidate "
+              "and are not counted anywhere below.",
     ))
 
-    cand_q = db.count("candidates")
-    stages.append(Stage(
-        "candidates", "candidates built", int(cand_q.scalar(0) or 0), cand_q,
-        note="Raw events that were not dated, tradeable events are dropped by "
-             "discovery/candidates.py and leave no row here.",
-    ))
-
-    researched_q = db.q(
-        "SELECT COUNT(DISTINCT candidate_id) FROM research_calls WHERE skipped_reason IS NULL"
-    )
-    # DATE EVERY DROP REASON. Owner-reported 2026-08-10: a wall of 400
-    # Bad Request errors from a bug fixed days earlier still read as
-    # current, because a count with no date cannot say "this stopped
-    # happening". Every reason now carries when it was last seen.
+    # --- researched: reasons drawn only from candidates that left here
+    left_res = s_cand - s_res
     skip_q = _grouped(db,
-        "SELECT skipped_reason, COUNT(*) n, MIN(called_at) first_at, "
-        "       MAX(called_at) last_at FROM research_calls "
-        "WHERE skipped_reason IS NOT NULL GROUP BY skipped_reason ORDER BY n DESC")
+        "SELECT candidate_id, skipped_reason, called_at FROM research_calls "
+        "WHERE skipped_reason IS NOT NULL")
+    res_reasons: dict[str, list] = {}
+    for r in skip_q.rows:
+        if str(r["candidate_id"]) not in left_res:
+            continue
+        key = f"research skipped: {r['skipped_reason']}"
+        res_reasons.setdefault(key, []).append(r["called_at"])
+    drops = [(k, len(v), _last_seen(max(v), min(v)))
+             for k, v in sorted(res_reasons.items(), key=lambda kv: -len(kv[1]))]
+    # A governor denial is a FAULT, not attrition: the bot wanted to
+    # research and was not allowed to spend. It is also not attributable
+    # to a candidate, so it can never sit in the drop column.
     gov_q = _grouped(db,
         "SELECT reason, COUNT(*) n, MIN(at) first_at, MAX(at) last_at "
         "FROM cost_governor_events WHERE decision = 'deny' "
         "GROUP BY reason ORDER BY n DESC")
-    drops = [(f"research skipped: {r['skipped_reason']}", r["n"],
-              _last_seen(r["last_at"], r["first_at"])) for r in skip_q.rows]
-    drops += [
-        (f"cost governor denied: {r['reason']}", r["n"],
+    gov_faults = [
+        (f"spending was blocked: {r['reason']}", r["n"],
          _last_seen(r["last_at"], r["first_at"]))
         for r in gov_q.rows
     ]
     stages.append(Stage(
-        "researched", "researched by the model", int(researched_q.scalar(0) or 0),
-        researched_q, drops=drops,
-        note="A governor denial is a skip with a reason, never a silent no-op "
-             "(ARCHITECTURE section 7.2).",
+        "researched", "Researched by the model", len(s_res), researched_q,
+        drops=drops, faults=gov_faults, entered=len(s_cand),
+        plain="Claude read the candidate and everything the feeds hold on "
+              "it. This is the only step that costs money, so it is also "
+              "the step the cost governor can block.",
     ))
 
-    view_q = db.count("research_views", "direction != 'no_trade'")
-    no_trade_q = db.count("research_views", "direction = 'no_trade'")
-    priced_in_q = db.count("research_views", "priced_in = 1")
+    # --- directional view
+    left_view = s_res - s_view
+    nt_q = _grouped(db,
+        "SELECT candidate_id, priced_in FROM research_views "
+        "WHERE direction = 'no_trade'")
+    n_priced_in = sum(1 for r in nt_q.rows
+                      if str(r["candidate_id"]) in left_view and r["priced_in"])
+    n_no_trade = sum(1 for r in nt_q.rows
+                     if str(r["candidate_id"]) in left_view and not r["priced_in"])
+    drops = []
+    if n_priced_in:
+        drops.append(("the model judged the move already priced in", n_priced_in,
+                      "the event is real but the market has had it already"))
+    if n_no_trade:
+        drops.append(("the model saw no tradeable edge", n_no_trade, ""))
     stages.append(Stage(
-        "views", "model returned a directional view",
-        int(view_q.scalar(0) or 0), view_q,
-        drops=[
-            ("model said no_trade", int(no_trade_q.scalar(0) or 0), ""),
-            ("model judged it already priced in", int(priced_in_q.scalar(0) or 0),
-             "priced_in=1 rows, which may overlap the directional views above"),
-        ],
+        "views", "Model saw a trade worth making", len(s_view), view_q,
+        drops=drops, entered=len(s_res),
+        plain="Claude returned a direction, a conviction and what would "
+              "prove it wrong. A candidate it declined stops here - and "
+              "the refusals page then scores what it went on to do.",
     ))
 
-    proposed_q = db.count("risk_decisions", "action = 'trade'")
-    skip_rows = db.q("SELECT skip_reasons FROM risk_decisions WHERE action = 'skip'")
+    # --- risk engine
+    left_trade = s_view - s_trade
+    skip_rows = db.q(
+        "SELECT candidate_id, skip_reasons FROM risk_decisions WHERE action = 'skip'")
     reason_counts: dict[str, int] = {}
     for row in skip_rows.rows:
+        if str(row["candidate_id"]) not in left_trade:
+            continue
         for reason in jload(row["skip_reasons"], []) or ["(unparseable skip_reasons)"]:
             reason_counts[str(reason)] = reason_counts.get(str(reason), 0) + 1
+    drops = [(_plain_skip(k), v, k) for k, v in
+             sorted(reason_counts.items(), key=lambda kv: -kv[1])]
     bind_q = _grouped(db,
         "SELECT rule_name, bound_type, COUNT(*) n FROM limit_applications "
         "WHERE binding = 1 GROUP BY rule_name, bound_type ORDER BY n DESC")
-    drops = [(f"risk skip: {k}", v, "") for k, v in
-             sorted(reason_counts.items(), key=lambda kv: -kv[1])]
-    drops += [
-        (f"limit bound: {r['rule_name']} ({r['bound_type']})", r["n"],
-         "binding=1 in limit_applications")
-        for r in bind_q.rows
-    ]
     stages.append(Stage(
-        "proposed", "risk engine proposed a trade", int(proposed_q.scalar(0) or 0),
-        proposed_q, drops=drops,
-        note="Deterministic code decides here; the model only gated entry.",
+        "proposed", "Risk engine approved a trade", len(s_trade), trade_q,
+        drops=drops, entered=len(s_view),
+        plain="Deterministic code, never the model. It decides whether to "
+              "trade at all, how large, and where the stop sits. It can "
+              "only ever shrink what the model asked for.",
+        note="Limits that bound at least once: " + (", ".join(
+            f"{r['rule_name']} ({r['bound_type']}) x{r['n']}"
+            for r in bind_q.rows) or "none recorded"),
     ))
 
-    orders_q = db.count("orders")
-    unfilled_q = db.q(
-        "SELECT COUNT(*) FROM risk_decisions d WHERE d.action = 'trade' "
-        "AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.decision_id = d.candidate_id)"
-    )
-    rejected_q = _grouped(db,
-        "SELECT status, COUNT(*) n FROM orders GROUP BY status ORDER BY n DESC")
+    # --- orders
+    stranded = sorted(s_trade - s_order)
     drops = []
-    stranded = int(unfilled_q.scalar(0) or 0)
     if stranded:
-        drops.append(("trade decision with no order row", stranded,
-                      "execution never submitted, or crashed before recording"))
-    drops += [(f"order status: {r['status']}", r["n"], "") for r in rejected_q.rows]
+        drops.append(("approved but no order was recorded", len(stranded),
+                      "execution never submitted it, or crashed before "
+                      "writing the row - this one IS a fault"))
     stages.append(Stage(
-        "orders", "orders placed", int(orders_q.scalar(0) or 0), orders_q, drops=drops,
+        "orders", "Order placed at the broker", len(s_order), order_q,
+        drops=drops, faults=[d for d in drops], entered=len(s_trade),
+        plain="An order actually sent to Alpaca, with its stop resting at "
+              "the broker. What happened to it afterwards is on the "
+              "Decisions page.",
     ))
 
     blame, blame_stage = "", ""
     if stages[-1].count == 0:
-        # Where does it STOP? The last stage that produced anything, plus
-        # one. Blaming the first empty stage is wrong when a later stage
-        # clearly has rows (e.g. raw_events pruned but candidates present)
-        # - that reads as a fault where there is none.
-        last_nonzero = max((i for i, s in enumerate(stages) if s.count > 0),
-                           default=None)
-        idx = 0 if last_nonzero is None else last_nonzero + 1
-        upstream = 0 if last_nonzero is None else stages[last_nonzero].count
-        st = stages[idx]
-        top = max(st.drops, key=lambda d: d[1], default=None)
-        blame_stage = st.key
-        blame = (
-            f"No orders have been placed. The pipeline stops at \"{st.label}\": "
-            f"{upstream} in, 0 out."
-        )
-        if top:
-            blame += f" Largest drop reason at that stage: {top[0]} (n={top[1]})."
+        # WHERE DOES IT STOP? The first stage that lost everything it was
+        # given. Now that the chain narrows by construction, that is
+        # simply the first stage with entered > 0 and count == 0 - and if
+        # nothing ever entered at all, the feeds are the answer.
+        if not s_cand:
+            blame_stage = "candidates"
+            blame = ("No orders have been placed, and no candidate has been "
+                     "built yet: nothing has reached the pipeline at all. "
+                     "That is a question about the feeds, not the strategy.")
+            if feed_faults:
+                blame += (f" {len(feed_faults)} feed(s) failed to read - "
+                          "listed under Feed health.")
         else:
-            blame += (
-                " No drop reason was recorded at that stage either - that is itself "
-                "the finding: the stage produced nothing and explained nothing."
-            )
-    return Funnel(stages=stages, blame=blame, blame_stage=blame_stage)
+            st = next((s for s in stages if s.entered > 0 and s.count == 0),
+                      stages[-1])
+            top = max(st.drops, key=lambda d: d[1], default=None)
+            blame_stage = st.key
+            blame = (
+                f'No orders have been placed. Every candidate stops at '
+                f'"{st.label}": {st.entered} arrived, none got through.')
+            if top:
+                blame += f" Most common reason: {top[0]} ({top[1]} of them)."
+            else:
+                blame += (
+                    " Nothing was recorded about why, and that is itself the "
+                    "finding: the step rejected everything and explained "
+                    "nothing.")
+    return Funnel(stages=stages, blame=blame, blame_stage=blame_stage,
+                  feed_events=int(raw_q.scalar(0) or 0), feed_query=raw_q,
+                  feed_faults=feed_faults)
 
 
 # --------------------------------------------------------------------------

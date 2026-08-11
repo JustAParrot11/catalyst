@@ -265,8 +265,25 @@ def performance_panel(db: Db, p: str = "perf") -> str:
 
 
 def funnel_panel(db: Db, p: str = "funnel") -> str:
+    """Where every candidate ended up, as one narrowing population.
+
+    Rebuilt 2026-08-11 on the owner's report that it was "very confusing
+    on what its actually doing and it is still error 400". See
+    queries.funnel for the three defects behind that. This side of it:
+
+    - each step reads "N arrived -> M continued", so the arithmetic is
+      visible rather than expressed as a percentage that could exceed
+      100;
+    - a candidate stopping because the model or the risk engine said no
+      is the system WORKING, and is drawn in neutral text. Only genuine
+      faults - a feed that would not read, spending blocked, an approved
+      trade with no order - are drawn as faults;
+    - anything the recorded reasons do not account for is stated as an
+      unexplained residual instead of quietly not adding up.
+    """
     data = queries.funnel(db)
     out = []
+
     if data.blame:
         out.append(
             f'<div class="blame" id="{p}-blame"><b>Why it has not traded:</b> '
@@ -276,119 +293,176 @@ def funnel_panel(db: Db, p: str = "funnel") -> str:
         out.append(ok(f'<span id="{p}-blame">Orders have been placed; no stage is '
                       "currently blocking the pipeline end to end.</span>"))
 
-    # Survival rate at a glance: how many of the raw events reached the
-    # far end. The count alone hides whether 3 orders came from 5
-    # candidates or from 5,000.
-    if data.stages:
-        first, last = data.stages[0].count, data.stages[-1].count
-        rate = f"{(100.0 * last / first):.1f}%" if first else "&mdash;"
-        out.append(tiles(f"{p}-tiles", [
-            (data.stages[0].label.strip().capitalize(), str(first),
-             "everything the feeds produced in the window"),
-            (data.stages[-1].label.strip().capitalize(), str(last),
-             "what survived every stage below"),
-            ("Survival rate", rate,
-             f"{last} of {first} - each stage's losses are itemised below"),
-        ]))
+    out.append(note(
+        "Read this top to bottom: it follows <b>one</b> group of candidates "
+        "and shows how many were still in the running after each step. A "
+        "step can only ever remove candidates, never add them, so each "
+        "number is smaller than the one above it. <b>Candidates stopping is "
+        "normal and is most of what this page shows</b> &mdash; a few "
+        "trades a month out of many candidates is the design, not a fault. "
+        "Only the items marked <span class=\"fault-chip\">NEEDS ATTENTION</span> "
+        "are things going wrong."))
 
-    widest = max((s.count for s in data.stages), default=0) or 1
-    # Ordinal ramp, lightest at the widest stage and darkening as
-    # candidates survive - the funnel's own direction is the encoding.
-    # Steps are 100 apart because the validator FAILED the obvious
-    # 6-step version on adjacent lightness (0.047 against a 0.06 floor).
-    ramp = ["var(--step-1)", "var(--step-2)", "var(--step-3)",
-            "var(--step-4)", "var(--step-5)"]
+    first = data.stages[0].count if data.stages else 0
+    last = data.stages[-1].count if data.stages else 0
+    rate = f"{(100.0 * last / first):.0f}%" if first else "&mdash;"
+    out.append(tiles(f"{p}-tiles", [
+        ("Candidates built", str(first), "every dated, tradeable event found"),
+        ("Reached an order", str(last), "what survived all four steps below"),
+        ("Of those, traded", rate,
+         f"{last} of {first} - each step's losses are itemised below"),
+    ]))
+
+    widest = max((s.entered for s in data.stages), default=0) or 1
+    starved_shown = False
     for i, stage in enumerate(data.stages):
-        width = max(3, int(380 * stage.count / widest))
-        shade = ramp[min(i, len(ramp) - 1)]
-        pct = (100.0 * stage.count / widest) if widest else 0.0
-        # Stage-to-stage conversion is the number that turns a list of
-        # counts into a diagnosis: it names WHICH step lost the
-        # candidates, which "3 in, 0 out" never does on its own.
-        prev = data.stages[i - 1].count if i else None
-        if prev is None:
-            conv = '<span class="funnel-conv">&mdash;</span>'
-        elif prev == 0:
-            conv = '<span class="funnel-conv">&mdash;</span>'
+        pct = 100.0 * stage.count / widest
+        width = max(0.0, min(100.0, pct))
+        # "N arrived, M continued" beats a percentage: it is checkable by
+        # eye and it cannot read as 200%.
+        if i == 0:
+            flow = f'<span class="funnel-flow">{stage.count} to start</span>'
+        elif stage.entered == 0:
+            flow = ('<span class="funnel-flow quiet">nothing reached this '
+                    "step</span>")
         else:
-            kept = 100.0 * stage.count / prev
-            lost_cls = " lost" if kept < 100.0 else ""
-            conv = (f'<span class="funnel-conv{lost_cls}" title="{stage.count} '
-                    f'of the {prev} that reached the stage above">'
-                    f"{kept:.0f}% kept</span>")
-        # A zero draws NO bar. A minimum-width stub reads as a stray mark
-        # rather than as "none", and the count column already says 0.
+            lost = stage.left
+            cls = " lost" if lost else ""
+            flow = (f'<span class="funnel-flow{cls}">{stage.entered} arrived '
+                    f'&rarr; <b>{stage.count}</b> continued'
+                    + (f" &middot; {lost} stopped here" if lost else "")
+                    + "</span>")
         bar = ("" if stage.count == 0 else
-               f'<span class="funnel-bar" style="width:{width}px;'
-               f'background:{shade}" title="{esc(stage.label)}: {stage.count} '
-               f'({pct:.0f}% of the widest stage)"></span>')
+               f'<span class="funnel-bar" style="width:{width:.1f}%" '
+               f'title="{esc(stage.label)}: {stage.count} of {widest}"></span>')
         out.append(
-            f'<div class="funnel-row" id="{p}-row-{esc(stage.key)}">'
+            f'<div class="funnel-step" id="{p}-row-{esc(stage.key)}">'
+            f'<div class="funnel-head">'
+            f'<span class="funnel-num">{i + 1}</span>'
             f'<span class="funnel-label">{esc(stage.label)}</span>'
-            f'<span class="funnel-n">{stage.count}</span>'
-            f"{conv}<span>{bar}</span></div>"
-        )
-        # A stage starved by the one above it is not its own finding.
-        # Repeating a full empty-state for every downstream stage was
-        # what buried this panel; the query stays reachable either way,
-        # so nothing is lost - only the repetition.
-        # A stage with recorded drop reasons is NOT starved, whatever
-        # the count above it was: it saw candidates and rejected them,
-        # and saying "nothing reached this stage" beside ten listed
-        # rejections is a contradiction the owner had to read twice.
-        starved = stage.count == 0 and prev == 0 and not stage.drops
+            f'<span class="funnel-n">{stage.count}</span></div>'
+            f'<div class="funnel-track">{bar}</div>'
+            f"{flow}"
+            f'<p class="funnel-plain">{esc(stage.plain)}</p>')
+
         if stage.drops:
-            # COLOUR FOLLOWS "IS THIS STILL HAPPENING", not "did this
-            # ever happen". Owner-reported 2026-08-11: the 400s were
-            # painted as live errors days after the bug behind them was
-            # fixed, and the colour was doing the shouting. A reason not
-            # seen for two days is history and reads as history.
-            drops = "".join(
-                f'<li class="{"drop-stale" if "may be history" in str(detail) else "drop-live"}">'
-                f"{esc(reason)} &mdash; <b>{esc(n)}</b>"
-                + (f" <span class='prov'>{raw(detail)}</span>" if detail else "")
+            # COLOUR STILL FOLLOWS "IS THIS STILL HAPPENING". A reason not
+            # seen for days is history and must stop wearing the colour
+            # that means something is wrong right now - the owner read a
+            # wall of 400s as a live fault days after the bug was fixed.
+            items = "".join(
+                '<li class="'
+                + ("drop-stale" if "may be history" in str(detail) else "drop-live")
+                + f'"><span class="funnel-why-n">{esc(n)}</span> {esc(reason)}'
+                + (f' <span class="prov">{raw(detail)}</span>' if detail else "")
                 + "</li>"
-                for reason, n, detail in stage.drops
-            )
-            out.append(f'<ul class="funnel-drop" id="{p}-drops-{esc(stage.key)}">{drops}</ul>')
-            total = 0
-            for _reason, _n, _detail in stage.drops:
+                for reason, n, detail in stage.drops)
+            out.append(
+                f'<div class="funnel-why" id="{p}-drops-{esc(stage.key)}">'
+                f"<h4>Why they stopped here</h4><ul>{items}</ul>")
+            explained = 0
+            for _r, n, _d in stage.drops:
                 try:
-                    total += int(_n)
+                    explained += int(n)
                 except (TypeError, ValueError):
                     pass
-            if prev and total > prev:
-                out.append(prov(
-                    f"These reasons add up to {total}, more than the {prev} "
-                    "that reached this stage: one candidate can be recorded "
-                    "under several reasons at once, so the list explains "
-                    "WHY things stopped, it does not partition them."))
-        elif not starved:
+            residual = stage.left - explained
+            if residual > 0:
+                # SAY WHAT DOES NOT ADD UP. The old panel listed reasons
+                # summing to four beside a drop of one and left the reader
+                # to notice.
+                out.append(
+                    f'<p class="prov" id="{p}-residual-{esc(stage.key)}">'
+                    f"{residual} of the {stage.left} that stopped here have no "
+                    "recorded reason. That is a gap in the record, not a "
+                    "category.</p>")
+            elif residual < 0:
+                out.append(
+                    f'<p class="prov" id="{p}-residual-{esc(stage.key)}">'
+                    f"These reasons add up to {explained} against {stage.left} "
+                    "that stopped: one candidate can be refused for several "
+                    "reasons at once, so this list explains why rather than "
+                    "dividing them up.</p>")
+            out.append("</div>")
+        elif stage.left > 0:
             out.append(
                 f'<p class="prov" id="{p}-nodrops-{esc(stage.key)}">'
-                "no recorded drop reasons at this stage</p>"
-            )
-        if starved:
-            err = (f' <span class="funnel-drop">query FAILED: '
-                   f"{esc(stage.query.error)}</span>"
-                   if stage.query.error else "")
+                f"{stage.left} stopped here with no reason recorded &mdash; "
+                "that is a gap in the record.</p>")
+
+        if stage.faults:
+            items = "".join(
+                f'<li><span class="funnel-why-n">{esc(n)}</span> {esc(reason)}'
+                + (f' <span class="prov">{raw(detail)}</span>' if detail else "")
+                + "</li>"
+                for reason, n, detail in stage.faults)
             out.append(
-                f'<div class="quiet" id="{p}-starved-{esc(stage.key)}">'
-                "nothing reached this stage &mdash; the shortfall is above, "
-                f"not here.{err}"
-                f'<details id="{p}-starved-q-{esc(stage.key)}">'
-                "<summary>its query anyway</summary>"
-                f"<code>{esc(stage.query.sql)}</code> &mdash; returned "
-                f"{stage.query.row_count} row(s)</details></div>"
-            )
-        elif stage.count == 0:
-            out.append(zero_block(
-                f"{p}-empty-{esc(stage.key)}", stage.query,
-                meaning=stage.note or "",
-            ))
-        elif stage.note:
+                f'<div class="funnel-fault" id="{p}-faults-{esc(stage.key)}">'
+                '<h4><span class="fault-chip">NEEDS ATTENTION</span> '
+                f"Things that went wrong here</h4><ul>{items}</ul></div>")
+
+        # A step starved by the one above it is a CONSEQUENCE, not a
+        # finding. Only the first starved step gets the full empty-state
+        # with its query; the rest get one quiet line, with the query
+        # still one click away so nothing is actually hidden. Six
+        # identical SQL dumps is what buried this page before.
+        if stage.entered == 0 and stage.count == 0:
+            if not starved_shown:
+                starved_shown = True
+                out.append(zero_block(
+                    f"{p}-empty-{esc(stage.key)}", stage.query,
+                    meaning=stage.plain or "",
+                ))
+            else:
+                err = (f' <span class="funnel-drop">query FAILED: '
+                       f"{esc(stage.query.error)}</span>"
+                       if stage.query.error else "")
+                out.append(
+                    f'<div class="quiet" id="{p}-starved-{esc(stage.key)}">'
+                    "nothing reached this stage &mdash; the shortfall is "
+                    f"above, not here.{err}"
+                    f'<details id="{p}-starved-q-{esc(stage.key)}">'
+                    "<summary>its query anyway</summary>"
+                    f"<code>{esc(stage.query.sql)}</code> &mdash; returned "
+                    f"{stage.query.row_count} row(s)</details></div>")
+        if stage.note:
             out.append(prov(stage.note))
-    return section(f"{p}-section", "Candidate funnel: raw events to orders", "".join(out))
+        out.append("</div>")
+
+    funnel_html = section(f"{p}-section",
+                          "Where every candidate ended up", "".join(out))
+
+    # --- feed health, as its own section. Raw events are not candidates:
+    # dividing one by the other is what produced "200% kept".
+    feed: list[str] = [note(
+        "This is about whether the data sources answered, which is a "
+        "different question from what happened to candidates above. A feed "
+        "that fails produces no candidates at all, so it never shows up as "
+        "a drop reason &mdash; it shows up here.")]
+    feed.append(tiles(f"{p}-feed-tiles", [
+        ("Raw items fetched", f"{data.feed_events:,}",
+         "everything every feed has returned"),
+        ("Feeds that failed", str(len(data.feed_faults)),
+         "each with the upstream error text below"),
+    ]))
+    if data.feed_faults:
+        items = "".join(
+            f'<li><span class="funnel-why-n">{esc(n)}</span> {esc(reason)}'
+            + (f' <span class="prov">{esc(detail)}</span>' if detail else "")
+            + "</li>"
+            for reason, n, detail in data.feed_faults)
+        feed.append(
+            f'<div class="funnel-fault" id="{p}-feed-faults">'
+            '<h4><span class="fault-chip">NEEDS ATTENTION</span> '
+            f"Feeds that could not be read</h4><ul>{items}</ul></div>")
+    elif data.feed_events == 0 and data.feed_query is not None:
+        feed.append(zero_block(
+            f"{p}-feed-empty", data.feed_query,
+            meaning="no feed has returned anything yet"))
+    else:
+        feed.append(ok(f'<span id="{p}-feed-ok">Every feed answered; nothing '
+                       "upstream is failing.</span>"))
+    return funnel_html + section(f"{p}-feed-section", "Feed health", "".join(feed))
 
 
 # --------------------------------------------------------------------------
