@@ -36,6 +36,28 @@ DATA_BASE_URL = "https://data.alpaca.markets"
 
 _RETRIES = 3
 _BACKOFF_S = 1.0
+#: Ceiling on an honoured Retry-After. A header is upstream input, and
+#: an unbounded sleep on it would let a mistaken "Retry-After: 86400"
+#: park the trading loop for a day with open positions unattended.
+_MAX_RETRY_AFTER_S = 30.0
+
+
+def _retry_after_seconds(resp, fallback: float) -> float:
+    """Retry-After in seconds, bounded. Falls back to our own backoff
+    when the header is absent or unparseable - a header we cannot read
+    must never become a zero-length wait."""
+    raw = ""
+    try:
+        raw = (resp.headers or {}).get("Retry-After", "") or ""
+    except Exception:  # noqa: BLE001 - a stub response may not have headers
+        raw = ""
+    try:
+        wait = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return fallback
+    if wait <= 0:
+        return fallback
+    return min(wait, _MAX_RETRY_AFTER_S)
 
 
 class BrokerError(Exception):
@@ -115,6 +137,26 @@ class Broker:
                     f"{type(exc).__name__} on {method} {url} "
                     f"after {_RETRIES + 1} attempts") from None
 
+            # 429 IS NOT A 4xx FOR RETRY PURPOSES. The blanket "never
+            # retry a 4xx" rule is right for a request that is wrong by
+            # construction - the same request will be wrong next time. A
+            # 429 is the opposite: the request is correct and the answer
+            # is "wait". Failing fast on it aborted the whole cycle,
+            # which on a stop-placement call is worse than waiting.
+            # Alpaca's ceiling is 200 requests/minute per key; this bot
+            # makes tens per cycle, so a 429 means something unexpected
+            # is sharing the key and backing off is the safe response.
+            # Retry-After is honoured when sent, capped so a hostile or
+            # mistaken header cannot park the trading loop.
+            if resp.status_code == 429:
+                if attempt < _RETRIES:
+                    time.sleep(_retry_after_seconds(
+                        resp, self._backoff_s * (2 ** attempt)))
+                    continue
+                raise BrokerError(
+                    f"HTTP 429 (rate limited) on {method} {url} after "
+                    f"{_RETRIES + 1} attempts", status_code=429,
+                    body=_safe_json(resp))
             if resp.status_code >= 500:
                 if attempt < _RETRIES:
                     time.sleep(self._backoff_s * (2 ** attempt))

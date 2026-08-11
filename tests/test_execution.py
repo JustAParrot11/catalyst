@@ -559,3 +559,77 @@ class TestReconcilePartialGrowth:
         row = db.execute("SELECT qty FROM fills").fetchone()
         assert row[0] == "2.5"     # grew, not frozen at first observation
         assert db.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 1
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting: a 429 is not "your request is wrong"
+# ---------------------------------------------------------------------------
+
+
+class TestRateLimitedByTheBroker:
+    """Owner-asked 2026-08-11: "are we adhering to all API limits, i dont
+    want us to get IP banned."
+
+    The blanket "never retry a 4xx" rule is right for a request that is
+    wrong by construction. A 429 is the opposite: the request is correct
+    and the answer is "wait". Failing fast on one aborted the whole
+    cycle - on a stop-placement call that is worse than waiting.
+    """
+
+    def test_a_429_is_retried_and_then_succeeds(self):
+        seen = []
+
+        def handler(request):
+            seen.append(request.url.path)
+            if len(seen) < 3:
+                return httpx.Response(429, json={"message": "rate limit"})
+            return httpx.Response(200, json={"id": "acct", "buying_power": "1000"})
+
+        account = make_broker(handler).get_account()
+        assert account["id"] == "acct"
+        assert len(seen) == 3, "a 429 was not retried"
+
+    def test_a_persistent_429_raises_rather_than_looping_forever(self):
+        calls = []
+
+        def handler(request):
+            calls.append(1)
+            return httpx.Response(429, json={"message": "slow down"})
+
+        with pytest.raises(BrokerError) as exc:
+            make_broker(handler).get_account()
+        assert exc.value.status_code == 429
+        assert len(calls) == 4, "retries are unbounded"
+
+    def test_a_real_4xx_still_never_retries(self):
+        """The rule this sits beside, so the exception cannot quietly
+        widen into 'retry everything'."""
+        calls = []
+
+        def handler(request):
+            calls.append(1)
+            return httpx.Response(422, json={"message": "bad symbol"})
+
+        with pytest.raises(BrokerError):
+            make_broker(handler).get_account()
+        assert len(calls) == 1, "a 4xx was retried, spending the rate budget"
+
+    def test_retry_after_is_honoured_but_bounded(self):
+        """A header is upstream input. An unbounded sleep on it would let
+        a mistaken 'Retry-After: 86400' park the trading loop for a day
+        with open positions unattended."""
+        from catalyst.execution.broker import (
+            _MAX_RETRY_AFTER_S, _retry_after_seconds,
+        )
+
+        class R:
+            def __init__(self, value):
+                self.headers = {"Retry-After": value} if value is not None else {}
+
+        assert _retry_after_seconds(R("5"), 1.0) == 5.0
+        assert _retry_after_seconds(R("86400"), 1.0) == _MAX_RETRY_AFTER_S
+        # absent, unparseable, or zero all fall back to our own backoff -
+        # never to a zero-length wait
+        assert _retry_after_seconds(R(None), 2.5) == 2.5
+        assert _retry_after_seconds(R("soon"), 2.5) == 2.5
+        assert _retry_after_seconds(R("0"), 2.5) == 2.5
