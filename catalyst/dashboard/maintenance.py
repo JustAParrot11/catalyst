@@ -34,6 +34,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 #: Short, because this runs while somebody waits for a page.
 PROBE_TIMEOUT_SECONDS = 6.0
@@ -53,14 +54,21 @@ class Check:
     free: bool = True
 
 
-def _age(iso: str | None):
+def _age(iso: str | None, now: datetime | None = None):
+    """How old, measured against `now` when one is given.
+
+    It used to always read the real wall clock, so passive_checks(now=...)
+    steered only _edgar_is_publishing while every age ignored the
+    injected time. A check that cannot be pinned to a clock cannot be
+    tested against one.
+    """
     if not iso:
         return None
     try:
         when = datetime.fromisoformat(str(iso))
         if when.tzinfo is None:
             when = when.replace(tzinfo=timezone.utc)
-        return datetime.now(timezone.utc) - when
+        return (now or datetime.now(timezone.utc)) - when
     except Exception:
         return None
 
@@ -208,6 +216,13 @@ def passive_checks(db, now=None) -> list[Check]:
         except Exception as exc:  # noqa: BLE001
             return None, repr(exc)
 
+    def many(sql, params=()):
+        try:
+            res = db.q(sql, params)
+            return list(res.rows), res.error
+        except Exception as exc:  # noqa: BLE001
+            return [], repr(exc)
+
     # 1. The database itself.
     out.append(Check(
         "Database", "The bot itself",
@@ -220,7 +235,7 @@ def passive_checks(db, now=None) -> list[Check]:
     # 2. Has a cycle run? cost/governor rows are written every cycle that
     #    considered spending; raw_events every cycle that fetched.
     row, err = one("SELECT MAX(fetched_at) t, COUNT(*) n FROM raw_events")
-    age = _age(row["t"] if row else None)
+    age = _age(row["t"] if row else None, now)
     # EDGAR'S OWN CLOCK, not ours. The bot fetches every cycle, day and
     # night - discovery is not gated on market hours - but a stored row
     # only appears when EDGAR PUBLISHES something, and it publishes on
@@ -230,32 +245,102 @@ def passive_checks(db, now=None) -> list[Check]:
     # whatever the time, which meant it cried wolf every single night
     # (owner-reported 2026-08-11: "does this only run during market
     # hours, if no it says last seen 6 hours ago").
-    publishing = _edgar_is_publishing(now)
+    # THE FEED READS A ONCE-DAILY FILE, so hours are the wrong unit.
+    # Owner-reported 2026-08-11: "EDGAR also says this 9 hours ago, 405
+    # events stored - EDGAR is publishing right now and nothing new has
+    # arrived - the feed or the scheduler may be stuck." It was not
+    # stuck. This feed fetches the DAILY INDEX
+    # (edgar/daily-index/.../form.YYYYMMDD.idx) - one file per day,
+    # published in the evening. Between publishes the bot re-reads
+    # indexes it already holds and INSERT OR IGNORE stores nothing new,
+    # so a nine-hour-old newest row at midday is exactly correct.
+    #
+    # Warning on hours measured EDGAR's filing-acceptance window, which
+    # is not what this feed consumes. The unit is days.
     if age is None:
         state, why = UNKNOWN, "no filing has been stored yet"
-    elif age < timedelta(hours=6):
-        state, why = OK, "fetched recently"
-    elif publishing:
-        state, why = WARN, ("EDGAR is publishing right now and nothing new "
-                            "has arrived - the feed or the scheduler may be "
-                            "stuck")
+    elif age < timedelta(days=4) and not _edgar_is_publishing(now):
+        # Overnight, or a weekend, which spans up to ~3 days with no
+        # index published at all.
+        state, why = OK, ("EDGAR is not publishing at this hour, so there "
+                          "is nothing new to store - this is expected, not "
+                          "a fault")
+    elif age < timedelta(hours=30):
+        state, why = OK, ("normal - the daily index is published once a "
+                          "day, so this is the most recent batch")
     else:
-        state, why = OK, ("EDGAR is not publishing at this hour, so there is "
-                          "nothing new to store - this is expected, not a "
-                          "fault")
+        state, why = WARN, (
+            "no new filing since - more than a day, which is longer than "
+            "the gap between daily indexes, so the feed or the scheduler "
+            "may be stuck")
     out.append(Check(
         "Filing feed (EDGAR) last delivered", "The bot itself", state,
         f"{_fmt_age(age)}" + (f", {row['n']} events stored" if row else "")
         + f" - {why}",
         "The bot fetches every cycle, roughly every 15 minutes, day and "
-        "night - discovery is never gated on market hours. But a row only "
-        "appears when EDGAR publishes, and it publishes on business days, "
-        "roughly 06:00-22:00 New York. An overnight or weekend gap is the "
-        "feed being quiet, not the bot being stuck.", raw=err or ""))
+        "night - discovery is never gated on market hours. But this feed "
+        "reads EDGAR's DAILY INDEX, which is one file per day published "
+        "in the evening. Between publishes there is genuinely nothing new "
+        "to store, so a gap of several hours is the normal state, not a "
+        "fault. Only a gap longer than about a day means something is "
+        "wrong.", raw=err or ""))
+
+    # 2b. The SPY benchmark cache. Owner-reported 2026-08-11: "The graph
+    # that has catalyst and SPY in blue and red has no red SPY line".
+    # The chart draws SPY only when there are points, and there are none
+    # when the cache is empty - but nothing said WHY it was empty or
+    # when the daily refresh last tried. A missing line and a broken
+    # refresh looked identical, which is the failure this whole
+    # dashboard exists to prevent.
+    try:
+        from catalyst.dashboard.db import bars_path
+        from pathlib import Path as _Path
+
+        root = _Path(bars_path())
+        csv = root / "SPY.csv"
+        if not csv.exists():
+            # UNKNOWN, not FAIL. A machine where nothing has run yet
+            # legitimately has no cache, and a fresh install that reports
+            # a failure teaches the owner to ignore this page.
+            state, summary = UNKNOWN, f"not built yet - no SPY.csv under {root}"
+            detail = ("The red SPY line cannot be drawn without this. The "
+                      "scheduler refreshes it once a day from Alpaca; if it "
+                      "is still missing after a full day the refresh is "
+                      "failing - the Logs page will carry the reason, "
+                      "filtered to component 'catalyst.scheduler'.")
+        else:
+            lines = [ln for ln in
+                     csv.read_text().splitlines() if ln.strip()]
+            n = max(0, len(lines) - 1)
+            last = lines[-1].split(",")[0] if n else ""
+            feed = ""
+            meta = root / "cache_meta.json"
+            if meta.exists():
+                import json as _json
+                try:
+                    feed = str(_json.loads(meta.read_text()).get("feed") or "")
+                except ValueError:
+                    feed = "(unreadable cache_meta.json)"
+            state = OK if n else FAIL
+            summary = (f"{n} daily bar(s), newest {last}"
+                       + (f", from the {feed.upper()} feed" if feed else ""))
+            detail = ("This is what the red SPY line is drawn from. An IEX "
+                      "feed means the account is not entitled to the full "
+                      "consolidated tape - fine for a daily SPY benchmark, "
+                      "but the Performance page says so rather than letting "
+                      "you assume the tape."
+                      if feed == "iex" else
+                      "This is what the red SPY line is drawn from.")
+        out.append(Check("SPY benchmark cache", "The bot itself",
+                         state, summary, detail, raw=""))
+    except Exception as exc:  # noqa: BLE001 - a check must never take the page down
+        out.append(Check("SPY benchmark cache", "The bot itself", UNKNOWN,
+                         f"could not be read: {type(exc).__name__}",
+                         "", raw=repr(exc)))
 
     # 3. Research calls - the only path that spends money.
     row, err = one("SELECT MAX(called_at) t, COUNT(*) n FROM research_calls")
-    age = _age(row["t"] if row else None)
+    age = _age(row["t"] if row else None, now)
     out.append(Check(
         "Claude research calls", "The bot itself",
         OK if row and row["n"] else UNKNOWN,
@@ -292,17 +377,41 @@ def passive_checks(db, now=None) -> list[Check]:
         "stays 'not run'.", raw=err or ""))
 
     # 6. Unacknowledged discrepancy pauses spending.
-    row, err = one("SELECT COUNT(*) n FROM cost_reconciliation_events "
-                   "WHERE action_taken = 'scheduled_paused' "
-                   "AND acknowledged_at IS NULL")
-    n = (row["n"] if row else 0) or 0
+    # NAME THE DAYS AND THE FIGURES, not just a count. Owner-reported
+    # 2026-08-11: "it says there are 7 discrepancies, it doesnt actually
+    # say what". A bare count cannot be acted on - it does not say which
+    # days, how big, or whether they are all the same harmless thing, so
+    # the only response available is to go and look somewhere else.
+    rows, err = many(
+        "SELECT target_date, local_total_cents, cost_api_total_cents, "
+        "       discrepancy_cents FROM cost_reconciliation_events "
+        "WHERE action_taken = 'scheduled_paused' AND acknowledged_at IS NULL "
+        "ORDER BY target_date DESC LIMIT 8")
+    rows = rows or []
+    n = len(rows)
+    if not n:
+        detail = "no unacknowledged discrepancy"
+    else:
+        def _money(cents):
+            try:
+                return f"${Decimal(str(cents or 0)) / 100:.2f}"
+            except (ArithmeticError, TypeError, ValueError):
+                return f"{cents!r}"
+        lines = [f"{r['target_date']}: this bot recorded "
+                 f"{_money(r['local_total_cents'])}, Anthropic billed the "
+                 f"organisation {_money(r['cost_api_total_cents'])} "
+                 f"(gap {_money(r['discrepancy_cents'])})"
+                 for r in rows]
+        detail = (f"{n} awaiting your acknowledgement - "
+                  + "; ".join(lines))
     out.append(Check(
         "Spending not paused", "The bot itself",
-        OK if not n else FAIL,
-        "no unacknowledged discrepancy" if not n
-        else f"{n} discrepancy(ies) awaiting your acknowledgement",
-        "While one is outstanding the bot will not spend at all. "
-        "Acknowledge it on the Cost page to resume.", raw=err or ""))
+        OK if not n else FAIL, detail,
+        "While one is outstanding the bot will not spend at all. A gap on "
+        "a day the bot did not run is your OWN Anthropic usage, not an "
+        "error - the Cost page explains which is which. Acknowledging "
+        "changes no figure; it records that a human looked.",
+        raw=err or ""))
 
     # 7. Kill switch.
     row, err = one("SELECT MAX(triggered_at) t, COUNT(*) n FROM "
