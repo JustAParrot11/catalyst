@@ -746,3 +746,18 @@ change kept from this session is the strengthened assertion block in
   removing the backstop fails five of them.
   Fix is two layers: the helper uses monkeypatch, and an autouse fixture
   restores all four pinned paths after every test whatever it did.
+- Packaging and the phantom build (2026-08-11). ROOT CAUSE at last:
+  dashboard/schema_logs.sql was never in package-data, so the wheel
+  never shipped it. The installed dashboard had 11 files where the repo
+  has 12, and since the build hash covers .sql files, the running copy
+  hashed differently from EVERY released version - which is what sent me
+  hunting for a second checkout that did not exist. Proved by hashing
+  the .py files alone at each commit: the owner's 3c9d90d2cc37 is
+  commit 7a12961 minus the .sql. Their upgrade had worked all along.
+  Sabotages: package-data reverted to the hand-written directory list
+  (caught by three tests); a stale install driven through upgrade.sh
+  (caught by the new installed-vs-tested guard, verified by running the
+  real script). Also fixed: the rollback's closing paragraph said
+  "failed its own tests" for every rollback whatever the cause, and the
+  evidence lines ran together because command substitution strips
+  trailing newlines.

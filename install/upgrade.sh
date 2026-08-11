@@ -51,6 +51,8 @@ NEW_COMMIT=""
 NOTHING_FETCHED=0
 UPGRADE_BRANCH="unknown"
 NEW_BUILD_HASH="unknown"
+INSTALLED_DIR="unknown"
+REPO_BUILD_HASH="unknown"
 BACKUP_MADE=0
 
 # --------------------------------------------------------------------------
@@ -225,11 +227,18 @@ rollback() {
   if [ "${rollback_failed}" -eq 0 ]; then
     printf ' DONE - you are back on the version you were running before.\n'
     printf '================================================================\n\n'
-    printf ' The upgrade was refused because the new version failed its own\n'
-    printf ' tests, which is exactly what should happen. Your database, your\n'
-    printf ' keys and your open positions are untouched.\n\n'
+    # The REASON THIS ROLLBACK HAPPENED, not a guess at it. This
+    # paragraph said "failed its own tests" for every rollback, whatever
+    # caused it - so a rollback for an entirely different reason sent
+    # the owner to read a test log that had nothing to do with it. A
+    # message that cannot be wrong is not a message.
+    printf ' The upgrade was refused and put back. Your database, your keys\n'
+    printf ' and your open positions are untouched.\n\n'
+    printf ' WHY IT WAS REFUSED\n'
+    printf '%s\n\n' "${1}" | indent
     printf ' WHAT TO DO ABOUT IT\n'
-    printf '     1. Send the test output to whoever maintains Catalyst:  %s\n' "${TEST_LOG}"
+    printf '     1. Send this whole message to whoever maintains Catalyst.\n'
+    printf '        If a test log is mentioned above, send that too:  %s\n' "${TEST_LOG}"
     printf '     2. Carry on as normal in the meantime - the bot is running.\n'
     printf '     3. Try the upgrade again once a fixed version is published.\n'
   else
@@ -403,7 +412,23 @@ if ! run "${VENV_PY}" -m pip install --quiet "${REPO_DIR}[dev]"; then
   rollback "The new version could not be installed." "$(log_tail)"
 fi
 NEW_VERSION="$("${VENV_PY}" -c 'import catalyst; print(catalyst.__version__)' 2>>"${LOG_FILE}" || echo unknown)"
-NEW_BUILD_HASH="$("${VENV_PY}" -c 'from catalyst.dashboard.build import BUILD_HASH; print(BUILD_HASH)' 2>>"${LOG_FILE}" || echo unknown)"
+# THE INSTALLED COPY, not the repo. `cd repo && python -m pytest` puts
+# the repo first on sys.path, so the tests exercise the working tree
+# while the SERVICE runs whatever pip put in site-packages. If those two
+# ever diverge - a failed install, a second checkout, a venv that is not
+# the one systemd uses - the tests pass, the service restarts on old
+# code, and nothing says a word. That is exactly what happened
+# (owner-reported 2026-08-11: repo byte-for-byte current, dashboard
+# serving a build from somewhere else). Run from / so the repo cannot
+# shadow the installed package.
+NEW_BUILD_HASH="$(cd / && "${VENV_PY}" -c 'from catalyst.dashboard.build import BUILD_HASH; print(BUILD_HASH)' 2>>"${LOG_FILE}" || echo unknown)"
+INSTALLED_DIR="$(cd / && "${VENV_PY}" -c 'from catalyst.dashboard.build import build_manifest; print(build_manifest()["directory"])' 2>>"${LOG_FILE}" || echo unknown)"
+REPO_BUILD_HASH="$(cd "${REPO_DIR}" && "${VENV_PY}" -c 'from catalyst.dashboard.build import BUILD_HASH; print(BUILD_HASH)' 2>>"${LOG_FILE}" || echo unknown)"
+if [ "${NEW_BUILD_HASH}" != "${REPO_BUILD_HASH}" ]; then
+  rollback "The new version was installed, but the copy the bot actually runs is NOT the copy that was just tested." \
+           "$(printf 'tested (this folder):   %s\ninstalled (what runs):  %s\ninstalled from:         %s\nthis folder:            %s\n\nThe bot imports its code from the installed folder, not from this\none. They have to be the same or the tests prove nothing about what\nwill actually run. Usual cause: the service uses a different virtual\nenvironment from the one this upgrade installed into.' \
+              "${REPO_BUILD_HASH}" "${NEW_BUILD_HASH}" "${INSTALLED_DIR}" "${REPO_DIR}")"
+fi
 if [ "${NEW_VERSION}" = "unknown" ]; then
   rollback "The new version installed, but Catalyst will not even start up." "$(log_tail)"
 fi
@@ -487,6 +512,7 @@ printf '   version now:     %s\n' "${NEW_VERSION}"
 printf '   code before:     %s\n' "${OLD_COMMIT:0:12}"
 printf '   code now:        %s  (branch %s)\n' "${NEW_COMMIT:0:12}" "${UPGRADE_BRANCH}"
 printf '   dashboard build: %s\n' "${NEW_BUILD_HASH}"
+printf '   running from:    %s\n' "${INSTALLED_DIR}"
 printf '   tests:           all passed\n'
 printf '   backup kept at:  %s\n\n' "${BACKUP_PATH}"
 
