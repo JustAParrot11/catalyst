@@ -729,3 +729,20 @@ change kept from this session is the strengthened assertion block in
   test_conftest_assigns_rather_than_defaulting. Restored; the whole
   suite now passes both with and without a hostile CATALYST_CREDENTIALS
   in the environment.
+- Test isolation, ROUND TWO (2026-08-11). The setdefault fix was not the
+  cause. The real mechanism: TestOwnerBudgetReconciliation set
+  CATALYST_CREDENTIALS itself and cleaned up with os.environ.pop, which
+  DELETES conftest's pin rather than restoring it - so every later test
+  fell back to /etc/catalyst/credentials.json. Invisible here, a live
+  $20 budget on the owner's server.
+  Reproduced faithfully by creating a real /etc/catalyst/credentials.json
+  on this machine, which fails the identical test.
+  MY FIRST VERIFICATION OF ROUND ONE PASSED FOR THE WRONG REASON: I set
+  the env var, but the sibling test popped it and the fallback path did
+  not exist here, so nothing failed. And the first version of the guard
+  tests sat in test_install.py, whose autouse _isolated_credentials
+  fixture re-sets the variable every test - so removing the backstop did
+  not fail them either. They now live in tests/test_isolation.py, where
+  removing the backstop fails five of them.
+  Fix is two layers: the helper uses monkeypatch, and an autouse fixture
+  restores all four pinned paths after every test whatever it did.

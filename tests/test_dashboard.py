@@ -933,37 +933,42 @@ class TestOwnerBudgetReconciliation:
     The cost page must reconcile the two figures where the owner
     noticed the contradiction, rather than leaving them to disagree."""
 
-    def _panel_with_budget(self, tmp_path, bare, usd):
+    def _panel_with_budget(self, tmp_path, bare, usd, monkeypatch):
+        """monkeypatch, NOT os.environ directly.
+
+        This helper used to pop CATALYST_CREDENTIALS in a finally, which
+        does not restore the sandbox path conftest pinned - it DELETES
+        it. Every test that ran afterwards then fell back to the real
+        /etc/catalyst/credentials.json, so the suite passed on a machine
+        without one and failed on the owner's server, which had a $20
+        budget in it. monkeypatch restores the previous value.
+        """
         from catalyst.setup import credentials as creds
         cpath = str(tmp_path / "c.json")
         creds.save_credentials("PKFAKE1234567890TEST", "SECFAKE",
                                "sk-ant-fake", "tok", path=cpath,
                                settings={"monthly_budget_usd": usd,
                                          "account_mode": "paper"})
-        import os
-        os.environ["CATALYST_CREDENTIALS"] = cpath
-        try:
-            db = Db(bare)
-            html = panels.cost_panel(db, "cost")
-            db.close()
-        finally:
-            os.environ.pop("CATALYST_CREDENTIALS", None)
+        monkeypatch.setenv("CATALYST_CREDENTIALS", cpath)
+        db = Db(bare)
+        html = panels.cost_panel(db, "cost")
+        db.close()
         return html
 
-    def test_a_higher_setting_is_the_number_shown_everywhere(self, tmp_path, bare):
+    def test_a_higher_setting_is_the_number_shown_everywhere(self, tmp_path, bare, monkeypatch):
         """THE BUG THIS PINS: the page printed the $5 base constant while
         the governor spent against the owner's figure, so a budget raised
         to $20 read "$0.00 of $5.00" forever and looked ignored. Both now
         come from governor.scheduled_cap_cents()."""
-        html = self._panel_with_budget(tmp_path, bare, 20)
+        html = self._panel_with_budget(tmp_path, bare, 20, monkeypatch)
         assert "$20 cap" in html, "the tile must show the cap in force"
         assert "$5" not in html.split("cost-tiles")[1].split("</div></div>")[0]
         assert "The cap above is <b>your</b> figure" in html
         assert "$20.00 a month" in html
         assert "24.0% a year" in html, "the hurdle of the choice must be shown"
 
-    def test_a_tighter_setting_is_also_the_number_shown(self, tmp_path, bare):
-        html = self._panel_with_budget(tmp_path, bare, 2)
+    def test_a_tighter_setting_is_also_the_number_shown(self, tmp_path, bare, monkeypatch):
+        html = self._panel_with_budget(tmp_path, bare, 2, monkeypatch)
         assert "$2 cap" in html
         assert "$2.00 a month" in html
         assert "2.4% a year" in html
@@ -973,10 +978,10 @@ class TestOwnerBudgetReconciliation:
         assert "built-in default" in html
         assert "The cap above is <b>your</b> figure" not in html
 
-    def test_the_meter_measures_against_the_cap_in_force(self, tmp_path, bare):
+    def test_the_meter_measures_against_the_cap_in_force(self, tmp_path, bare, monkeypatch):
         """The meter is the at-a-glance answer to "am I close to the
         limit". Measured against the wrong cap it is worse than absent."""
-        html = self._panel_with_budget(tmp_path, bare, 20)
+        html = self._panel_with_budget(tmp_path, bare, 20, monkeypatch)
         legend = html.split("meter-legend")[1][:200]
         assert "$20/month" in legend
 
