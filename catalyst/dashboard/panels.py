@@ -609,6 +609,18 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
             f'<b id="{p}-unacked">{c.unacked_q.row_count} unacknowledged '
             "reconciliation discrepancy(ies). Scheduled spend is PAUSED until a "
             "human acknowledges each one.</b>"
+            "<p>WHAT THIS IS: once a day the bot compares what it recorded "
+            "spending against what Anthropic actually billed. When the two "
+            "disagree by more than the threshold it stops spending and asks "
+            "you, because a ledger that has drifted is the one number this "
+            "whole project rests on.</p>"
+            "<p>WHAT TO DO: read the two figures below, decide whether the "
+            "gap is explainable, and type your name to acknowledge it. That "
+            "records who accepted it and restarts spending on the next "
+            "cycle. It is NOT a daily chore - it only appears when the "
+            "figures actually disagree, and most days they will not. If it "
+            "keeps happening, something is wrong with the cost tracking and "
+            "it should be reported rather than clicked through.</p>"
         ))
         for i, r in enumerate(c.unacked_q.rows):
             zero_note = ""
