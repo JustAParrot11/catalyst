@@ -160,6 +160,33 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 ok "running with administrator rights"
 
+# --------------------------------------------------------------------------
+# ALREADY INSTALLED? Then this is an upgrade, and upgrades have a safety
+# net this script does not: a backup of the database and keys, the full
+# test suite as a gate, a check that the copy just installed is the copy
+# that was tested, and an automatic rollback if any of that fails.
+#
+# The owner ran install.sh instead of upgrade.sh by accident (2026-08-11).
+# Nothing was lost - this script never overwrites credentials, never
+# deletes a database, and keeps the existing access code - but it
+# installed and restarted with no gate at all, which is the one thing a
+# machine holding real positions should not do quietly.
+#
+# So it hands over rather than lecturing. Fetching is skipped, because
+# someone running the installer is asking to install THESE files, not to
+# pull new ones behind their back.
+# --------------------------------------------------------------------------
+if [ "${CATALYST_NO_DELEGATE:-0}" -eq 0 ] &&
+   [ -x "${VENV_PY}" ] &&
+   [ -f "${SCRIPT_DIR}/upgrade.sh" ] &&
+   git -C "${REPO_DIR}" rev-parse --git-dir >/dev/null 2>&1; then
+  note "Catalyst is already installed here, so this is an upgrade."
+  note "Handing over to the upgrade, which backs up your database and"
+  note "keys first and puts everything back if anything fails."
+  printf '\n'
+  CATALYST_SKIP_PULL=1 exec bash "${SCRIPT_DIR}/upgrade.sh"
+fi
+
 if [ -r /etc/os-release ]; then
   # shellcheck disable=SC1091
   . /etc/os-release
