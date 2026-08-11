@@ -1742,3 +1742,35 @@ class TestTypographyIsSystematic:
         hero = _CSS.split(".big {")[1].split("}")[0]
         prov = _CSS.split(".prov {")[1].split("}")[0]
         assert "--t-hero" in hero and "--t-fine" in prov
+
+
+class TestThePageSaysWhichCopyIsRunning:
+    """Owner-reported 2026-08-11: the repo on disk was byte-for-byte
+    identical to main while the running service showed a different build
+    hash - it was importing an older copy from somewhere else. The page
+    could report the hash but not the directory, so "the repo is current"
+    and "the running code is current" were indistinguishable."""
+
+    def test_the_sidebar_names_the_directory_it_was_loaded_from(self, seeded):
+        from catalyst.dashboard.build import build_manifest
+
+        html_out = server.route_overview(Db(seeded), {})
+        assert build_manifest()["directory"] in html_out
+
+    def test_health_carries_it_too_so_curl_can_answer(self, seeded):
+        from catalyst.dashboard.build import build_manifest
+        from catalyst.dashboard.server import health
+
+        h = health(Db(seeded))
+        assert h["source_dir"] == build_manifest()["directory"]
+        assert h["build_hash"]
+
+    def test_the_hash_and_the_directory_travel_together(self, seeded):
+        """Either alone is ambiguous: a hash with no directory cannot say
+        WHICH copy produced it."""
+        from catalyst.dashboard.build import BUILD_HASH
+
+        html_out = server.route_overview(Db(seeded), {})
+        foot = html_out.split('class="sidebar-foot"')[1][:400]
+        assert BUILD_HASH in foot
+        assert "dashboard" in foot
