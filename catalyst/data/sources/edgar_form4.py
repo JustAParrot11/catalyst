@@ -104,6 +104,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -220,22 +221,48 @@ class RateLimiter:
         self._monotonic = monotonic
         self._sleep = sleep
         self._next_at: float | None = None
+        self._lock = threading.Lock()
         self.acquisitions = 0
         self.waits: list[float] = []
 
     def acquire(self) -> None:
-        now = self._monotonic()
-        if self._next_at is None:
-            self._next_at = now
-        wait = self._next_at - now
+        # Locked, because the SEC ceiling is per IP and this process runs
+        # the dashboard's probes on request threads while the trading
+        # cycle is fetching. Two threads reading _next_at between the
+        # read and the write is exactly how a paced client emits a burst.
+        with self._lock:
+            now = self._monotonic()
+            if self._next_at is None:
+                self._next_at = now
+            wait = self._next_at - now
+            self._next_at = max(self._next_at, now + wait) + self.interval
         if wait > 0:
             self._sleep(wait)
             self.waits.append(wait)
-            now = self._monotonic()
         else:
             self.waits.append(0.0)
-        self._next_at = max(self._next_at, now) + self.interval
         self.acquisitions += 1
+
+
+#: ONE pacer for the whole process. The SEC's limit is 10 requests per
+#: second per IP ACROSS ALL ITS APIs, so a per-call limiter is not a
+#: limit at all: two of them at 5/s each sit exactly on the ceiling, and
+#: three are over it. Every sec.gov call in this codebase goes through
+#: this one object - the feed, and the dashboard's reachability probe.
+#: Measured 2026-08-11: one weekday's daily index holds 562 unique Form 4
+#: accessions, so a five-day window is ~2,800 requests. That is well
+#: inside the rate, and it is exactly the volume that makes sharing the
+#: pacer matter rather than being a formality.
+_SEC_PACER: "RateLimiter | None" = None
+_SEC_PACER_LOCK = threading.Lock()
+
+
+def sec_pacer() -> "RateLimiter":
+    global _SEC_PACER
+    with _SEC_PACER_LOCK:
+        if _SEC_PACER is None:
+            _SEC_PACER = RateLimiter(DEFAULT_REQUESTS_PER_SEC)
+        return _SEC_PACER
 
 
 # --------------------------------------------------------------------------
@@ -818,7 +845,14 @@ def fetch_form4(
     """
     getter = http_get or _default_http_get
     clock = now or (lambda: datetime.now(timezone.utc))
-    limiter = RateLimiter(rate_per_sec, monotonic=monotonic, sleep=sleep)
+    # The PROCESS-WIDE pacer unless the caller injected a clock or a
+    # sleep - tests do that to run instantly, and they must not be paced
+    # by, or leave state on, the shared object.
+    if monotonic is time.monotonic and sleep is time.sleep \
+            and rate_per_sec == DEFAULT_REQUESTS_PER_SEC:
+        limiter = sec_pacer()
+    else:
+        limiter = RateLimiter(rate_per_sec, monotonic=monotonic, sleep=sleep)
     headers = {
         "User-Agent": user_agent(contact_email),
         "Accept-Encoding": "gzip, deflate",

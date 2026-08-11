@@ -517,11 +517,19 @@ def _default_market_data_probe(creds):
 
 def _default_edgar_probe():
     def probe():
-        import httpx
-        from catalyst.data.sources.edgar_form4 import ARCHIVES_BASE, user_agent
-        resp = httpx.get(f"{ARCHIVES_BASE}edgar/daily-index/",
-                         headers={"User-Agent": user_agent()},
-                         timeout=PROBE_TIMEOUT_SECONDS)
+        # THROUGH THE SHARED PACER. The SEC's 10 req/s ceiling is per IP
+        # and shared across every one of its APIs, so a probe that paces
+        # itself independently of the feed can only ever add to the feed's
+        # rate. One request cannot breach it on its own; the point is that
+        # nothing in this process is allowed to talk to sec.gov without
+        # going through the same limiter, so it stays true as call sites
+        # are added.
+        from catalyst.data.sources.edgar_form4 import (
+            ARCHIVES_BASE, _default_http_get, sec_pacer, user_agent,
+        )
+        sec_pacer().acquire()
+        resp = _default_http_get(f"{ARCHIVES_BASE}edgar/daily-index/",
+                                 {"User-Agent": user_agent()})
         if resp.status_code != 200:
             return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
         return True, "reachable"
