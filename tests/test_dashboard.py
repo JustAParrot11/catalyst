@@ -311,7 +311,7 @@ def test_funnel_names_the_stage_responsible_when_nothing_traded(seeded):
     conn.close()
     f = queries.funnel(Db(seeded))
     assert f.blame_stage == "orders"
-    assert "trade decision with no order row" in f.blame
+    assert "approved but no order was recorded" in f.blame
 
 
 def test_funnel_blames_the_risk_stage_when_everything_is_declined(bare):
@@ -320,6 +320,10 @@ def test_funnel_blames_the_risk_stage_when_everything_is_declined(bare):
     conn.execute("INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?,?)",
                  ("cx", "ZZ", "x", today.isoformat(), "estimated", "[]",
                   _iso(today), "s", "[]"))
+    # The candidate has to actually REACH the risk stage for the risk
+    # stage to be blamed for it: research ran and the model gave a view.
+    conn.execute("INSERT INTO research_calls VALUES (?,?,?,?,?,?,?,?,?)",
+                 ("rcx", "cx", "m", "p", "[]", "1", 10, None, _iso(today)))
     conn.execute("INSERT INTO research_views VALUES (?,?,?,?,?,?,?,?)",
                  ("cx", "long", 0.9, "t", "i", 5, 0, "r"))
     conn.execute("INSERT INTO risk_decisions VALUES (?,?,?,?,?,?,?,?,?,?,?)",
@@ -329,16 +333,66 @@ def test_funnel_blames_the_risk_stage_when_everything_is_declined(bare):
     conn.close()
     f = queries.funnel(Db(bare))
     assert f.blame_stage == "proposed"
-    assert "gap_bigger_than_max_loss" in f.blame
+    # An unknown code falls back to itself rather than reading as blank.
+    assert "gap bigger than max loss" in f.blame
     html_out = panels.funnel_panel(Db(bare))
     assert "Why it has not traded" in html_out
 
 
-def test_funnel_counts_feed_errors_as_a_drop_reason_with_raw_text(seeded):
+def test_a_feed_error_is_a_fault_not_candidate_attrition(seeded):
+    """A feed that will not read produces no candidates at all, so it can
+    never appear as a reason a candidate stopped. Listing it as one - in
+    the same orange as a model declining a trade - is what made the
+    owner read the whole page as errors."""
     f = queries.funnel(Db(seeded))
-    stage = next(s for s in f.stages if s.key == "raw_events")
-    assert any("federal_register" in reason for reason, _, _ in stage.drops)
-    assert any("timeout" in str(detail) for _, _, detail in stage.drops)
+    assert any("Federal Register" in reason for reason, _, _ in f.feed_faults)
+    assert any("timeout" in str(detail) for _, _, detail in f.feed_faults)
+    for stage in f.stages:
+        assert not any("feed" in str(r).lower() for r, _, _ in stage.drops)
+
+
+def test_no_funnel_stage_can_be_wider_than_the_one_above_it(seeded):
+    """Owner-reported: "candidates built 2 - 200% kept". The stages were
+    independent COUNT(*)s over different tables, so a later stage could
+    hold more rows than the one feeding it."""
+    f = queries.funnel(Db(seeded))
+    counts = [s.count for s in f.stages]
+    assert counts == sorted(counts, reverse=True), counts
+    for i, stage in enumerate(f.stages):
+        if i:
+            assert stage.entered == f.stages[i - 1].count
+            assert stage.count <= stage.entered
+
+
+def test_drop_reasons_belong_to_the_step_that_lost_the_candidates(bare):
+    """A step reading "100% kept" used to list a governor denial under
+    it, and a step that lost one candidate listed reasons summing to
+    four. Reasons are now counted only over candidates that actually
+    left AT that step."""
+    today = datetime.now(timezone.utc).date()
+    conn = sqlite3.connect(bare)
+    for cid in ("k1", "k2"):
+        conn.execute("INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?,?)",
+                     (cid, "ZZ", "x", today.isoformat(), "estimated", "[]",
+                      _iso(today), "s", "[]"))
+    # k1 survives research; k2 was skipped there
+    conn.execute("INSERT INTO research_calls VALUES (?,?,?,?,?,?,?,?,?)",
+                 ("rc1", "k1", "m", "p", "[]", "1", 10, None, _iso(today)))
+    conn.execute("INSERT INTO research_calls VALUES (?,?,?,?,?,?,?,?,?)",
+                 ("rc2", "k2", "m", "p", "[]", "0", 1, "budget", _iso(today)))
+    # k1 then declines on the model's own view
+    conn.execute("INSERT INTO research_views VALUES (?,?,?,?,?,?,?,?)",
+                 ("k1", "no_trade", 0.2, "t", "i", 5, 0, "r"))
+    conn.commit()
+    conn.close()
+    f = queries.funnel(Db(bare))
+    by_key = {s.key: s for s in f.stages}
+    assert by_key["researched"].entered == 2 and by_key["researched"].count == 1
+    assert by_key["researched"].drops == [("research skipped: budget", 1,
+                                           by_key["researched"].drops[0][2])]
+    # the model's no_trade belongs to the NEXT step, not this one
+    assert by_key["views"].entered == 1 and by_key["views"].count == 0
+    assert sum(n for _, n, _ in by_key["views"].drops) == 1
 
 
 # --------------------------------------------------------------------- cost
@@ -719,7 +773,9 @@ def test_diagnostic_bundle_is_redacted_and_carries_row_counts(seeded):
     assert FAKE_ALPACA_KEY not in blob
     assert FAKE_ANTHROPIC_KEY not in blob
     assert bundle["row_counts"]["closed_trades"] == 1
-    assert bundle["funnel"]["stages"][0]["stage"] == "raw_events"
+    # The funnel starts at candidates: raw events are a different
+    # population and live under Feed health.
+    assert bundle["funnel"]["stages"][0]["stage"] == "candidates"
     assert bundle["cost"]["unacknowledged_discrepancies"] == 1
 
 
@@ -892,8 +948,10 @@ class TestAnalysisLayer:
         kept-percentage does, and that is the whole diagnostic value."""
         db = Db(seeded)
         html = panels.funnel_panel(db, "f")
-        assert "funnel-conv" in html
-        assert "kept</span>" in html, "a stage with an upstream must show conversion"
+        assert "funnel-flow" in html
+        assert "arrived" in html and "continued" in html, (
+            "a step must spell out its own arithmetic; a lone percentage "
+            "is what allowed '200% kept' to render without looking wrong")
         db.close()
 
     def test_starved_stages_do_not_repeat_a_full_empty_state(self, bare):
@@ -1850,6 +1908,31 @@ class TestThePageReadsAsAnInstrumentNotAnEssay:
         assert figures >= 8
         assert self._visible_words(html_out) / figures < 75, (
             "the page is still an essay with numbers in it")
+
+    def test_the_summary_folds_explanation_but_the_full_page_does_not(self, seeded):
+        """render.digest is the whole mechanism. The words are folded on
+        the overview and inline on the panel's own page - never deleted,
+        because every figure still has to say where it came from."""
+        from catalyst.dashboard.render import digest
+
+        full = panels.funnel_panel(Db(seeded), p="funnel")
+        summary = digest(full)
+        assert 'class="funnel-plain"' in full
+        assert 'class="funnel-plain"' not in summary.split(
+            'class="workings"')[0], "explanation is still inline on the summary"
+        # folded, not deleted
+        for chunk in re.findall(r'<p class="funnel-plain"[^>]*>(.*?)</p>', full,
+                                re.S):
+            assert chunk in summary
+
+    def test_digest_never_folds_a_warning(self, seeded):
+        """An alarm is not explanation. A summary that hides one is
+        worse than no summary at all."""
+        from catalyst.dashboard.render import digest
+
+        out = digest(panels.cost_panel(Db(seeded), p="ovcost", compact=True))
+        before_fold = out.split('class="workings"')[0]
+        assert 'class="alarm"' in before_fold
 
 
 class TestLogsActuallyReachTheDatabase:

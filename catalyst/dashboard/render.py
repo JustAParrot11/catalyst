@@ -427,14 +427,6 @@ footer { color: var(--muted); font-size: 11.5px;
          padding: 12px 22px 26px 22px; margin-top: auto;
          border-top: 1px solid var(--hairline); }
 
-/* Funnel: an ordinal ramp, darkening as candidates survive each stage. */
-.funnel-row { display: flex; align-items: center; gap: 12px; margin: 5px 0; }
-.funnel-bar { height: 22px; border-radius: 3px; min-width: 3px; }
-/* No widths here: the .funnel-row grid owns the columns. Setting both
-   made the count and the conversion figure collide. */
-.funnel-label { font-size: 13px; }
-.funnel-n { text-align: right; font-variant-numeric: tabular-nums;
-            font-weight: 650; font-size: 15px; }
 .funnel-drop { color: var(--serious); font-size: 12px; }
 /* A reason that has not recurred is history, and must not keep wearing
    the colour that means "something is wrong right now". */
@@ -479,23 +471,77 @@ button { background: var(--series-1); color: #fff; border-color: transparent;
               background: var(--ink-2); }
 .meter-legend { font-size: 11.5px; color: var(--ink-2); margin: 0 0 2px 0; }
 
-/* Funnel: label, count, conversion, bar. A fixed grid so the numbers
-   form columns the eye can run down instead of a ragged edge. */
-.funnel-row { display: grid; grid-template-columns: 220px 64px 76px 1fr;
-              align-items: center; gap: 12px; margin: 0; padding: 7px 0;
-              border-top: 1px solid var(--hairline); }
-.funnel-row:first-of-type { border-top: none; }
-.funnel-conv { font-size: 12px; color: var(--ink-2);
-               font-variant-numeric: tabular-nums; }
-.funnel-conv.lost { color: var(--serious); font-weight: 600; }
-.quiet { color: var(--muted); font-size: 12px; margin: 0 0 6px 232px;
+/* Funnel, rebuilt 2026-08-11. One numbered step per block: a full-width
+   track whose bar length IS the surviving count against the widest step,
+   the arithmetic spelled out underneath ("N arrived -> M continued"), and
+   the reasons indented under the step they belong to.
+
+   THE COLOUR RULE. Candidates stopping is normal - it is most of what
+   this page shows - so "why they stopped" is neutral text. Only genuine
+   faults get the warning colour, and they carry a chip saying so. The
+   previous version painted normal attrition, governor denials and
+   "order status: filled" in the same orange, which is why the owner
+   read the whole panel as errors. */
+.funnel-step { padding: 16px 0 14px 0; border-top: 1px solid var(--hairline); }
+.funnel-step:first-of-type { border-top: none; padding-top: 4px; }
+.funnel-head { display: grid; grid-template-columns: 26px 1fr auto;
+               align-items: baseline; gap: 10px; }
+.funnel-num { width: 22px; height: 22px; border-radius: 50%;
+              background: var(--surface-2); border: 1px solid var(--hairline);
+              color: var(--ink-2); font-size: 11px; font-weight: 700;
+              display: inline-flex; align-items: center;
+              justify-content: center; align-self: center; }
+.funnel-label { font-size: 14px; font-weight: 650; letter-spacing: .01em; }
+.funnel-n { text-align: right; font-variant-numeric: tabular-nums;
+            font-weight: 700; font-size: 22px; line-height: 1; }
+.funnel-track { height: 8px; border-radius: 4px; background: var(--surface-2);
+                border: 1px solid var(--hairline); margin: 8px 0 6px 36px;
+                overflow: hidden; }
+.funnel-bar { display: block; height: 100%; background: var(--series-1); }
+.funnel-flow { display: block; margin-left: 36px; font-size: 12px;
+               color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.funnel-flow.lost b { color: var(--ink); }
+.funnel-plain { margin: 6px 0 0 36px; font-size: 12.5px; color: var(--ink-2);
+                max-width: 78ch; }
+.funnel-why, .funnel-fault { margin: 10px 0 0 36px; max-width: 78ch;
+                             border-left: 2px solid var(--hairline);
+                             padding: 2px 0 2px 12px; }
+.funnel-fault { border-left-color: var(--serious); }
+.funnel-why h4, .funnel-fault h4 { margin: 0 0 4px 0; font-size: 11px;
+                                   letter-spacing: .07em; text-transform: uppercase;
+                                   color: var(--muted); font-weight: 700; }
+.funnel-why ul, .funnel-fault ul { margin: 0; padding: 0; list-style: none; }
+/* Grid, not an inline number: a wrapped reason used to run back under
+   its own count and the machine code trailing it landed in the margin. */
+.funnel-why li, .funnel-fault li { display: grid;
+                                   grid-template-columns: 2.4em 1fr;
+                                   gap: 8px; font-size: 12.5px;
+                                   padding: 3px 0; color: var(--ink-2); }
+.funnel-fault li { color: var(--serious); }
+/* A reason not seen for days is history and must stop wearing the colour
+   that means "wrong right now" (owner-reported: a wall of 400s read as a
+   live fault days after the bug behind them was fixed). */
+.funnel-why li.drop-live { color: var(--ink-2); }
+.funnel-why li.drop-stale, .funnel-why li.drop-stale .funnel-why-n {
+  color: var(--muted); }
+.funnel-why-n { font-weight: 700; font-variant-numeric: tabular-nums;
+                color: var(--ink); text-align: right; }
+/* The machine code beside the sentence: present for grep and for a
+   developer, never competing with the English. */
+.funnel-why .prov, .funnel-fault .prov { display: block; margin: 1px 0 0 0;
+                                         font-size: 11px; }
+.funnel-fault .funnel-why-n { color: var(--serious); }
+.fault-chip { display: inline-block; background: var(--serious); color: #fff;
+              border-radius: 2px; padding: 0 5px; font-size: 10px;
+              letter-spacing: .06em; font-weight: 700; margin-right: 6px;
+              vertical-align: 1px; }
+.quiet { color: var(--muted); font-size: 12px; margin: 0 0 6px 36px;
          max-width: 70ch; }
 .quiet summary { color: var(--muted); font-size: 12px; }
 .quiet code { font-size: 11.5px; }
 @media (max-width: 760px) {
-  .funnel-row { grid-template-columns: 1fr 54px 66px; }
-  .funnel-row .funnel-bar { display: none; }
-  .quiet { margin-left: 0; }
+  .funnel-track, .funnel-flow, .funnel-plain, .funnel-why,
+  .funnel-fault, .quiet { margin-left: 0; }
 }
 """
 
@@ -607,6 +653,42 @@ def page(title: str, body: str, active: str, db_path: str, notes: str = "",
 
 #: Matches a provenance paragraph, including its id when it carries one.
 _PROV_RE = re.compile(r'<p class="prov"[^>]*>.*?</p>', re.S)
+#: Explanation that a SUMMARY page folds away. Every one of these is a
+#: flat element by construction (see note/caveat/prov below), so a
+#: non-greedy match cannot swallow a sibling.
+_EXPLAIN_RE = re.compile(
+    r'<p class="prov"[^>]*>.*?</p>'
+    r'|<div class="note"[^>]*>.*?</div>'
+    r'|<div class="caveat"[^>]*>.*?</div>'
+    r'|<p class="funnel-plain"[^>]*>.*?</p>', re.S)
+
+
+def digest(html: str) -> str:
+    """Fold a section's EXPLANATION away, keeping its figures.
+
+    The overview used to render each panel in full - every provenance
+    line, every standing caveat, every plain-English gloss - which came
+    to 76 words of prose for each figure on the page. A trading desk
+    runs nearer ten. The words are not wrong and they are not deleted:
+    they move into one disclosure per section, and the dedicated page
+    for that panel still shows everything inline.
+
+    Alarms, warnings and empty-result blocks are NEVER folded. Those are
+    not explanation, they are the page telling you something is wrong,
+    and a summary that hides them is worse than no summary.
+    """
+    parts = _EXPLAIN_RE.findall(html)
+    if len(parts) < 2:
+        return html
+    kept = _EXPLAIN_RE.sub("", html)
+    fold = ('<details class="workings"><summary>'
+            f"Why these {len(parts)} figures read as they do, and where they "
+            "came from</summary>" + "".join(parts) + "</details>")
+    # Land the disclosure INSIDE the section, before its closing tag, so
+    # it belongs to the panel it explains rather than drifting to the
+    # foot of the page.
+    idx = kept.rfind("</section>")
+    return kept[:idx] + fold + kept[idx:] if idx != -1 else kept + fold
 
 
 def section(sid: str, title: str, body: str) -> str:

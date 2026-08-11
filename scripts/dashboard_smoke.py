@@ -26,6 +26,7 @@ Nothing here talks to the network beyond localhost.
 
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -149,7 +150,12 @@ def seed_traded_db(path: str) -> None:
                      ("dec-1", rule, bound, requested, kind, binding))
     conn.execute(
         "INSERT INTO orders VALUES (?,?,?,?,?,?,?,?,?,?)",
-        ("ord-1", "dec-1", "b0a1-broker-id", "buy", "4.6", "market", "day",
+        # orders.decision_id holds the CANDIDATE id - that is what
+        # execution/orders.py writes (decision.candidate_id) and what the
+        # foreign key points at. Seeding "dec-1" here made this whole
+        # script die on a FOREIGN KEY constraint, so nothing had been
+        # rendered for real in a while.
+        ("ord-1", "cand-traded-1", "b0a1-broker-id", "buy", "4.6", "market", "day",
          _iso(d5), "filled",
          json.dumps({"id": "b0a1-broker-id", "status": "filled",
                      "filled_avg_price": "42.71",
@@ -344,10 +350,15 @@ class Served:
 import urllib.parse  # noqa: E402  (used by Served.post)
 
 
-ROUTES = ["/", "/performance", "/funnel", "/costs", "/decisions",
-          "/decision?candidate_id=cand-traded-1",
+TRACE_SIMPLE = "/decision?candidate_id=cand-traded-1"
+TRACE_FULL = TRACE_SIMPLE + "&view=full"
+
+ROUTES = ["/", "/performance", "/funnel", "/costs", "/decisions", "/brain",
+          TRACE_SIMPLE, TRACE_FULL,
           "/decision?candidate_id=cand-declined-1",
-          "/refusals", "/logs", "/logs?level=ERROR&q=news", "/setup",
+          "/decision?candidate_id=cand-declined-1&view=full",
+          "/refusals", "/logs", "/logs?level=ERROR&q=news",
+          "/maintenance", "/setup",
           "/health", "/diagnostics.json"]
 
 
@@ -432,7 +443,14 @@ def phase_traded(tmp: Path) -> None:
               and all(isinstance(x, str) for x in bundle["env_var_names_only"]))
 
         # --- decision trace completeness ---
-        trace = pages["/decision?candidate_id=cand-traded-1"]
+        # The audit trail lives on the FULL view; the simple view is the
+        # one-picture summary and must link to it. Checking the simple
+        # view for the prompt (as this did) reported the whole trail
+        # missing when it was one click away.
+        simple = pages[TRACE_SIMPLE]
+        check("simple view links to the full record",
+              "view=full" in simple)
+        trace = pages[TRACE_FULL]
         for needle, label in [
             ("the exact prompt sent", "prompt the model saw"),
             ("verbatim API response and usage", "raw API turns"),
@@ -448,7 +466,7 @@ def phase_traded(tmp: Path) -> None:
         check("trace feature-detects the evidence graph rather than assuming it",
               "graph_assertions" in trace)
 
-        declined = pages["/decision?candidate_id=cand-declined-1"]
+        declined = pages["/decision?candidate_id=cand-declined-1&view=full"]
         check("declined trace says code overruled the model",
               "Code overruled the model here" in declined)
 
@@ -500,13 +518,29 @@ def phase_traded(tmp: Path) -> None:
 
         status, _, body = s.post("/setup", {"anything": "1"})
         check("setup POST is an honest 501 stub", status == 501, f"got {status}")
-        check("setup stub names its owner",
-              "integration-engineer" in body)
+        check("setup stub says who mounts the real thing",
+              "catalyst.orchestrator.scheduler" in body, body[:300])
+        check("a POST the setup app declines does not hang the connection",
+              status == 501,
+              "do_POST used to read the request body twice, blocking the "
+              "request thread on an empty socket until the client gave up")
         check("setup GET marks the mount point",
               "MOUNT POINT - NOT IMPLEMENTED HERE" in pages["/setup"])
 
         status, _, _ = s.get("/no-such-route")
         check("unknown route is a 404, not a crash", status == 404, f"got {status}")
+
+
+def _funnel_counts(html: str) -> list:
+    """The step counts, read off the RENDERED page rather than the
+    query - "200% kept" was visible in the HTML and in nothing else."""
+    return [int(m) for m in re.findall(
+        r'<span class="funnel-n">(\d+)</span>', html)]
+
+
+def _funnel_counts_narrow(html: str) -> bool:
+    counts = _funnel_counts(html)
+    return bool(counts) and counts == sorted(counts, reverse=True)
 
 
 def phase_empty(tmp: Path) -> None:
@@ -534,20 +568,49 @@ def phase_empty(tmp: Path) -> None:
         check("GET /funnel -> 200", status == 200)
         check("funnel names the stage responsible for no trades",
               "Why it has not traded" in funnel
-              and "risk engine proposed a trade" in funnel,
+              and "Risk engine approved a trade" in funnel,
               funnel[funnel.find("blame"):][:400])
-        check("funnel names the largest drop reason at that stage",
+        check("funnel names the largest drop reason in ENGLISH",
+              "bigger than this account is allowed to lose" in funnel)
+        check("the machine code is still there beside the English",
               "adverse_gap_assumption_exceeds_max_loss_per_position" in funnel)
         check("funnel shows the binding hard limit",
-              "limit bound: max_loss_per_position (hard)" in funnel)
+              "max_loss_per_position (hard)" in funnel)
+        check("normal attrition is NOT painted as a fault",
+              "Why they stopped here" in funnel
+              and 'class="funnel-fault"' not in
+                  funnel.split("Why they stopped here")[1].split("</div>")[0],
+              "candidates stopping is the system working; only faults get "
+              "the warning colour")
+        check("no funnel step is wider than the one above it",
+              _funnel_counts_narrow(funnel), _funnel_counts(funnel))
         check("funnel page ids stay unique", not duplicate_ids(funnel),
               str(duplicate_ids(funnel)))
 
         status, _, logs = s.get("/logs")
+        check("GET /logs -> 200 on an empty log", status == 200)
+        check("an empty log prints its own query and row count",
+              "rows returned: <b>0</b>" in logs
+              and "FROM logs ORDER BY" in logs
+              and "absence of data, not a fault" in logs,
+              logs[logs.find("Empty result"):][:300])
+
+    # A database predating the logs table - what an in-place upgrade of an
+    # old install actually looks like. init_db now always creates it, so
+    # the only way to reach this branch is to take it away.
+    stale = str(tmp / "no-logs-table.db")
+    seed_empty_db(stale)
+    conn = sqlite3.connect(stale)
+    conn.execute("DROP TABLE logs")
+    conn.commit()
+    conn.close()
+    with Served(stale) as s:
+        status, _, logs = s.get("/logs")
         check("GET /logs -> 200 when the logs table is absent", status == 200)
         check("absent logs table is named, not blank",
               "logs table is not in this database" in logs
-              and "schema_logs.sql" in logs)
+              and "schema_logs.sql" in logs,
+              logs[logs.find("Empty result"):][:300])
 
         status, _, costs = s.get("/costs")
         check("zero spend prints its query and the raw upstream payload",

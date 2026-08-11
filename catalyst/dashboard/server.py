@@ -27,6 +27,7 @@ from catalyst.dashboard.db import Db, db_path
 from catalyst.dashboard.redact import redact_obj
 from catalyst.dashboard.render import (
     alarm,
+    digest,
     dollars,
     duplicate_ids,
     esc,
@@ -125,13 +126,19 @@ def route_overview(db: Db, params: dict) -> str:
     # the one number the owner opens this page for; it used to sit below
     # a performance panel that leads with a comparison unavailable in the
     # account's first days.
+    # THE OVERVIEW IS A SUMMARY. Each panel renders here with its
+    # explanation folded into one disclosure (render.digest); the
+    # dedicated page for that panel, one click away in the nav, still
+    # shows every word inline. Rendering all of it here came to 76 words
+    # of prose per figure, which is how the page came to read as an
+    # essay with numbers in it rather than an instrument.
     body = (
         panels.state_line(db, p="state")
-        + panels.value_reconciliation_panel(db, p="ovval")
-        + panels.performance_panel(db, p="perf")
-        + panels.funnel_panel(db, p="funnel")
-        + panels.cost_panel(db, p="ovcost", compact=True)
-        + panels.alerts_panel(db, p="alerts")
+        + digest(panels.value_reconciliation_panel(db, p="ovval"))
+        + digest(panels.performance_panel(db, p="perf"))
+        + digest(panels.funnel_panel(db, p="funnel"))
+        + digest(panels.cost_panel(db, p="ovcost", compact=True))
+        + digest(panels.alerts_panel(db, p="alerts"))
     )
     return render_page("Overview", body, "/", db.path, db=db)
 
@@ -525,14 +532,21 @@ class Handler(BaseHTTPRequestHandler):
         self.do_GET()
 
     def do_POST(self):
+        # READ THE BODY EXACTLY ONCE. The /setup branch below used to read
+        # it and then fall through to a second read of the same
+        # Content-Length; when the setup app declined the request (nothing
+        # mounted, or a sub-path it does not handle) that second read
+        # blocked on a socket with nothing left to send, and the request
+        # thread hung until the client timed out. Found by running
+        # scripts/dashboard_smoke.py, which hung on exactly that call.
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else b""
+
         if self.path.startswith("/setup"):
-            length = int(self.headers.get("Content-Length") or 0)
-            body = self.rfile.read(length) if length else b""
             if self._delegate_setup("POST", body):
                 return
         parsed = urlparse(self.path)
-        length = int(self.headers.get("Content-Length") or 0)
-        raw_body = self.rfile.read(length).decode("utf-8") if length else ""
+        raw_body = body.decode("utf-8", "replace")
         form = {k: v[0] for k, v in parse_qs(raw_body).items()}
         db_file = self.db_file or db_path()
 
