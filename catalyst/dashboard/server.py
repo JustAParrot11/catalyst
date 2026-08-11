@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from catalyst.dashboard import panels, queries
-from catalyst.dashboard.build import BUILD_HASH
+from catalyst.dashboard.build import BUILD_HASH, build_manifest
 from catalyst.dashboard.db import Db, db_path
 from catalyst.dashboard.redact import redact_obj
 from catalyst.dashboard.render import (
@@ -244,6 +244,7 @@ def diagnostics_bundle(db: Db) -> dict:
     bundle = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "build_hash": BUILD_HASH,
+        "build_manifest": build_manifest(),
         "python": sys.version,
         "db_path": db.path,
         "db_open_error": db.open_error,

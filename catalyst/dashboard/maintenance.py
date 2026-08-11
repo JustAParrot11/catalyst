@@ -153,8 +153,36 @@ def stored_credentials_checks() -> list[Check]:
     return out
 
 
+def build_checks() -> list[Check]:
+    """Which files the running dashboard is actually made of.
+
+    Owner-reported 2026-08-11: the page showed a build hash matching no
+    commit in any branch. That proves the running files differ from
+    every released version and says nothing about how - a fingerprint
+    with no provenance, which is the one thing this dashboard is not
+    supposed to print. The manifest makes the next mismatch answerable
+    from the browser instead of over SSH.
+    """
+    from catalyst.dashboard.build import build_manifest
+
+    m = build_manifest()
+    listing = "\n".join(
+        f"{x['name']:<20} {x['sha256']}  {x['bytes']:>7} bytes"
+        for x in m["files"])
+    return [Check(
+        "Dashboard build", "The bot itself", OK,
+        f"{m['build_hash']} from {m['file_count']} file(s)",
+        "This is the hash printed in the sidebar and by the upgrade. If "
+        "they differ, the browser is showing a cached page. If it matches "
+        "no released version, the file list below says which file is "
+        "unexpected - an extra one, a missing one, or one whose contents "
+        "differ.",
+        raw=f"hashed from {m['directory']}\n\n{listing}")]
+
+
 def passive_checks(db) -> list[Check]:
     out: list[Check] = list(stored_credentials_checks())
+    out.extend(build_checks())
 
     def one(sql, params=()):
         try:
