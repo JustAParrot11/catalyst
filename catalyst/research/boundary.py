@@ -22,13 +22,17 @@ import json
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Callable, Literal
 
 from catalyst.cost import CostEstimate
 from catalyst.cost.governor import authorize
-from catalyst.cost.pricing import UnknownModelError
+from catalyst.cost.pricing import (
+    WEB_SEARCH_CENTS_PER_QUERY,
+    UnknownModelError,
+    rates_for,
+)
 from catalyst.cost.tracker import (
     UNPARSEABLE_USAGE_KEY,
     UnrecognizedUsageFieldError,
@@ -48,6 +52,10 @@ from catalyst.research.schema import (
 RESEARCH_MODEL = "claude-sonnet-5"      # judgement calls; cheap enough to
                                         # keep the $5/month cap honest
 MAX_EXPLORATION_TURNS = 2               # pause_turn continuations included
+#: Output cap per turn. 512 truncated a real forced tool call mid-JSON
+#: and wasted the paid call, so this does not go back down.
+MAX_EXPLORATION_TOKENS = 2048
+_MTOK = Decimal(1_000_000)
 
 # Pre-call estimates, deliberately pessimistic (the governor compares
 # against these BEFORE the call; an optimistic estimate is a hole in the
@@ -57,8 +65,54 @@ MAX_EXPLORATION_TURNS = 2               # pause_turn continuations included
 # 12.63c for exploration: 24k tokens in (web search results are large),
 # 2.3k out, 2 searches at 1c each. 15c covers that with a third search;
 # extraction measured ~1.3c, 8c leaves headroom for a repair turn.
-EXPLORATION_TURN_ESTIMATE_CENTS = Decimal("15")
+#
+# THE FLAT CONSTANT WAS THE HOLE. 15c was calibrated when BASE_SEARCHES
+# = 3 was the only search budget there was. CONJUNCTION_SEARCHES = 10
+# broke it, and priced against the live rate table the gap is not small:
+#
+#     searches  input     today (intro)   after 2026-08-31
+#      3        24k        9.85c   ok      13.27c   ok
+#     10        24k       16.85c   OVER    20.27c   OVER
+#     10        60k       24.05c   OVER    31.07c   OVER
+#     10       120k       36.05c   OVER    49.07c   OVER
+#
+# Two things move underneath the estimate and BOTH are known before the
+# call: how many searches this candidate earned, and what the model
+# costs on the day. Sonnet 5's introductory rate ends 2026-08-31, which
+# lifts every figure above by ~50% on a date already in the calendar -
+# a flat constant would silently become optimistic overnight.
+#
+# Pessimism here is cheap. The governor compares the estimate against
+# ACTUAL month-to-date spend rather than reserving it, so an overestimate
+# costs only at the cap boundary; an underestimate costs the cap itself.
+EXPLORATION_TURN_ESTIMATE_CENTS = Decimal("15")   # base path, no searches
 EXTRACTION_TURN_ESTIMATE_CENTS = Decimal("8")
+
+#: Input tokens a single web search adds. MEASURED: the first live
+#: research call (2026-08-10) sent 24k input tokens carrying 2 searches
+#: against a ~2k prompt, so ~11k per search. Rounded up, because the
+#: estimate must not be the optimistic side of a measurement of one.
+INPUT_TOKENS_PER_SEARCH = 12_000
+#: The prompt itself, before any search results come back.
+PROMPT_TOKENS_ESTIMATE = 2_000
+
+
+def exploration_turn_estimate_cents(searches: int,
+                                    on_date: date | None = None,
+                                    model: str = RESEARCH_MODEL) -> Decimal:
+    """Pessimistic cost of one exploration turn at this search budget.
+
+    Priced through rates_for(), the same table that prices the actual
+    bill, so the estimate cannot drift away from what is charged when a
+    rate changes. Search itself is exact: 1c a query (TRAPS.md), and the
+    query count is the budget this candidate earned.
+    """
+    on_date = on_date or datetime.now(timezone.utc).date()
+    in_rate, out_rate = rates_for(model, on_date)
+    input_tokens = PROMPT_TOKENS_ESTIMATE + searches * INPUT_TOKENS_PER_SEARCH
+    return (Decimal(input_tokens) * in_rate / _MTOK
+            + Decimal(MAX_EXPLORATION_TOKENS) * out_rate / _MTOK
+            + Decimal(searches) * WEB_SEARCH_CENTS_PER_QUERY)
 
 
 @dataclass(frozen=True)
@@ -299,9 +353,24 @@ def investigate(
             transport_errors.append(f"invalid_request_not_sent: {bad}")
             return None
         forced = (payload.get("tool_choice") or {}).get("type") == "tool"
+        # The exploration estimate is derived from THIS candidate's
+        # search budget at TODAY's rate, not a flat constant: a
+        # conjunction buys ten searches where the base path buys three,
+        # and Sonnet 5's introductory pricing ends 2026-08-31.
+        if forced:
+            cents = EXTRACTION_TURN_ESTIMATE_CENTS
+        else:
+            try:
+                cents = exploration_turn_estimate_cents(search_budget,
+                                                        model=model)
+            except UnknownModelError:
+                # No rate for this model means record_usage cannot price
+                # the call either, and has_unpriced_rows will block the
+                # next authorization. Estimate high so this turn is the
+                # one that stops, rather than sliding under the cap.
+                cents = EXPLORATION_TURN_ESTIMATE_CENTS * 4
         estimate = CostEstimate(
-            estimated_cents=(EXTRACTION_TURN_ESTIMATE_CENTS if forced
-                             else EXPLORATION_TURN_ESTIMATE_CENTS),
+            estimated_cents=cents,
             basis="pre-registered per-turn pessimistic estimate (boundary.py)",
             kind=cost_context.kind, component="research")
         decision = authorize(estimate, conn,
@@ -357,7 +426,7 @@ def investigate(
     # ---- exploration: tool_choice auto, server-side web search loops
     # inside one request; pause_turn continues it.
     turn = run_turn({
-        "model": model, "max_tokens": 2048,
+        "model": model, "max_tokens": MAX_EXPLORATION_TOKENS,
         "messages": messages, "tools": tools,
         "tool_choice": {"type": "auto"},
     })
@@ -375,7 +444,7 @@ def investigate(
             break            # nothing to continue from; go to extraction
         messages.append(echo)
         turn = run_turn({
-            "model": model, "max_tokens": 2048,
+            "model": model, "max_tokens": MAX_EXPLORATION_TOKENS,
             "messages": messages,
             "tools": _tools_with_remaining_searches(
                 search_budget, turns, tools),
@@ -424,7 +493,7 @@ def investigate(
     last_error: str | None = None
     for attempt in ("first", "repair"):
         turn = run_turn({
-            "model": model, "max_tokens": 2048,
+            "model": model, "max_tokens": MAX_EXPLORATION_TOKENS,
             "messages": messages,
             "tools": [SUBMIT_RESEARCH_VIEW_TOOL],
             "tool_choice": {"type": "tool", "name": "submit_research_view"},
