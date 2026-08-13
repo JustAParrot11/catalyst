@@ -518,14 +518,14 @@ def _run_one_cycle(db_file: str):
         """
         from catalyst.discovery.conjunctions import build_conjunction_candidates
 
+        from catalyst.discovery.conjunctions import merge_with_form4
+
         out = list(build_candidates(raw_events, as_of))
-        seen = {c.id for c in out}
         try:
             extra, dropped = build_conjunction_candidates(raw_events, as_of)
-            for cand in extra:
-                if cand.id not in seen:
-                    seen.add(cand.id)
-                    out.append(cand)
+            # One candidate per COMPANY per pass. See merge_with_form4.
+            out, duplicates = merge_with_form4(out, extra)
+            dropped.extend(duplicates)
             _log.info("Conjunctions: %d candidate(s) from cross-feed "
                       "agreement, %d considered and dropped.",
                       len(extra), len(dropped))

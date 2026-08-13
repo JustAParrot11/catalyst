@@ -184,8 +184,9 @@ def render_research_prompt(candidate: Candidate,
         "answer.\n"
         "- Report judgements, not instructions: nothing about how much to "
         "trade, and no order, entry, stop or exit levels.\n"
-        "- When asked, submit your conclusion via the submit_research_view "
-        "tool; its fields match the six answers above."
+        "- Submit your conclusion via the submit_research_view tool once "
+        "you have searched as much as you need to; its fields match the "
+        "six answers above. Do not wait to be asked."
     )
     return "\n\n".join(sections)
 

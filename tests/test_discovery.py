@@ -323,3 +323,83 @@ def test_exploration_tools_is_web_search_only():
     tools = exploration_tools()
     assert tools == [{"type": "web_search_20250305", "name": "web_search",
                       "max_uses": 3}]
+
+
+class TestTheSafetyInstructionsArePRESENT:
+    """risk-reviewer, 2026-08-13: every instruction below can be DELETED
+    with a green suite, because test_prompt_has_no_size_shaped_words
+    only checks the prompt does not CONTAIN bad words - nothing checks
+    the guards are there at all. Verified by sabotage: deleting both
+    safety lines produced zero prompt-related failures.
+
+    These are the only textual defence against model-authored price
+    levels. The schema blocks size-shaped FIELDS; it does not block a
+    stop level written into `thesis` - and thesis and invalidation are
+    replayed verbatim into the position-review prompt, which drives an
+    exit. So a model-authored level can propagate model -> text ->
+    model -> early exit.
+    """
+
+    def _prompt(self):
+        return render_research_prompt(
+            build_candidates(one_cluster_events(), AS_OF)[0])
+
+    def test_the_model_is_told_not_to_name_levels(self):
+        text = self._prompt()
+        assert "Report judgements, not instructions" in text
+        assert "no order, entry, stop or exit levels" in text
+
+    def test_the_opener_says_the_answer_is_advisory(self):
+        """The architecture rule that is not negotiable: the model
+        proposes, deterministic code disposes."""
+        text = self._prompt()
+        assert "advisory only" in text
+        assert "deterministic code" in text
+
+    def test_no_trade_is_encouraged_not_merely_permitted(self):
+        """Everything downstream is a threshold on model-reported
+        conviction, and the refusal tracker only samples refusals tagged
+        below_conviction_floor. If conviction inflates, more candidates
+        clear the floor AND the evidence that would detect the inflation
+        dries up - the loop degrades exactly when it is needed."""
+        text = self._prompt()
+        assert "Say no_trade freely" in text
+        assert "a bad trade costs real money" in text
+
+    def test_the_holding_period_is_anchored(self):
+        """expected_holding_days is a live model-to-timing channel: it
+        sets the hard exit date, clamped only at 31 days. Without an
+        anchor, views drift to the bound and days-at-risk of an
+        overnight gap roughly triples."""
+        text = self._prompt()
+        assert "days to weeks" in text
+        assert "expected_holding_days" in text
+
+    def test_the_model_is_told_to_submit_WITHOUT_being_asked(self):
+        """token-optimizer, 2026-08-13. boundary.py:202 offers the schema
+        tool DURING exploration so a view submitted while the search
+        results are in hand skips the forced extraction turn - which
+        re-sends the ENTIRE context, 24k tokens on the measured live
+        call, to collect a few hundred tokens of JSON. That is 38% of a
+        candidate's cost.
+
+        The old wording, "When asked, submit your conclusion", told the
+        model to WAIT for a prompt that only the extraction turn issues -
+        defeating the short-circuit the code was built for. The saving
+        exists only while the prompt does not reinstate the wait.
+        """
+        text = self._prompt()
+        assert "Do not wait to be asked" in text
+        assert "When asked, submit" not in text, (
+            "this wording tells the model to wait for the extraction "
+            "turn, which is the full-price context re-read")
+
+    def test_thesis_and_invalidation_are_still_asked_for(self):
+        """The risk engine never reads these, so they look like pure
+        audit cost. They are the entire input to the position review,
+        and invalidation_triggered is meaningless without a specific
+        invalidation written at entry."""
+        text = self._prompt()
+        assert "thesis" in text
+        assert "invalidation" in text
+        assert "prove the thesis wrong" in text or "invalidation" in text

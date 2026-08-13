@@ -13,6 +13,7 @@ supplies the live pieces.
 """
 
 import json
+import sqlite3
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -592,6 +593,22 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
         if conn.execute("SELECT 1 FROM research_views WHERE candidate_id=?",
                         (c.id,)).fetchone():
             screen_reasons.append(f"{c.id}: already_researched")
+        elif _failed_attempts(conn, c.id) >= MAX_RESEARCH_ATTEMPTS:
+            # A PAID CALL THAT FAILED LEFT NO TRACE THE SCREEN COULD SEE.
+            # research_views is written only when a view PARSES
+            # (boundary.py), so an invalid view, a truncated extraction
+            # or a transport error made the candidate fresh again fifteen
+            # minutes later - forever. Reproduced: 6 paid calls for one
+            # stuck candidate over 6 cycles, ~51c a cycle, which spends
+            # the whole $5 monthly cap in under an hour on a candidate
+            # that never produces anything.
+            #
+            # The bound is on REPEATED failure, not on any failure: one
+            # transient 529 must not permanently discard a good
+            # candidate.
+            screen_reasons.append(
+                f"{c.id}: research_failed_{MAX_RESEARCH_ATTEMPTS}_times: "
+                + str(_last_skip_reason(conn, c.id) or "no reason recorded"))
         elif c.ticker in open_tickers:
             screen_reasons.append(f"{c.id}: position_already_open")
         elif existing and (existing[0] != c.ticker
@@ -760,6 +777,40 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
 
 
 MAX_QUOTE_AGE = timedelta(minutes=10)
+
+
+#: How many paid attempts one candidate gets before the pipeline stops
+#: buying it. Two, because the failure modes worth retrying (a transient
+#: overload, a one-off malformed tool call) clear on the second try, and
+#: anything that fails twice is structural.
+MAX_RESEARCH_ATTEMPTS = 2
+
+
+def _failed_attempts(conn, candidate_id: str) -> int:
+    """Paid research calls for this candidate that produced no view.
+
+    Counts research_calls rows that actually reached the API - a row
+    with a skipped_reason set by the governor never spent anything and
+    must not count against the candidate.
+    """
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM research_calls WHERE candidate_id = ? "
+            "AND (skipped_reason IS NULL OR skipped_reason NOT LIKE "
+            "'budget_denied%')", (candidate_id,)).fetchone()
+        return int(row[0]) if row else 0
+    except sqlite3.Error:
+        return 0
+
+
+def _last_skip_reason(conn, candidate_id: str) -> str:
+    try:
+        row = conn.execute(
+            "SELECT skipped_reason FROM research_calls WHERE candidate_id = ? "
+            "ORDER BY called_at DESC LIMIT 1", (candidate_id,)).fetchone()
+        return str(row[0]) if row and row[0] else ""
+    except sqlite3.Error:
+        return ""
 
 
 def build_market_snapshot(broker: Broker, ticker: str,

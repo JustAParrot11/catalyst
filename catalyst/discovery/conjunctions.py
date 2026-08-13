@@ -40,13 +40,22 @@ from datetime import date, datetime, timedelta, timezone
 from catalyst.discovery import Candidate
 from catalyst.discovery.links import find_links
 
-#: Feeds whose events this builder consumes. Form 4 is deliberately NOT
-#: here: it has its own clusterer, which is line-for-line the backtest
-#: arm, and re-deriving those candidates by a second route would put two
-#: rows on the funnel for one piece of evidence. Form 4 events still
-#: PARTICIPATE in a conjunction - they are what makes a link cross-feed -
-#: they just do not create candidates here.
-SOURCES = ("edgar_fts", "alpaca_news")
+#: FORM 4 DOES PARTICIPATE, and must.
+#:
+#: An earlier version of this comment claimed Form 4 was excluded here,
+#: and named a constant that build_conjunction_candidates never read -
+#: so the documentation and the code disagreed, and the code was right.
+#: Excluding it would be wrong: "insiders bought AND an earnings call is
+#: scheduled" is the owner's own worked example, and it is only findable
+#: because a Form 4 event can be one half of a cross-feed link.
+#:
+#: The real risk the old comment was reaching for is DOUBLE-COUNTING: a
+#: ticker with a qualifying insider cluster AND a news story would
+#: produce a Form 4 cluster candidate and a conjunction candidate, and
+#: both would be researched at ~34c each. That is handled where it
+#: belongs - at the merge in scheduler.build_candidates_all, by ticker -
+#: not by blinding this builder to a feed it needs.
+PARTICIPATING_SOURCES = ("edgar_form4", "edgar_fts", "alpaca_news")
 
 #: How stale the newest signal may be. A conjunction whose most recent
 #: half is three weeks old is not news about now.
@@ -253,3 +262,39 @@ def default_window(now: datetime | None = None) -> tuple[datetime, datetime]:
     trimming the filing side would remove it."""
     end = now or datetime.now(timezone.utc)
     return end - timedelta(days=21), end
+
+
+def merge_with_form4(form4_candidates: list, conjunction_candidates: list):
+    """(kept, dropped) - one candidate per COMPANY per pass.
+
+    A ticker with a qualifying insider cluster AND a news story produces
+    a Form 4 cluster candidate and a conjunction candidate: different
+    ids, same company. Both would be researched at ~34c each, spending
+    two of the three research slots on one name.
+
+    The Form 4 cluster wins. It is the graded strategy - line-for-line
+    the backtest arm - and its events are already one half of the
+    conjunction anyway, so nothing is lost by preferring it.
+
+    A module-level function rather than a closure inside the scheduler,
+    because a closure cannot be tested by running it, and "test the
+    behaviour" is the only way this class of bug gets caught: the
+    previous guard asserted on a CONSTANT that the code never read.
+    """
+    kept = list(form4_candidates)
+    seen_ids = {c.id for c in kept}
+    seen_tickers = {c.ticker for c in kept}
+    dropped: list = []
+    for cand in conjunction_candidates:
+        if cand.ticker in seen_tickers:
+            dropped.append((cand.ticker,
+                            "already a Form 4 cluster candidate this pass; "
+                            "researching both would pay twice for one "
+                            "company"))
+            continue
+        if cand.id in seen_ids:
+            continue
+        seen_ids.add(cand.id)
+        seen_tickers.add(cand.ticker)
+        kept.append(cand)
+    return kept, dropped
