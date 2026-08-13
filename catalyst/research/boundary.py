@@ -96,6 +96,47 @@ def _assistant_echo(turn) -> dict | None:
     return {"role": "assistant", "content": content}
 
 
+def searches_used(turns) -> int:
+    """Web searches billed across this investigation so far.
+
+    Read from the usage object each turn already records, so it counts
+    what was CHARGED rather than what was intended. A turn whose usage
+    could not be parsed contributes 0 - the governor's per-turn spend
+    check is the hard gate above this, and guessing high here would
+    silently deny a candidate searches it paid for.
+    """
+    total = 0
+    for turn in turns:
+        usage = getattr(turn, "usage", None)
+        total += int(getattr(usage, "web_search_requests", 0) or 0)
+    return total
+
+
+def _tools_with_remaining_searches(budget: int, turns, tools: list) -> list:
+    """`tools` for a continuation, with the search budget carried over.
+
+    `max_uses` is per REQUEST. Re-sending the same tools list on a
+    pause_turn continuation hands the model a FRESH allowance, so a
+    candidate granted CONJUNCTION_SEARCHES could spend that many again
+    on every continued turn. Web search is $10 per 1,000 queries
+    (TRAPS.md) on top of tokens and is the one line of the bill the
+    model moves directly, so the budget has to mean the investigation,
+    not the request.
+
+    With the allowance spent, web_search is dropped rather than offered
+    at `max_uses: 0` - a zero budget is not a documented way to say "no
+    searches left", and a rejected request costs a paid call. Every
+    other tool survives, including the schema tool whose early
+    submission is what avoids the full-price extraction re-read.
+    """
+    remaining = budget - searches_used(turns)
+    kept = [t for t in tools if t.get("name") != "web_search"]
+    if remaining <= 0:
+        return kept
+    return [dict(t, max_uses=remaining) if t.get("name") == "web_search"
+            else t for t in tools]
+
+
 #: Message shapes the Messages API rejects with a 400. Checked LOCALLY,
 #: before the request, so the funnel names the actual defect instead of
 #: showing a status code the owner has to guess at.
@@ -107,12 +148,21 @@ def _assistant_echo(turn) -> dict | None:
 #: whole investigation with it. The owner reported the 400s as "quite
 #: prevalent" a day later, which is exactly what an opaque error looks
 #: like whether or not it is still happening.
-def invalid_payload_reason(payload: dict) -> str | None:
+def invalid_payload_reason(payload: dict,
+                           *, continuing_pause_turn: bool = False) -> str | None:
     """Why the Messages API would reject this, or None if it looks sound.
 
     Deliberately conservative: it rejects only shapes that are certainly
     invalid. A false positive here silently skips a candidate that would
     have worked, which is worse than the 400 it is trying to prevent.
+
+    `continuing_pause_turn` is that false positive, found by running.
+    Continuing a paused server-tool loop means sending the assistant's
+    partial turn back with NO user message after it - the exact shape
+    the trailing-assistant rule below refuses. So every continuation the
+    exploration loop made was killed locally, after the paid call, and
+    MAX_EXPLORATION_TURNS=2 bought exactly one turn. The caller says
+    when a trailing assistant message is intended; it is never assumed.
     """
     messages = payload.get("messages")
     if not isinstance(messages, list) or not messages:
@@ -142,11 +192,11 @@ def invalid_payload_reason(payload: dict) -> str | None:
                         f"{type(block).__name__}")
             if not block.get("type"):
                 return f"message {i} content block {j} has no 'type'"
-    if messages[-1].get("role") == "assistant":
-        # A trailing assistant message asks the API to CONTINUE it, which
-        # is valid but never what this loop intends - it means an echo
-        # was appended without the follow-up user turn, and the model
-        # would be prompted with nothing to answer.
+    if messages[-1].get("role") == "assistant" and not continuing_pause_turn:
+        # A trailing assistant message asks the API to CONTINUE it. That
+        # is exactly right for a pause_turn and wrong everywhere else,
+        # where it means an echo was appended without the follow-up user
+        # turn and the model is prompted with nothing to answer.
         return ("the last message is from the assistant with no user turn "
                 "after it - a continuation was appended without its prompt")
     if not payload.get("model"):
@@ -213,8 +263,9 @@ def investigate(
     # allowance because its question ("do these connect?") is genuinely
     # open and the answer lives in reporting the feeds do not carry.
     # An ordinary candidate keeps the base allowance.
+    search_budget = prompts.searches_for(candidate, signals)
     tools = list(prompts.exploration_tools(
-        prompts.searches_for(candidate, signals))) + [SUBMIT_RESEARCH_VIEW_TOOL]
+        search_budget)) + [SUBMIT_RESEARCH_VIEW_TOOL]
     tools_offered = tuple(t.get("name", t.get("type", "?")) for t in tools)
 
     turns: list[APITurn] = []
@@ -234,14 +285,16 @@ def investigate(
         _persist(log, conn)
         return log
 
-    def run_turn(payload: dict) -> APITurn | None:
+    def run_turn(payload: dict,
+                 *, continuing_pause_turn: bool = False) -> APITurn | None:
         """validate -> authorize -> call -> record -> price. None = stop."""
         nonlocal cost_cents
         # BEFORE SPENDING ANYTHING. A payload the API will certainly
         # reject must not consume a paid call and must not come back as
         # a status code the owner has to guess at - it names itself, in
         # the funnel, in English.
-        bad = invalid_payload_reason(payload)
+        bad = invalid_payload_reason(
+            payload, continuing_pause_turn=continuing_pause_turn)
         if bad is not None:
             transport_errors.append(f"invalid_request_not_sent: {bad}")
             return None
@@ -323,9 +376,11 @@ def investigate(
         messages.append(echo)
         turn = run_turn({
             "model": model, "max_tokens": 2048,
-            "messages": messages, "tools": tools,
+            "messages": messages,
+            "tools": _tools_with_remaining_searches(
+                search_budget, turns, tools),
             "tool_choice": {"type": "auto"},
-        })
+        }, continuing_pause_turn=True)
         if turn is None:
             return finish(None, transport_errors[0] if transport_errors
                           else "budget_denied")

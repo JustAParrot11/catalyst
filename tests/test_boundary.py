@@ -162,6 +162,46 @@ class TestInvestigate:
         assert len(result.api_turns) == 3
         assert result.parsed_view is not None
 
+    def test_a_pause_turn_WITH_content_is_actually_continued(self, db):
+        """The bounded test above passes empty content, so _assistant_echo
+        returns None and the loop BREAKS - it never exercises the
+        continuation it is named after.
+
+        A real pause_turn carries content. Continuing it means sending
+        the assistant's partial turn back with no user message after it,
+        and that is precisely the shape invalid_payload_reason rejected:
+        every continuation this loop made was killed locally, after the
+        paid exploration call, with `invalid_request_not_sent`. So
+        MAX_EXPLORATION_TURNS=2 bought one turn, and a candidate whose
+        search loop paused was charged and then abandoned.
+
+        Continuing a pause_turn is the documented shape, not a mistake.
+        """
+        paused = {"content": [{"type": "text", "text": "searching"}],
+                  "stop_reason": "pause_turn", "usage": dict(USAGE)}
+        transport, log = transport_script([paused, extraction_response()])
+        result = investigate(candidate(), ctx(db), transport)
+
+        assert result.skipped_reason is None, result.skipped_reason
+        assert result.parsed_view is not None
+        assert len(log) == 2, (
+            "the paused turn was never continued - the second request is "
+            "missing, so the paid first call bought nothing")
+        assert log[1]["messages"][-1]["role"] == "assistant", (
+            "a pause_turn is continued by sending the assistant's partial "
+            "turn back; anything else restarts the search")
+
+    def test_a_stray_trailing_assistant_turn_is_STILL_refused(self, db):
+        """The allowance above must be narrow. Outside a pause_turn
+        continuation a trailing assistant message means an echo was
+        appended without its prompt, and the model is asked nothing."""
+        reason = boundary.invalid_payload_reason({
+            "model": "m", "max_tokens": 10,
+            "messages": [{"role": "user", "content": "hi"},
+                         {"role": "assistant", "content": [
+                             {"type": "text", "text": "partial"}]}]})
+        assert reason is not None and "assistant" in reason
+
     def test_no_tool_call_in_extraction(self, db):
         # the live API can ignore `required` on forced tool calls, so a
         # bad extraction gets ONE bounded repair turn before skipping

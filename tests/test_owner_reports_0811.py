@@ -28,6 +28,17 @@ def _payload(messages, **kw):
     return base
 
 
+def _guard_candidate():
+    from catalyst.discovery import Candidate
+
+    now = datetime.now(timezone.utc)
+    return Candidate(
+        id="cand-guard", ticker="GRD", catalyst_type="insider_cluster",
+        catalyst_date=now.date() + timedelta(days=5),
+        catalyst_date_confidence="confirmed", source_event_ids=("e1",),
+        discovered_at=now, sector="tech", correlation_tags=("tech",))
+
+
 class TestTheFourHundredNamesItselfNow:
     """The instance was fixed on 2026-08-10 (an empty content array in
     the echoed assistant turn). Fixing one instance is not fixing the
@@ -79,17 +90,45 @@ class TestTheFourHundredNamesItselfNow:
             {"model": "m", "max_tokens": 0,
              "messages": [{"role": "user", "content": "x"}]}) or "")
 
-    def test_the_guard_runs_before_the_transport(self):
+    def test_the_guard_runs_before_the_transport(self, tmp_path):
         """It must cost nothing. A payload the API would certainly reject
-        must not consume a paid call."""
-        import inspect
+        must not consume a paid call.
 
-        from catalyst.research import boundary
+        Proved by RUNNING, not by reading investigate()'s source for the
+        order of two strings: that spelling broke the moment the guard
+        grew a keyword argument, and a test that tracks the spelling of
+        a call rather than its effect protects nothing.
+        """
+        import sqlite3
+        from decimal import Decimal
 
-        src = inspect.getsource(boundary.investigate)
-        guard = src.index("invalid_payload_reason(payload)")
-        call = src.index("response = transport(payload)")
-        assert guard < call, "the payload is sent before it is validated"
+        from catalyst.research import boundary, prompts
+
+        conn = sqlite3.connect(str(tmp_path / "guard.db"))
+        conn.executescript(open("catalyst/storage/schema.sql").read())
+        conn.commit()
+
+        # An empty rendered prompt makes the FIRST payload invalid, so
+        # the guard has to fire before anything is sent.
+        original = prompts.render_research_prompt
+        prompts.render_research_prompt = lambda c, **kw: ""
+        calls = []
+        try:
+            log = boundary.investigate(
+                _guard_candidate(),
+                boundary.CostContext(conn=conn,
+                                     governor_profit_share=Decimal("0"),
+                                     cycle_id="c", kind="scheduled"),
+                lambda payload: calls.append(payload) or {})
+        finally:
+            prompts.render_research_prompt = original
+        conn.close()
+
+        assert calls == [], (
+            "the payload was SENT before it was validated - that is a "
+            "paid call spent on a request the API would reject")
+        assert (log.skipped_reason or "").startswith(
+            "invalid_request_not_sent"), log.skipped_reason
 
 
 def _db_with(tmp_path, rows):
