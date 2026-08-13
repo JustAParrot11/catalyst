@@ -521,7 +521,24 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
          "broker_read"))
     conn.commit()
 
-    # ---- 2 + 3. reconcile, then stop duties and hard exits
+    # ---- 2. does anything we hold still deserve to be held?
+    #
+    # BEFORE the hard-exit sweep, so a review that brings an exit forward
+    # to today is acted on by this pass rather than the next one. The
+    # review cannot close anything itself - it only ever moves a date
+    # EARLIER, and _protective_duties below does the closing. It is
+    # deliberately skipped on a kill-switch trip: that path returns
+    # above after running the protective duties, and a tripped account
+    # should not be buying opinions.
+    _review_open_positions(
+        conn, broker, transport, report, now,
+        CostContext(conn=conn,
+                    governor_profit_share=Decimal(
+                        str(params["governor_profit_share"])),
+                    cycle_id=cycle_id, kind=kind,
+                    owner_monthly_cap_cents=owner_monthly_cap_cents))
+
+    # ---- 3 + 4. reconcile, then stop duties and hard exits
     stops_ok, open_rows = _protective_duties(conn, broker, report, now,
                                              account_mode=account_mode)
 
@@ -903,6 +920,104 @@ def _jsonable(v):
     if isinstance(v, Decimal):
         return str(v)
     return v
+
+
+def _review_open_positions(conn, broker: Broker, transport,
+                           report: "CycleReport", now: datetime,
+                           cost_context) -> None:
+    """Ask Claude whether each open position's thesis still holds.
+
+    Runs BEFORE the hard-exit sweep, so a review that brings an exit
+    forward to today is acted on by the SAME pass rather than waiting
+    fifteen minutes. The review itself closes nothing: it can only move
+    a date earlier, and the existing time-exit machinery does the rest.
+
+    Never raises. A review that fails is one position unreviewed; an
+    exception here would abandon the sweep and leave the rest of the
+    book unexamined.
+    """
+    from catalyst.research.position_review import (
+        bring_exit_forward,
+        due_for_review,
+        review_position,
+    )
+
+    try:
+        positions = _reviewable_positions(conn)
+    except sqlite3.Error as exc:
+        report.errors.append(f"position_review: cannot read positions: {exc}")
+        return
+    if not positions:
+        return
+
+    to_review, skipped = due_for_review(conn, positions, now)
+    report.funnel["positions_reviewed"] = len(to_review)
+    for position, why in skipped:
+        report.drop_reasons.setdefault("positions_reviewed", []).append(
+            f"{position.get('ticker')}: {why}")
+
+    for position in to_review:
+        try:
+            snapshot = build_market_snapshot(broker, position["ticker"], now)
+            entry = position.get("entry_price")
+            last = snapshot.last_close if snapshot is not None else None
+            market = {"entry_price": entry, "last_price": last,
+                      "move_pct": (
+                          f"{((last - entry) / entry * 100):.1f}"
+                          if entry and last and entry > 0 else "?")}
+            view = {"thesis": position.get("thesis"),
+                    "invalidation": position.get("invalidation")}
+            review = review_position(conn, position, view, market,
+                                     transport, cost_context, now=now)
+            if review.skipped_reason:
+                report.drop_reasons.setdefault(
+                    "positions_reviewed", []).append(
+                    f"{position.get('ticker')}: {review.skipped_reason}")
+                continue
+            moved, why = bring_exit_forward(conn, position, review, now)
+            if moved:
+                report.drop_reasons.setdefault(
+                    "positions_reviewed", []).append(
+                    f"{position.get('ticker')}: {why}")
+        except Exception as exc:  # noqa: BLE001 - one position, not the book
+            report.errors.append(
+                f"position_review {position.get('ticker')}: "
+                f"{type(exc).__name__}: {exc}")
+
+
+def _reviewable_positions(conn) -> list[dict]:
+    """Open positions with the thesis and entry price the review needs.
+
+    A position whose thesis cannot be found is still returned, with the
+    fields empty: render_prompt says "(none recorded)" and the model can
+    answer no_opinion. Dropping it silently would make an unreviewable
+    position indistinguishable from a reviewed one.
+    """
+    rows = conn.execute(
+        """SELECT p.id, p.ticker, p.opened_at, p.planned_exit_date,
+                  v.thesis, v.invalidation, f.price
+           FROM positions p
+           LEFT JOIN orders o ON o.id = json_extract(
+                CASE WHEN json_valid(p.entry_order_ids)
+                     THEN p.entry_order_ids ELSE '[]' END, '$[0]')
+           LEFT JOIN research_views v ON v.candidate_id = o.decision_id
+           LEFT JOIN fills f ON f.order_id = o.id
+           WHERE p.status = 'open'""").fetchall()
+    out = []
+    for r in rows:
+        try:
+            opened = datetime.fromisoformat(r[2]).date()
+            exit_date = datetime.fromisoformat(r[3]).date()
+        except (TypeError, ValueError):
+            continue
+        try:
+            entry = Decimal(str(r[6])) if r[6] is not None else None
+        except ArithmeticError:
+            entry = None
+        out.append({"id": r[0], "ticker": r[1], "opened_at_date": opened,
+                    "planned_exit_date": exit_date, "thesis": r[4],
+                    "invalidation": r[5], "entry_price": entry})
+    return out
 
 
 def _open_position_dicts(conn, now: datetime) -> list[dict]:

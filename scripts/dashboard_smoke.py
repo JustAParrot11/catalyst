@@ -170,6 +170,23 @@ def seed_traded_db(path: str) -> None:
     )
     conn.execute("INSERT INTO stop_confirmations VALUES (?,?,?,?)",
                  ("pos-1", _iso(d1), json.dumps(["ord-stop-1"]), "ok"))
+    # Two reviews: one that changed nothing and one that acted. The
+    # HOLD is the important one to render - a dossier showing only the
+    # reviews that closed something makes the model look decisive in
+    # hindsight and hides the far more common answer.
+    conn.execute(
+        "INSERT INTO position_reviews VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("rev-1", "pos-1", "ACME", "hold", 0,
+         "the phase 3 readout has not reported; nothing has changed",
+         json.dumps([]), "REVIEWING AN OPEN POSITION...", None,
+         "claude-sonnet-5", "7.9", None, _iso(d1 + timedelta(days=2))))
+    conn.execute(
+        "INSERT INTO position_reviews VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("rev-2", "pos-1", "ACME", "exit_now", 1,
+         "the readout missed its primary endpoint",
+         json.dumps(["phase 3 missed", "two analysts cut to hold"]),
+         "REVIEWING AN OPEN POSITION...", None, "claude-sonnet-5", "8.2",
+         None, _iso(d1 + timedelta(days=4))))
     conn.execute(
         "INSERT INTO closed_trades VALUES (?,?,?,?,?,?,?,?,?)",
         ("pos-1", "paper", "42.71", "45.02", "target_reached", 1063, 12, 4, _iso(d1)),
@@ -461,6 +478,11 @@ def phase_traded(tmp: Path) -> None:
             ("broker response, verbatim", "broker raw response"),
             ("broker reported price", "fill vs modeled price"),
             ("target_reached", "exit trigger"),
+            ("Was it still worth holding?", "the position-review section"),
+            ("the readout missed its primary endpoint", "a review that ACTED"),
+            ("nothing has changed", "a review that changed nothing"),
+            ("two analysts cut to hold", "what changed since entry"),
+            ("never push it", "the only-ever-shorten rule, stated on screen"),
         ]:
             check(f"trace shows {label}", needle in trace)
         check("trace feature-detects the evidence graph rather than assuming it",

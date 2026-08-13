@@ -776,6 +776,7 @@ class Trace:
     positions: list
     closed_q: QueryResult
     stops_q: QueryResult
+    reviews_q: QueryResult
     evidence: "EvidenceChain"
 
 
@@ -945,12 +946,31 @@ def decision_trace(db: Db, candidate_id: str) -> Trace:
             "SELECT * FROM stop_confirmations WHERE position_id IN (<same>)", (), [], None,
         )
 
+    # Every time the model was asked "does this thesis still hold?", in
+    # order. A review that said hold is as much a part of the story as
+    # one that closed the position - showing only the acting reviews
+    # would make the model look decisive in hindsight.
+    if position_ids:
+        marks = ",".join("?" * len(position_ids))
+        reviews_q = db.q(
+            f"SELECT * FROM position_reviews WHERE position_id IN ({marks}) "
+            "ORDER BY reviewed_at",
+            tuple(position_ids),
+        )
+    else:
+        reviews_q = QueryResult(
+            "SELECT * FROM position_reviews WHERE position_id IN "
+            "(<positions whose entry_order_ids include this candidate's orders>)",
+            (), [], None,
+        )
+
     return Trace(
         candidate_id=candidate_id, candidate_q=candidate_q, raw_events_q=raw_events_q,
         source_event_ids=source_ids, calls_q=calls_q, turns_by_call=turns_by_call,
         view_q=view_q, decisions_q=decisions_q, limits_by_decision=limits_by_decision,
         orders_q=orders_q, fills_by_order=fills_by_order, refusal_q=refusal_q,
         positions=positions, closed_q=closed_q, stops_q=stops_q,
+        reviews_q=reviews_q,
         evidence=evidence_chain(db, candidate_id),
     )
 
