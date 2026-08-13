@@ -109,10 +109,49 @@ def exploration_turn_estimate_cents(searches: int,
     """
     on_date = on_date or datetime.now(timezone.utc).date()
     in_rate, out_rate = rates_for(model, on_date)
-    input_tokens = PROMPT_TOKENS_ESTIMATE + searches * INPUT_TOKENS_PER_SEARCH
+    input_tokens = _exploration_input_tokens(searches)
     return (Decimal(input_tokens) * in_rate / _MTOK
             + Decimal(MAX_EXPLORATION_TOKENS) * out_rate / _MTOK
             + Decimal(searches) * WEB_SEARCH_CENTS_PER_QUERY)
+
+
+def _exploration_input_tokens(searches: int) -> int:
+    return PROMPT_TOKENS_ESTIMATE + searches * INPUT_TOKENS_PER_SEARCH
+
+
+#: Output tokens the forced turn emits: one small JSON tool call. It is
+#: capped at MAX_EXPLORATION_TOKENS like every turn, but the schema is a
+#: handful of fields and the measured call emitted far less.
+EXTRACTION_OUTPUT_TOKENS_ESTIMATE = 512
+
+
+def extraction_turn_estimate_cents(searches: int,
+                                   on_date: date | None = None,
+                                   model: str = RESEARCH_MODEL) -> Decimal:
+    """Pessimistic cost of the forced extraction turn.
+
+    THE SAME HOLE AS EXPLORATION'S, one line down. This turn RE-SENDS THE
+    ENTIRE exploration context - avoiding that re-read is the whole
+    reason the schema tool is offered during exploration - so its cost
+    scales with the search budget exactly as exploration's does. A flat
+    8c, measured once at ~1.3c on a two-search call, was over on BOTH
+    paths and 4.7x over on a conjunction:
+
+        searches   re-read   today (intro)   after 2026-08-31
+         3          40k       8.52c           12.78c
+        10         124k      25.32c           37.98c
+
+    No search charge: the forced turn offers only the schema tool, so it
+    cannot search, and estimating for a mechanism that does not exist is
+    pessimism without a reason.
+    """
+    on_date = on_date or datetime.now(timezone.utc).date()
+    in_rate, out_rate = rates_for(model, on_date)
+    # prompt + every search result + the assistant turn being echoed back
+    input_tokens = (_exploration_input_tokens(searches)
+                    + MAX_EXPLORATION_TOKENS)
+    return (Decimal(input_tokens) * in_rate / _MTOK
+            + Decimal(EXTRACTION_OUTPUT_TOKENS_ESTIMATE) * out_rate / _MTOK)
 
 
 @dataclass(frozen=True)
@@ -357,18 +396,18 @@ def investigate(
         # search budget at TODAY's rate, not a flat constant: a
         # conjunction buys ten searches where the base path buys three,
         # and Sonnet 5's introductory pricing ends 2026-08-31.
-        if forced:
-            cents = EXTRACTION_TURN_ESTIMATE_CENTS
-        else:
-            try:
-                cents = exploration_turn_estimate_cents(search_budget,
-                                                        model=model)
-            except UnknownModelError:
-                # No rate for this model means record_usage cannot price
-                # the call either, and has_unpriced_rows will block the
-                # next authorization. Estimate high so this turn is the
-                # one that stops, rather than sliding under the cap.
-                cents = EXPLORATION_TURN_ESTIMATE_CENTS * 4
+        try:
+            cents = (extraction_turn_estimate_cents(search_budget,
+                                                    model=model) if forced
+                     else exploration_turn_estimate_cents(search_budget,
+                                                          model=model))
+        except UnknownModelError:
+            # No rate for this model means record_usage cannot price the
+            # call either, and has_unpriced_rows will block the next
+            # authorization. Estimate high so this turn is the one that
+            # stops, rather than sliding under the cap.
+            cents = (EXTRACTION_TURN_ESTIMATE_CENTS if forced
+                     else EXPLORATION_TURN_ESTIMATE_CENTS) * 4
         estimate = CostEstimate(
             estimated_cents=cents,
             basis="pre-registered per-turn pessimistic estimate (boundary.py)",
