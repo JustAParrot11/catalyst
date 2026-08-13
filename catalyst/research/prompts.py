@@ -184,8 +184,9 @@ def render_research_prompt(candidate: Candidate,
         "answer.\n"
         "- Report judgements, not instructions: nothing about how much to "
         "trade, and no order, entry, stop or exit levels.\n"
-        "- When asked, submit your conclusion via the submit_research_view "
-        "tool; its fields match the six answers above."
+        "- Submit your conclusion via the submit_research_view tool once "
+        "you have searched as much as you need to; its fields match the "
+        "six answers above. Do not wait to be asked."
     )
     return "\n\n".join(sections)
 
@@ -223,9 +224,15 @@ def exploration_tools(max_searches: int = BASE_SEARCHES) -> list[dict]:
     """Tools available during exploration turns.
 
     Server-side web search only. COST: $10 per 1,000 searches (TRAPS.md)
-    = $0.01 per search on top of tokens, so max_uses IS the search
-    budget for one investigation. boundary.py's per-turn governor
-    authorization is the hard gate above it.
+    = $0.01 per search on top of tokens.
+
+    `max_uses` is per REQUEST, not per investigation - this docstring
+    claimed otherwise and the claim was wrong. A pause_turn continuation
+    is a new request, so re-sending this list verbatim refills the
+    allowance. boundary._tools_with_remaining_searches() subtracts what
+    has already been billed, which is what makes the budget mean one
+    investigation. The per-turn governor authorization is the hard gate
+    above both.
     """
     return [{"type": "web_search_20250305", "name": "web_search",
              "max_uses": int(max_searches)}]

@@ -22,13 +22,17 @@ import json
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Callable, Literal
 
 from catalyst.cost import CostEstimate
 from catalyst.cost.governor import authorize
-from catalyst.cost.pricing import UnknownModelError
+from catalyst.cost.pricing import (
+    WEB_SEARCH_CENTS_PER_QUERY,
+    UnknownModelError,
+    rates_for,
+)
 from catalyst.cost.tracker import (
     UNPARSEABLE_USAGE_KEY,
     UnrecognizedUsageFieldError,
@@ -48,6 +52,10 @@ from catalyst.research.schema import (
 RESEARCH_MODEL = "claude-sonnet-5"      # judgement calls; cheap enough to
                                         # keep the $5/month cap honest
 MAX_EXPLORATION_TURNS = 2               # pause_turn continuations included
+#: Output cap per turn. 512 truncated a real forced tool call mid-JSON
+#: and wasted the paid call, so this does not go back down.
+MAX_EXPLORATION_TOKENS = 2048
+_MTOK = Decimal(1_000_000)
 
 # Pre-call estimates, deliberately pessimistic (the governor compares
 # against these BEFORE the call; an optimistic estimate is a hole in the
@@ -57,8 +65,93 @@ MAX_EXPLORATION_TURNS = 2               # pause_turn continuations included
 # 12.63c for exploration: 24k tokens in (web search results are large),
 # 2.3k out, 2 searches at 1c each. 15c covers that with a third search;
 # extraction measured ~1.3c, 8c leaves headroom for a repair turn.
-EXPLORATION_TURN_ESTIMATE_CENTS = Decimal("15")
+#
+# THE FLAT CONSTANT WAS THE HOLE. 15c was calibrated when BASE_SEARCHES
+# = 3 was the only search budget there was. CONJUNCTION_SEARCHES = 10
+# broke it, and priced against the live rate table the gap is not small:
+#
+#     searches  input     today (intro)   after 2026-08-31
+#      3        24k        9.85c   ok      13.27c   ok
+#     10        24k       16.85c   OVER    20.27c   OVER
+#     10        60k       24.05c   OVER    31.07c   OVER
+#     10       120k       36.05c   OVER    49.07c   OVER
+#
+# Two things move underneath the estimate and BOTH are known before the
+# call: how many searches this candidate earned, and what the model
+# costs on the day. Sonnet 5's introductory rate ends 2026-08-31, which
+# lifts every figure above by ~50% on a date already in the calendar -
+# a flat constant would silently become optimistic overnight.
+#
+# Pessimism here is cheap. The governor compares the estimate against
+# ACTUAL month-to-date spend rather than reserving it, so an overestimate
+# costs only at the cap boundary; an underestimate costs the cap itself.
+EXPLORATION_TURN_ESTIMATE_CENTS = Decimal("15")   # base path, no searches
 EXTRACTION_TURN_ESTIMATE_CENTS = Decimal("8")
+
+#: Input tokens a single web search adds. MEASURED: the first live
+#: research call (2026-08-10) sent 24k input tokens carrying 2 searches
+#: against a ~2k prompt, so ~11k per search. Rounded up, because the
+#: estimate must not be the optimistic side of a measurement of one.
+INPUT_TOKENS_PER_SEARCH = 12_000
+#: The prompt itself, before any search results come back.
+PROMPT_TOKENS_ESTIMATE = 2_000
+
+
+def exploration_turn_estimate_cents(searches: int,
+                                    on_date: date | None = None,
+                                    model: str = RESEARCH_MODEL) -> Decimal:
+    """Pessimistic cost of one exploration turn at this search budget.
+
+    Priced through rates_for(), the same table that prices the actual
+    bill, so the estimate cannot drift away from what is charged when a
+    rate changes. Search itself is exact: 1c a query (TRAPS.md), and the
+    query count is the budget this candidate earned.
+    """
+    on_date = on_date or datetime.now(timezone.utc).date()
+    in_rate, out_rate = rates_for(model, on_date)
+    input_tokens = _exploration_input_tokens(searches)
+    return (Decimal(input_tokens) * in_rate / _MTOK
+            + Decimal(MAX_EXPLORATION_TOKENS) * out_rate / _MTOK
+            + Decimal(searches) * WEB_SEARCH_CENTS_PER_QUERY)
+
+
+def _exploration_input_tokens(searches: int) -> int:
+    return PROMPT_TOKENS_ESTIMATE + searches * INPUT_TOKENS_PER_SEARCH
+
+
+#: Output tokens the forced turn emits: one small JSON tool call. It is
+#: capped at MAX_EXPLORATION_TOKENS like every turn, but the schema is a
+#: handful of fields and the measured call emitted far less.
+EXTRACTION_OUTPUT_TOKENS_ESTIMATE = 512
+
+
+def extraction_turn_estimate_cents(searches: int,
+                                   on_date: date | None = None,
+                                   model: str = RESEARCH_MODEL) -> Decimal:
+    """Pessimistic cost of the forced extraction turn.
+
+    THE SAME HOLE AS EXPLORATION'S, one line down. This turn RE-SENDS THE
+    ENTIRE exploration context - avoiding that re-read is the whole
+    reason the schema tool is offered during exploration - so its cost
+    scales with the search budget exactly as exploration's does. A flat
+    8c, measured once at ~1.3c on a two-search call, was over on BOTH
+    paths and 4.7x over on a conjunction:
+
+        searches   re-read   today (intro)   after 2026-08-31
+         3          40k       8.52c           12.78c
+        10         124k      25.32c           37.98c
+
+    No search charge: the forced turn offers only the schema tool, so it
+    cannot search, and estimating for a mechanism that does not exist is
+    pessimism without a reason.
+    """
+    on_date = on_date or datetime.now(timezone.utc).date()
+    in_rate, out_rate = rates_for(model, on_date)
+    # prompt + every search result + the assistant turn being echoed back
+    input_tokens = (_exploration_input_tokens(searches)
+                    + MAX_EXPLORATION_TOKENS)
+    return (Decimal(input_tokens) * in_rate / _MTOK
+            + Decimal(EXTRACTION_OUTPUT_TOKENS_ESTIMATE) * out_rate / _MTOK)
 
 
 @dataclass(frozen=True)
@@ -96,6 +189,47 @@ def _assistant_echo(turn) -> dict | None:
     return {"role": "assistant", "content": content}
 
 
+def searches_used(turns) -> int:
+    """Web searches billed across this investigation so far.
+
+    Read from the usage object each turn already records, so it counts
+    what was CHARGED rather than what was intended. A turn whose usage
+    could not be parsed contributes 0 - the governor's per-turn spend
+    check is the hard gate above this, and guessing high here would
+    silently deny a candidate searches it paid for.
+    """
+    total = 0
+    for turn in turns:
+        usage = getattr(turn, "usage", None)
+        total += int(getattr(usage, "web_search_requests", 0) or 0)
+    return total
+
+
+def _tools_with_remaining_searches(budget: int, turns, tools: list) -> list:
+    """`tools` for a continuation, with the search budget carried over.
+
+    `max_uses` is per REQUEST. Re-sending the same tools list on a
+    pause_turn continuation hands the model a FRESH allowance, so a
+    candidate granted CONJUNCTION_SEARCHES could spend that many again
+    on every continued turn. Web search is $10 per 1,000 queries
+    (TRAPS.md) on top of tokens and is the one line of the bill the
+    model moves directly, so the budget has to mean the investigation,
+    not the request.
+
+    With the allowance spent, web_search is dropped rather than offered
+    at `max_uses: 0` - a zero budget is not a documented way to say "no
+    searches left", and a rejected request costs a paid call. Every
+    other tool survives, including the schema tool whose early
+    submission is what avoids the full-price extraction re-read.
+    """
+    remaining = budget - searches_used(turns)
+    kept = [t for t in tools if t.get("name") != "web_search"]
+    if remaining <= 0:
+        return kept
+    return [dict(t, max_uses=remaining) if t.get("name") == "web_search"
+            else t for t in tools]
+
+
 #: Message shapes the Messages API rejects with a 400. Checked LOCALLY,
 #: before the request, so the funnel names the actual defect instead of
 #: showing a status code the owner has to guess at.
@@ -107,12 +241,21 @@ def _assistant_echo(turn) -> dict | None:
 #: whole investigation with it. The owner reported the 400s as "quite
 #: prevalent" a day later, which is exactly what an opaque error looks
 #: like whether or not it is still happening.
-def invalid_payload_reason(payload: dict) -> str | None:
+def invalid_payload_reason(payload: dict,
+                           *, continuing_pause_turn: bool = False) -> str | None:
     """Why the Messages API would reject this, or None if it looks sound.
 
     Deliberately conservative: it rejects only shapes that are certainly
     invalid. A false positive here silently skips a candidate that would
     have worked, which is worse than the 400 it is trying to prevent.
+
+    `continuing_pause_turn` is that false positive, found by running.
+    Continuing a paused server-tool loop means sending the assistant's
+    partial turn back with NO user message after it - the exact shape
+    the trailing-assistant rule below refuses. So every continuation the
+    exploration loop made was killed locally, after the paid call, and
+    MAX_EXPLORATION_TURNS=2 bought exactly one turn. The caller says
+    when a trailing assistant message is intended; it is never assumed.
     """
     messages = payload.get("messages")
     if not isinstance(messages, list) or not messages:
@@ -142,11 +285,11 @@ def invalid_payload_reason(payload: dict) -> str | None:
                         f"{type(block).__name__}")
             if not block.get("type"):
                 return f"message {i} content block {j} has no 'type'"
-    if messages[-1].get("role") == "assistant":
-        # A trailing assistant message asks the API to CONTINUE it, which
-        # is valid but never what this loop intends - it means an echo
-        # was appended without the follow-up user turn, and the model
-        # would be prompted with nothing to answer.
+    if messages[-1].get("role") == "assistant" and not continuing_pause_turn:
+        # A trailing assistant message asks the API to CONTINUE it. That
+        # is exactly right for a pause_turn and wrong everywhere else,
+        # where it means an echo was appended without the follow-up user
+        # turn and the model is prompted with nothing to answer.
         return ("the last message is from the assistant with no user turn "
                 "after it - a continuation was appended without its prompt")
     if not payload.get("model"):
@@ -213,8 +356,9 @@ def investigate(
     # allowance because its question ("do these connect?") is genuinely
     # open and the answer lives in reporting the feeds do not carry.
     # An ordinary candidate keeps the base allowance.
+    search_budget = prompts.searches_for(candidate, signals)
     tools = list(prompts.exploration_tools(
-        prompts.searches_for(candidate, signals))) + [SUBMIT_RESEARCH_VIEW_TOOL]
+        search_budget)) + [SUBMIT_RESEARCH_VIEW_TOOL]
     tools_offered = tuple(t.get("name", t.get("type", "?")) for t in tools)
 
     turns: list[APITurn] = []
@@ -234,21 +378,38 @@ def investigate(
         _persist(log, conn)
         return log
 
-    def run_turn(payload: dict) -> APITurn | None:
+    def run_turn(payload: dict,
+                 *, continuing_pause_turn: bool = False) -> APITurn | None:
         """validate -> authorize -> call -> record -> price. None = stop."""
         nonlocal cost_cents
         # BEFORE SPENDING ANYTHING. A payload the API will certainly
         # reject must not consume a paid call and must not come back as
         # a status code the owner has to guess at - it names itself, in
         # the funnel, in English.
-        bad = invalid_payload_reason(payload)
+        bad = invalid_payload_reason(
+            payload, continuing_pause_turn=continuing_pause_turn)
         if bad is not None:
             transport_errors.append(f"invalid_request_not_sent: {bad}")
             return None
         forced = (payload.get("tool_choice") or {}).get("type") == "tool"
+        # The exploration estimate is derived from THIS candidate's
+        # search budget at TODAY's rate, not a flat constant: a
+        # conjunction buys ten searches where the base path buys three,
+        # and Sonnet 5's introductory pricing ends 2026-08-31.
+        try:
+            cents = (extraction_turn_estimate_cents(search_budget,
+                                                    model=model) if forced
+                     else exploration_turn_estimate_cents(search_budget,
+                                                          model=model))
+        except UnknownModelError:
+            # No rate for this model means record_usage cannot price the
+            # call either, and has_unpriced_rows will block the next
+            # authorization. Estimate high so this turn is the one that
+            # stops, rather than sliding under the cap.
+            cents = (EXTRACTION_TURN_ESTIMATE_CENTS if forced
+                     else EXPLORATION_TURN_ESTIMATE_CENTS) * 4
         estimate = CostEstimate(
-            estimated_cents=(EXTRACTION_TURN_ESTIMATE_CENTS if forced
-                             else EXPLORATION_TURN_ESTIMATE_CENTS),
+            estimated_cents=cents,
             basis="pre-registered per-turn pessimistic estimate (boundary.py)",
             kind=cost_context.kind, component="research")
         decision = authorize(estimate, conn,
@@ -304,7 +465,7 @@ def investigate(
     # ---- exploration: tool_choice auto, server-side web search loops
     # inside one request; pause_turn continues it.
     turn = run_turn({
-        "model": model, "max_tokens": 2048,
+        "model": model, "max_tokens": MAX_EXPLORATION_TOKENS,
         "messages": messages, "tools": tools,
         "tool_choice": {"type": "auto"},
     })
@@ -322,10 +483,12 @@ def investigate(
             break            # nothing to continue from; go to extraction
         messages.append(echo)
         turn = run_turn({
-            "model": model, "max_tokens": 2048,
-            "messages": messages, "tools": tools,
+            "model": model, "max_tokens": MAX_EXPLORATION_TOKENS,
+            "messages": messages,
+            "tools": _tools_with_remaining_searches(
+                search_budget, turns, tools),
             "tool_choice": {"type": "auto"},
-        })
+        }, continuing_pause_turn=True)
         if turn is None:
             return finish(None, transport_errors[0] if transport_errors
                           else "budget_denied")
@@ -369,7 +532,7 @@ def investigate(
     last_error: str | None = None
     for attempt in ("first", "repair"):
         turn = run_turn({
-            "model": model, "max_tokens": 2048,
+            "model": model, "max_tokens": MAX_EXPLORATION_TOKENS,
             "messages": messages,
             "tools": [SUBMIT_RESEARCH_VIEW_TOOL],
             "tool_choice": {"type": "tool", "name": "submit_research_view"},

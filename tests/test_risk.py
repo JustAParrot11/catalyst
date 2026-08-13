@@ -22,7 +22,18 @@ from catalyst.risk.hard_bounds import HARD_BOUNDS, HardBounds
 from catalyst.risk.kill_switches import MAX_CONSECUTIVE_LOSSES, check
 from catalyst.risk.sizing import size
 
-NOW = datetime(2026, 8, 10, 14, 0, tzinfo=timezone.utc)
+# ANCHORED TO THE REAL CLOCK, not a frozen date.
+#
+# These tests build evidence windows and compare them against timestamps
+# that adaptive_params writes with datetime.now(). A hardcoded NOW works
+# on the day it is written and silently rots afterwards: on 2026-08-13
+# three of them failed with "evidence_predates_adjustment" purely
+# because NOW was 2026-08-10 and "NOW + 1 day" had become the past.
+#
+# A suite that goes red with the calendar is worse than no suite - it
+# trains you to ignore failures. Truncated to the hour so a single run
+# is still deterministic.
+NOW = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
 
 
 def portfolio(equity="1000", settled="1000", positions=(), day_pnl="0",

@@ -294,19 +294,49 @@ class TestNoIndustryBias:
 
 
 class TestTheGradedStrategyIsNotWeakened:
-    def test_a_conjunction_never_re_derives_a_form4_cluster(self):
-        """One piece of evidence must not produce two funnel rows. Form 4
-        has its own clusterer - line-for-line the backtest arm - and this
-        builder consumes its events only as the OTHER half of a link."""
-        import inspect
+    def test_form4_events_DO_participate_in_a_conjunction(self):
+        """The owner's worked example - "insiders bought AND an earnings
+        call is scheduled" - is only findable because a Form 4 event can
+        be one half of a cross-feed link. An earlier comment claimed
+        Form 4 was excluded and named a constant the code never read;
+        the code was right and the comment was wrong."""
+        cands, _ = build_conjunction_candidates(cross(), NOW)
+        assert [c.ticker for c in cands] == ["ACME"]
 
-        from catalyst.discovery import conjunctions
-
-        assert "edgar_form4" not in conjunctions.SOURCES
-
-    def test_form4_only_events_produce_no_conjunction_candidates(self):
+    def test_form4_alone_still_produces_no_conjunction(self):
+        """It participates; it does not conjure a link with itself."""
         only_form4 = [ev("ACME", "insider_cluster", source="edgar_form4"),
                       ev("ACME", "insider_cluster", source="edgar_form4",
                          sid="second")]
         cands, _ = build_conjunction_candidates(only_form4, NOW)
         assert cands == []
+
+    def test_one_company_is_never_researched_twice_in_a_pass(self):
+        """THE ACTUAL RISK the old comment was reaching for. A ticker
+        with a Form 4 cluster AND a news story yields two candidates with
+        different ids - ~34c each, and two of the three research slots
+        spent on one company.
+
+        Tested by RUNNING the merge, not by reading the source: the
+        guard this replaces asserted on a constant the code never read,
+        which is exactly why the duplicate went unnoticed."""
+        from catalyst.discovery.conjunctions import merge_with_form4
+
+        form4, _ = build_conjunction_candidates(cross("DUP"), NOW)
+        conj, _ = build_conjunction_candidates(cross("DUP"), NOW)
+        # same ticker reached both builders
+        assert form4 and conj and form4[0].ticker == conj[0].ticker
+        kept, dropped = merge_with_form4(form4, conj)
+        assert len(kept) == 1, "one company was researched twice"
+        assert any("pay twice for one company" in why for _t, why in dropped)
+
+    def test_a_different_company_is_NOT_dropped_by_the_merge(self):
+        """The de-duplication must be by ticker, not a blanket refusal
+        of conjunction candidates."""
+        from catalyst.discovery.conjunctions import merge_with_form4
+
+        form4, _ = build_conjunction_candidates(cross("AAA"), NOW)
+        conj, _ = build_conjunction_candidates(cross("BBB"), NOW)
+        kept, dropped = merge_with_form4(form4, conj)
+        assert {c.ticker for c in kept} == {"AAA", "BBB"}
+        assert dropped == []

@@ -40,13 +40,22 @@ from datetime import date, datetime, timedelta, timezone
 from catalyst.discovery import Candidate
 from catalyst.discovery.links import find_links
 
-#: Feeds whose events this builder consumes. Form 4 is deliberately NOT
-#: here: it has its own clusterer, which is line-for-line the backtest
-#: arm, and re-deriving those candidates by a second route would put two
-#: rows on the funnel for one piece of evidence. Form 4 events still
-#: PARTICIPATE in a conjunction - they are what makes a link cross-feed -
-#: they just do not create candidates here.
-SOURCES = ("edgar_fts", "alpaca_news")
+#: FORM 4 DOES PARTICIPATE, and must.
+#:
+#: An earlier version of this comment claimed Form 4 was excluded here,
+#: and named a constant that build_conjunction_candidates never read -
+#: so the documentation and the code disagreed, and the code was right.
+#: Excluding it would be wrong: "insiders bought AND an earnings call is
+#: scheduled" is the owner's own worked example, and it is only findable
+#: because a Form 4 event can be one half of a cross-feed link.
+#:
+#: The real risk the old comment was reaching for is DOUBLE-COUNTING: a
+#: ticker with a qualifying insider cluster AND a news story would
+#: produce a Form 4 cluster candidate and a conjunction candidate, and
+#: both would be researched at ~34c each. That is handled where it
+#: belongs - at the merge in scheduler.build_candidates_all, by ticker -
+#: not by blinding this builder to a feed it needs.
+PARTICIPATING_SOURCES = ("edgar_form4", "edgar_fts", "alpaca_news")
 
 #: How stale the newest signal may be. A conjunction whose most recent
 #: half is three weeks old is not news about now.
@@ -110,12 +119,18 @@ def sector_band(sic) -> str:
 MAX_PER_SECTOR_PER_PASS = 3
 
 
-def _hash_id(ticker: str, kinds, when: date) -> str:
-    """Content hash, so the same conjunction on the same day is the same
-    candidate across passes. Candidate ids are content hashes elsewhere
-    in discovery for the same reason: INSERT OR IGNORE then makes a
-    re-run idempotent rather than duplicating work already researched."""
-    basis = f"conj|{ticker}|{'+'.join(sorted(kinds))}|{when.isoformat()}"
+def _hash_id(ticker: str, kinds) -> str:
+    """Content hash, so the same conjunction is the same candidate across
+    passes. Candidate ids are content hashes elsewhere in discovery for
+    the same reason: INSERT OR IGNORE then makes a re-run idempotent
+    rather than duplicating work already researched.
+
+    The basis is deliberately WHAT THE CONJUNCTION IS - this ticker,
+    these kinds of evidence - and not when its newest signal landed. A
+    date in here makes the hash change whenever anything new arrives,
+    which defeats the idempotence the hash exists for.
+    """
+    basis = f"conj|{ticker}|{'+'.join(sorted(kinds))}"
     return "conj-" + hashlib.sha256(basis.encode("utf-8")).hexdigest()[:20]
 
 
@@ -184,7 +199,20 @@ def build_conjunction_candidates(
             continue
         kinds = tuple(link.kinds)
         candidates.append(Candidate(
-            id=_hash_id(link.ticker, kinds, link.last_seen),
+            # IDENTITY IS THE QUESTION, NOT THE NEWEST HEADLINE. This
+            # used to hash last_seen too, so one extra news item about
+            # the same company - same feeds, same kinds - minted a new
+            # id, and both screens keyed on candidate_id missed it:
+            # already_researched re-bought the conjunction at full price
+            # (~36c, ten searches), and the MAX_RESEARCH_ATTEMPTS bound
+            # was escaped by any candidate that kept attracting
+            # headlines. News arrives continuously, so it bit hardest on
+            # the actively-covered names the bot most wants to look at.
+            #
+            # More of the same KIND is the same question. A new kind is
+            # a different one, and changes `kinds` here, so genuinely
+            # new evidence still earns a fresh look.
+            id=_hash_id(link.ticker, kinds),
             ticker=link.ticker,
             catalyst_type=_primary_kind(kinds),
             # NOT a resolution date - see the module docstring. The feeds
@@ -253,3 +281,39 @@ def default_window(now: datetime | None = None) -> tuple[datetime, datetime]:
     trimming the filing side would remove it."""
     end = now or datetime.now(timezone.utc)
     return end - timedelta(days=21), end
+
+
+def merge_with_form4(form4_candidates: list, conjunction_candidates: list):
+    """(kept, dropped) - one candidate per COMPANY per pass.
+
+    A ticker with a qualifying insider cluster AND a news story produces
+    a Form 4 cluster candidate and a conjunction candidate: different
+    ids, same company. Both would be researched at ~34c each, spending
+    two of the three research slots on one name.
+
+    The Form 4 cluster wins. It is the graded strategy - line-for-line
+    the backtest arm - and its events are already one half of the
+    conjunction anyway, so nothing is lost by preferring it.
+
+    A module-level function rather than a closure inside the scheduler,
+    because a closure cannot be tested by running it, and "test the
+    behaviour" is the only way this class of bug gets caught: the
+    previous guard asserted on a CONSTANT that the code never read.
+    """
+    kept = list(form4_candidates)
+    seen_ids = {c.id for c in kept}
+    seen_tickers = {c.ticker for c in kept}
+    dropped: list = []
+    for cand in conjunction_candidates:
+        if cand.ticker in seen_tickers:
+            dropped.append((cand.ticker,
+                            "already a Form 4 cluster candidate this pass; "
+                            "researching both would pay twice for one "
+                            "company"))
+            continue
+        if cand.id in seen_ids:
+            continue
+        seen_ids.add(cand.id)
+        seen_tickers.add(cand.ticker)
+        kept.append(cand)
+    return kept, dropped
