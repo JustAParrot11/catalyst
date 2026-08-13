@@ -1380,6 +1380,51 @@ def _narrative_what_happened(t: queries.Trace, p: str) -> str:
         rows = [[esc(r["checked_at"]), esc(r["status"]), esc(r["live_stop_order_ids"])]
                 for r in t.stops_q.rows]
         out.append(table(f"{p}-stops", ["checked at", "status", "live stop order ids"], rows))
+    out.append(_narrative_reviews(t, p))
+    return "".join(out)
+
+
+def _narrative_reviews(t: queries.Trace, p: str) -> str:
+    """Every time the model was asked whether the thesis still held.
+
+    Reviews that said HOLD are shown alongside the ones that acted. A
+    view listing only the reviews that closed something would make the
+    model look decisive in hindsight, and hide the far more common
+    answer - that nothing had changed.
+    """
+    out = ["<h4>Was it still worth holding?</h4>"]
+    if not t.positions:
+        return ""
+    if not t.reviews_q.rows:
+        out.append(empty_block(
+            f"{p}-empty-reviews", t.reviews_q,
+            meaning="the thesis was never re-checked while this position was "
+                    "open. Expected for a position opened today or closing "
+                    "tomorrow - both skip the review deliberately - and a "
+                    "defect for anything held longer.",
+        ))
+        return "".join(out)
+    rows = []
+    for r in t.reviews_q.rows:
+        r = dict(r)
+        changed = jload(r.get("what_changed_json"), []) or []
+        rows.append([
+            esc(r["reviewed_at"]),
+            esc(r["skipped_reason"] and "not obtained" or r["action"]),
+            "yes" if r["invalidation_triggered"] else "no",
+            esc(r["skipped_reason"] or r["reasoning"]),
+            esc("; ".join(str(c) for c in changed) or "-"),
+        ])
+    out.append(table(
+        f"{p}-reviews",
+        ["reviewed at", "answer", "invalidation triggered?", "reasoning",
+         "what changed since entry"],
+        rows))
+    out.append(prov(
+        "A review can only ever bring the exit date FORWARD, never push it "
+        "out - not by a day. 'hold' is not an instruction the system acts "
+        "on; it is the absence of a reason to leave early, and the exit "
+        "date set at entry stands either way."))
     return "".join(out)
 
 

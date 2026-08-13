@@ -268,6 +268,272 @@ def render_prompt(position: dict, view: dict, market: dict) -> str:
     return "\n".join(lines)
 
 
+#: How often ONE position may be reviewed. This is the cost bound, and
+#: it is the piece whose absence kept this module unwired: the cycle runs
+#: every 15 minutes in market hours, so without a cadence gate five open
+#: positions would be reviewed 26 times a day each - ~130 paid calls a
+#: day against a monthly cap measured in single-digit dollars.
+#:
+#: THE ARITHMETIC. A review is a small prompt plus at most
+#: REVIEW_SEARCHES searches, so ~8c at today's rates. Five positions
+#: reviewed daily over 21 trading days is ~$8.40/month; every other day
+#: is ~$4.20. Daily is the default because the owner asked for this
+#: precisely so a changed news picture is noticed - "incase the news
+#: changes" - and a check that runs weekly cannot do that.
+REVIEW_INTERVAL_HOURS = 24
+#: A review asks a narrow question about a named company, so more
+#: searching does not sharpen it the way it does for a conjunction.
+REVIEW_SEARCHES = 2
+REVIEW_MODEL = "claude-sonnet-5"
+
+
+def last_reviewed_at(conn, position_id: str):
+    """When this position was last reviewed, or None. Counts SKIPPED
+    reviews too: a skip that did not record a time would be retried on
+    the very next cycle, which is the loop this bound exists to stop."""
+    row = conn.execute(
+        "SELECT MAX(reviewed_at) FROM position_reviews WHERE position_id = ?",
+        (position_id,)).fetchone()
+    if not row or not row[0]:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(row[0]))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def due_for_review(conn, positions, now: datetime,
+                   interval_hours: int = REVIEW_INTERVAL_HOURS):
+    """(to_review, [(position, why_not)]).
+
+    Every gate that declines a review names itself, because a position
+    that is silently never reviewed looks exactly like one that is
+    reviewed and always held.
+    """
+    to_review: list = []
+    skipped: list = []
+    for position in positions:
+        ok, why = should_review(position, now.date())
+        if not ok:
+            skipped.append((position, why))
+            continue
+        last = last_reviewed_at(conn, position.get("id"))
+        if last is not None:
+            hours = (now - last).total_seconds() / 3600.0
+            if hours < interval_hours:
+                skipped.append((position, (
+                    f"reviewed {hours:.1f}h ago; the interval is "
+                    f"{interval_hours}h")))
+                continue
+        to_review.append(position)
+    return to_review, skipped
+
+
+def _review_turn_payload(prompt: str, searches: int, messages=None,
+                         forced: bool = False) -> dict:
+    from catalyst.research.boundary import MAX_EXPLORATION_TOKENS
+
+    tools: list = [POSITION_REVIEW_TOOL]
+    if not forced and searches > 0:
+        tools = [{"type": "web_search_20250305", "name": "web_search",
+                  "max_uses": int(searches)}] + tools
+    payload = {
+        "model": REVIEW_MODEL, "max_tokens": MAX_EXPLORATION_TOKENS,
+        "messages": messages or [{"role": "user", "content": prompt}],
+        "tools": tools,
+    }
+    payload["tool_choice"] = ({"type": "tool",
+                               "name": "submit_position_review"} if forced
+                              else {"type": "auto"})
+    return payload
+
+
+def _tool_input(response: dict):
+    """The single submit_position_review input, or None.
+
+    TWO blocks are ambiguous, not first-wins - the same rule the research
+    boundary applies. A model that answered twice did not answer once,
+    and picking one of two contradictory reviews could close a position
+    on the answer the model discarded.
+    """
+    content = (response or {}).get("content")
+    if not isinstance(content, list):
+        return None
+    found = [b.get("input") for b in content
+             if isinstance(b, dict) and b.get("type") == "tool_use"
+             and b.get("name") == "submit_position_review"]
+    if len(found) != 1:
+        return None
+    return found[0]
+
+
+def review_position(conn, position: dict, view: dict, market: dict,
+                    transport, cost_context, *,
+                    now: datetime | None = None) -> PositionReview:
+    """One governed review of one open position.
+
+    Same discipline order as the research boundary, for the same reason:
+    validate the payload before spending, authorize, call, RECORD THE RAW
+    USAGE VERBATIM, then price. A turn that cannot be priced still lands
+    in the ledger and blocks further spend.
+
+    Never raises. Every failure comes back as a PositionReview carrying a
+    skipped_reason, because an exception here would abandon the rest of
+    the book mid-sweep - and the positions not yet reviewed are the ones
+    with no protection at all.
+    """
+    from catalyst.cost import CostEstimate
+    from catalyst.cost.governor import authorize
+    from catalyst.cost.pricing import UnknownModelError
+    from catalyst.cost.tracker import (
+        UNPARSEABLE_USAGE_KEY,
+        UnrecognizedUsageFieldError,
+        record_usage,
+    )
+    from catalyst.research.boundary import (
+        exploration_turn_estimate_cents,
+        extraction_turn_estimate_cents,
+        invalid_payload_reason,
+    )
+
+    now = now or datetime.now(timezone.utc)
+    position_id = str(position.get("id") or "")
+    ticker = str(position.get("ticker") or "")
+    prompt = render_prompt(position, view, market)
+    call_id = str(uuid.uuid4())
+    cost_cents = Decimal("0")
+
+    def skip(reason: str) -> PositionReview:
+        review = PositionReview(
+            position_id=position_id, ticker=ticker, action="no_opinion",
+            invalidation_triggered=False,
+            reasoning=f"no review was obtained: {reason}",
+            reviewed_at=now, cost_cents=cost_cents, skipped_reason=reason)
+        record_review(conn, review, prompt=prompt, model=REVIEW_MODEL)
+        return review
+
+    def run(payload: dict):
+        nonlocal cost_cents
+        bad = invalid_payload_reason(payload)
+        if bad is not None:
+            return None, f"invalid_request_not_sent: {bad}"
+        forced = (payload.get("tool_choice") or {}).get("type") == "tool"
+        try:
+            cents = (extraction_turn_estimate_cents(REVIEW_SEARCHES,
+                                                    model=REVIEW_MODEL)
+                     if forced else
+                     exploration_turn_estimate_cents(REVIEW_SEARCHES,
+                                                     model=REVIEW_MODEL))
+        except UnknownModelError:
+            cents = Decimal("60")
+        decision = authorize(
+            CostEstimate(estimated_cents=cents,
+                         basis="pre-registered per-turn pessimistic "
+                               "estimate (position_review.py)",
+                         kind=cost_context.kind, component="position_review"),
+            conn, cost_context.governor_profit_share,
+            cycle_id=cost_context.cycle_id,
+            owner_monthly_cap_cents=cost_context.owner_monthly_cap_cents)
+        if not decision.authorized:
+            return None, f"budget_denied: {decision.reason}"
+        try:
+            response = transport(payload)
+        except Exception as exc:  # noqa: BLE001 - one position, not the book
+            return None, f"transport_error: {type(exc).__name__}: {exc}"
+        if not isinstance(response, dict):
+            response = {"unparseable_response": repr(response)[:2000]}
+        raw_usage = response["usage"] if "usage" in response else {
+            UNPARSEABLE_USAGE_KEY: "response carried no usage object"}
+        try:
+            event = record_usage(raw_usage, REVIEW_MODEL, cost_context.kind,
+                                 "position_review", conn, api_call_id=call_id)
+            if event.priced_cents is not None:
+                cost_cents += event.priced_cents
+        except (UnknownModelError, UnrecognizedUsageFieldError) as exc:
+            return None, f"usage_unpriced_governor_blocked: {exc}"
+        return response, None
+
+    response, error = run(_review_turn_payload(prompt, REVIEW_SEARCHES))
+    if error is not None:
+        return skip(error)
+
+    # The review tool is offered during exploration, so an answer given
+    # with the search results in hand skips the forced turn entirely -
+    # the same saving the research path takes, and it is the common case.
+    early = _tool_input(response)
+    if early is not None:
+        try:
+            review = make_review_from_tool_input(position_id, ticker, early)
+            review = _with_cost(review, cost_cents)
+            record_review(conn, review, prompt=prompt,
+                          raw_response=response, model=REVIEW_MODEL)
+            return review
+        except (KeyError, TypeError, ValueError):
+            pass          # fall through to the forced turn
+
+    messages = [{"role": "user", "content": prompt}]
+    content = (response or {}).get("content")
+    if isinstance(content, list) and content:
+        messages.append({"role": "assistant", "content": content})
+        messages.append({"role": "user", "content": (
+            "Submit your review now via submit_position_review.")})
+    response, error = run(_review_turn_payload(
+        prompt, REVIEW_SEARCHES, messages=messages, forced=True))
+    if error is not None:
+        return skip(error)
+    forced_input = _tool_input(response)
+    if forced_input is None:
+        return skip("no_single_tool_call_in_forced_review_turn")
+    try:
+        review = make_review_from_tool_input(position_id, ticker, forced_input)
+    except (KeyError, TypeError, ValueError) as exc:
+        # A malformed review is a SKIP, never a default - defaulting to
+        # hold would let a broken model keep every position to term, and
+        # defaulting to exit_now would liquidate the book.
+        return skip(f"invalid_review: {exc}")
+    review = _with_cost(review, cost_cents)
+    record_review(conn, review, prompt=prompt, raw_response=response,
+                  model=REVIEW_MODEL)
+    return review
+
+
+def _with_cost(review: PositionReview, cents: Decimal) -> PositionReview:
+    return PositionReview(
+        position_id=review.position_id, ticker=review.ticker,
+        action=review.action,
+        invalidation_triggered=review.invalidation_triggered,
+        reasoning=review.reasoning, what_changed=review.what_changed,
+        reviewed_at=review.reviewed_at, cost_cents=cents,
+        skipped_reason=review.skipped_reason)
+
+
+def bring_exit_forward(conn, position: dict, review: PositionReview,
+                       now: datetime) -> tuple[bool, str]:
+    """Persist what apply_review decided. (moved?, why).
+
+    THE ONLY WRITER of planned_exit_date after entry, and it re-checks
+    the asymmetry at the point of writing rather than trusting the value
+    handed to it. apply_review already guarantees a date that never moves
+    outward; this refuses to write one that does anyway. Two independent
+    checks on the rule that keeps "days to weeks" from becoming "until it
+    comes back" is the right number for a rule with no safe failure mode.
+    """
+    original = position.get("planned_exit_date")
+    if isinstance(original, datetime):
+        original = original.date()
+    new_date, why = apply_review(review, position, now.date())
+    if new_date is None or original is None:
+        return False, why
+    if new_date >= original:
+        return False, why
+    conn.execute(
+        "UPDATE positions SET planned_exit_date = ? WHERE id = ?",
+        (new_date.isoformat(), position.get("id")))
+    conn.commit()
+    return True, why
+
+
 def record_review(conn, review: PositionReview, *, prompt: str = "",
                   raw_response=None, model: str = "") -> str:
     """Persist it. Every review is recorded even when it changed
