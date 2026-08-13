@@ -119,12 +119,18 @@ def sector_band(sic) -> str:
 MAX_PER_SECTOR_PER_PASS = 3
 
 
-def _hash_id(ticker: str, kinds, when: date) -> str:
-    """Content hash, so the same conjunction on the same day is the same
-    candidate across passes. Candidate ids are content hashes elsewhere
-    in discovery for the same reason: INSERT OR IGNORE then makes a
-    re-run idempotent rather than duplicating work already researched."""
-    basis = f"conj|{ticker}|{'+'.join(sorted(kinds))}|{when.isoformat()}"
+def _hash_id(ticker: str, kinds) -> str:
+    """Content hash, so the same conjunction is the same candidate across
+    passes. Candidate ids are content hashes elsewhere in discovery for
+    the same reason: INSERT OR IGNORE then makes a re-run idempotent
+    rather than duplicating work already researched.
+
+    The basis is deliberately WHAT THE CONJUNCTION IS - this ticker,
+    these kinds of evidence - and not when its newest signal landed. A
+    date in here makes the hash change whenever anything new arrives,
+    which defeats the idempotence the hash exists for.
+    """
+    basis = f"conj|{ticker}|{'+'.join(sorted(kinds))}"
     return "conj-" + hashlib.sha256(basis.encode("utf-8")).hexdigest()[:20]
 
 
@@ -193,7 +199,20 @@ def build_conjunction_candidates(
             continue
         kinds = tuple(link.kinds)
         candidates.append(Candidate(
-            id=_hash_id(link.ticker, kinds, link.last_seen),
+            # IDENTITY IS THE QUESTION, NOT THE NEWEST HEADLINE. This
+            # used to hash last_seen too, so one extra news item about
+            # the same company - same feeds, same kinds - minted a new
+            # id, and both screens keyed on candidate_id missed it:
+            # already_researched re-bought the conjunction at full price
+            # (~36c, ten searches), and the MAX_RESEARCH_ATTEMPTS bound
+            # was escaped by any candidate that kept attracting
+            # headlines. News arrives continuously, so it bit hardest on
+            # the actively-covered names the bot most wants to look at.
+            #
+            # More of the same KIND is the same question. A new kind is
+            # a different one, and changes `kinds` here, so genuinely
+            # new evidence still earns a fresh look.
+            id=_hash_id(link.ticker, kinds),
             ticker=link.ticker,
             catalyst_type=_primary_kind(kinds),
             # NOT a resolution date - see the module docstring. The feeds
