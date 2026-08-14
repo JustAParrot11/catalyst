@@ -277,7 +277,79 @@ def route_setup(db: Db, params: dict) -> str:
     return render_page("Setup", panels.setup_stub(p="setup"), "/setup", db.path, db=db)
 
 
-def diagnostics_bundle(db: Db) -> dict:
+
+#: WHAT TO COLLECT FOR WHICH QUESTION. The owner asked for "different
+#: type of log collection buttons for different issues e.g. pricing or
+#: logic etc. Then one master log that is all".
+#:
+#: A scoped bundle is not a smaller master bundle for its own sake: it
+#: is the difference between sending a 4MB dump and sending the twelve
+#: fields that answer the question. Each scope names the tables and the
+#: log components that a person investigating THAT question actually
+#: reads.
+#:
+#: `all` is the master and stays the default, so an existing link or
+#: bookmark keeps returning everything it always did.
+class _Skipped(Exception):
+    """This section is outside the requested scope."""
+
+
+DIAGNOSTIC_SCOPES = {
+    "all": {
+        "label": "Everything",
+        "why": "the master bundle - every section below, plus row counts "
+               "for every table. Send this if you are not sure which.",
+        "tables": None,          # None = every table
+        "sections": None,        # None = every section
+        "log_components": None,  # None = every component
+    },
+    "pricing": {
+        "label": "Cost & pricing",
+        "why": "spend, the rate table, reconciliation against the bill, "
+               "and every governor decision. Send this for a wrong "
+               "figure, a surprise charge, or spending that stopped.",
+        "tables": ("cost_events", "cost_governor_events",
+                   "cost_reconciliation_events", "cost_reprice_events",
+                   "token_prices"),
+        "sections": ("cost",),
+        "log_components": ("catalyst.cost", "catalyst.research"),
+    },
+    "logic": {
+        "label": "Decisions & logic",
+        "why": "the funnel, candidates, what the model concluded and "
+               "what the risk engine did. Send this when it traded "
+               "something odd, or refused something it should not have.",
+        "tables": ("candidates", "research_calls", "research_views",
+                   "risk_decisions", "refusals", "adaptive_params",
+                   "position_reviews"),
+        "sections": ("funnel",),
+        "log_components": ("catalyst.research", "catalyst.risk",
+                           "catalyst.orchestrator"),
+    },
+    "data": {
+        "label": "Feeds & data",
+        "why": "what was read, what failed to read, and the evidence "
+               "graph. Send this when a feed looks stuck or a source is "
+               "missing.",
+        "tables": ("raw_events", "raw_events_errors", "edgar_filings_seen",
+                   "graph_nodes", "graph_edges"),
+        "sections": (),
+        "log_components": ("catalyst.data", "catalyst.scheduler"),
+    },
+    "execution": {
+        "label": "Orders & positions",
+        "why": "orders, fills, positions, stops and closed trades. Send "
+               "this for anything about what the broker actually did.",
+        "tables": ("orders", "fills", "positions", "closed_trades",
+                   "stop_confirmations", "kill_switch_events",
+                   "equity_snapshots"),
+        "sections": (),
+        "log_components": ("catalyst.execution", "catalyst.orchestrator"),
+    },
+}
+
+
+def diagnostics_bundle(db: Db, scope: str = "all") -> dict:
     """One-click diagnostic export, credentials redacted.
 
     Redaction runs over the WHOLE bundle after assembly as well as at
@@ -305,11 +377,30 @@ def diagnostics_bundle(db: Db) -> dict:
         ),
         "env_var_names_only": sorted(__import__("os").environ.keys()),
     }
+    spec = DIAGNOSTIC_SCOPES.get(scope) or DIAGNOSTIC_SCOPES["all"]
+    # SAY WHAT WAS COLLECTED, and what was deliberately left out. A
+    # scoped bundle that does not announce its scope reads as a complete
+    # one with things mysteriously missing.
+    bundle["scope"] = scope if scope in DIAGNOSTIC_SCOPES else "all"
+    bundle["scope_covers"] = spec["why"]
+    bundle["scope_note"] = (
+        "This is the MASTER bundle - nothing is filtered out."
+        if spec["tables"] is None else
+        "This bundle is SCOPED. Tables and log components outside the "
+        "scope are omitted on purpose, not missing. Use "
+        "/diagnostics.json?scope=all for everything.")
+    wanted = spec["tables"]
     for name in sorted(db.tables()):
+        if wanted is not None and name not in wanted:
+            continue
         res = db.count(name)
         bundle["row_counts"][name] = res.scalar(0) if not res.error else res.error
 
+    if spec["sections"] is not None and "funnel" not in spec["sections"]:
+        bundle.pop("funnel", None)
     try:
+        if "funnel" not in bundle:
+            raise _Skipped()
         f = queries.funnel(db)
         bundle["funnel"] = {
             "blame": f.blame,
@@ -323,10 +414,16 @@ def diagnostics_bundle(db: Db) -> dict:
                 for s in f.stages
             ],
         }
+    except _Skipped:
+        pass
     except Exception:
         bundle["funnel"] = {"error": traceback.format_exc()}
 
+    if spec["sections"] is not None and "cost" not in spec["sections"]:
+        bundle.pop("cost", None)
     try:
+        if "cost" not in bundle:
+            raise _Skipped()
         c = queries.cost_panel(db)
         bundle["cost"] = {
             "month": c.month_prefix,
@@ -339,6 +436,8 @@ def diagnostics_bundle(db: Db) -> dict:
             "rates_stale": c.rates_stale,
             "ledger_crosscheck": c.ledger_crosscheck,
         }
+    except _Skipped:
+        pass
     except Exception:
         bundle["cost"] = {"error": traceback.format_exc()}
 
@@ -347,8 +446,28 @@ def diagnostics_bundle(db: Db) -> dict:
     bundle["recent_errors"] = errs.dicts() if not errs.error else [{"query_error": errs.error}]
 
     if db.table_exists("logs"):
-        lg = db.q("SELECT ts, level, component, message, cycle_id, traceback_text, "
-                  "context_json FROM logs ORDER BY ts DESC LIMIT 300")
+        # A SCOPED BUNDLE CARRIES MORE OF ITS OWN LOGS, not fewer. The
+        # point of narrowing is to spend the budget on lines that bear on
+        # the question, so the cap rises when the components are filtered.
+        components = spec["log_components"]
+        if components:
+            like = " OR ".join(["component LIKE ?"] * len(components))
+            lg = db.q(
+                "SELECT ts, level, component, message, cycle_id, "
+                f"traceback_text, context_json FROM logs WHERE {like} "
+                "ORDER BY ts DESC LIMIT 1000",
+                tuple(f"{c}%" for c in components))
+            # An empty result must not read as "nothing went wrong": say
+            # which components were asked for.
+            if not lg.error and not lg.rows:
+                bundle["recent_logs_note"] = (
+                    "no log lines matched components "
+                    + ", ".join(components)
+                    + " - that is an empty result, not an absence of faults")
+        else:
+            lg = db.q("SELECT ts, level, component, message, cycle_id, "
+                      "traceback_text, context_json FROM logs "
+                      "ORDER BY ts DESC LIMIT 300")
         bundle["recent_logs"] = lg.dicts() if not lg.error else [{"query_error": lg.error}]
     else:
         bundle["recent_logs"] = [{"note": "logs table absent; see "
@@ -544,9 +663,12 @@ class Handler(BaseHTTPRequestHandler):
                 # of text the owner then had to select and copy by hand
                 # (owner-reported). The brief asks for ONE CLICK.
                 stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+                params = parse_qs(parsed.query or "")
+                raw = (params.get("scope") or ["all"])[0]
+                scope = raw if raw in DIAGNOSTIC_SCOPES else "all"
                 return self._send_json(
-                    200, diagnostics_bundle(db),
-                    filename=f"catalyst-diagnostics-{stamp}.json")
+                    200, diagnostics_bundle(db, scope=scope),
+                    filename=f"catalyst-{scope}-{stamp}.json")
             handler = HTML_ROUTES.get(parsed.path)
             if handler is None:
                 return self._send_html(404, render_page(

@@ -528,8 +528,33 @@ def phase_traded(tmp: Path) -> None:
             "Content-Disposition", "")
         check("diagnostics bundle downloads rather than opening in a tab",
               disp.startswith("attachment"), f"Content-Disposition={disp!r}")
-        check("the downloaded bundle has a dated .json filename",
-              "catalyst-diagnostics" in disp and ".json" in disp, disp)
+        check("the downloaded bundle has a dated, SCOPE-NAMED filename",
+              "catalyst-all-" in disp and ".json" in disp, disp)
+
+        # ONE BUTTON PER QUESTION. Each must download, name its scope,
+        # and actually narrow what it collects - a "scoped" bundle that
+        # returns everything is a label, not a feature.
+        import json as _json
+        master = _json.loads(s.get("/diagnostics.json?scope=all")[2])
+        check("the master bundle says it is the master",
+              master.get("scope") == "all" and "MASTER" in master["scope_note"])
+        for scope in ("pricing", "logic", "data", "execution"):
+            st3, hd3, body3 = s.get(f"/diagnostics.json?scope={scope}")
+            b = _json.loads(body3)
+            check(f"scope={scope} downloads", st3 == 200 and
+                  f"catalyst-{scope}-" in hd3.get("Content-Disposition", ""),
+                  hd3.get("Content-Disposition", ""))
+            check(f"scope={scope} names itself", b.get("scope") == scope)
+            check(f"scope={scope} says what it covers", bool(b.get("scope_covers")))
+            check(f"scope={scope} warns it is filtered",
+                  "SCOPED" in b.get("scope_note", ""))
+            check(f"scope={scope} collects FEWER tables than the master",
+                  0 < len(b["row_counts"]) < len(master["row_counts"]),
+                  f"{len(b['row_counts'])} vs master {len(master['row_counts'])}")
+        # an unknown scope must fall back to the master, not 500
+        st4, _, body4 = s.get("/diagnostics.json?scope=nonsense")
+        check("an unknown scope falls back to the master",
+              st4 == 200 and _json.loads(body4).get("scope") == "all")
 
         # EVERY LINK THE MAP EMITS MUST GO SOMEWHERE REAL. A node that
         # links to an empty page costs a click to discover, which is

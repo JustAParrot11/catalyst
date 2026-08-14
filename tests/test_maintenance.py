@@ -284,12 +284,42 @@ class TestDiagnosticExport:
     from stage 6 but had NO way in from the UI and no route at all when
     the page itself is down - which is exactly when it is wanted."""
 
-    def test_the_page_offers_a_download(self, db):
+    def test_the_page_offers_a_download_PER_ISSUE_plus_a_master(self, db):
+        """Owner-asked: "different type of log collection buttons for
+        different issues e.g. pricing or logic etc. Then one master log
+        that is all." One button is no longer the requirement."""
+        from catalyst.dashboard.server import DIAGNOSTIC_SCOPES
+
         report = maintenance.build_report(db, None, run_active=False)
         html = panels.maintenance_panel(report)
-        assert 'href="/diagnostics.json"' in html
-        assert 'download="catalyst-diagnostics.json"' in html
+        for scope in DIAGNOSTIC_SCOPES:
+            assert f'href="/diagnostics.json?scope={scope}"' in html, scope
+            assert f'download="catalyst-{scope}.json"' in html, scope
         assert "keys and secrets are stripped" in html.replace("\n", " ")
+
+    def test_every_button_says_what_it_covers(self, db):
+        """Choosing between them must not require knowing the schema."""
+        from catalyst.dashboard.server import DIAGNOSTIC_SCOPES
+
+        report = maintenance.build_report(db, None, run_active=False)
+        html = panels.maintenance_panel(report)
+        # Compared ESCAPED, because that is how the page renders them:
+        # "Cost & pricing" reaches the HTML as "Cost &amp; pricing", and
+        # a test comparing the raw string fails for a reason that has
+        # nothing to do with whether the label is on the page.
+        from catalyst.dashboard.render import esc
+
+        for scope, spec in DIAGNOSTIC_SCOPES.items():
+            assert esc(spec["label"]) in html, scope
+            gist = spec["why"].split(" - ")[0].split(",")[0]
+            assert esc(gist) in html, scope
+
+    def test_the_master_is_visually_the_default(self, db):
+        report = maintenance.build_report(db, None, run_active=False)
+        html = panels.maintenance_panel(report)
+        assert "bundlebtn master" in html, (
+            "the everything bundle should be the obvious one to send "
+            "when the owner does not know which applies")
 
     def test_the_page_names_the_offline_command(self, db):
         report = maintenance.build_report(db, None, run_active=False)
