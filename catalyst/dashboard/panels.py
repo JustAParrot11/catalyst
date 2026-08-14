@@ -11,6 +11,7 @@ from decimal import Decimal
 
 from catalyst.dashboard import charts, queries
 from catalyst.dashboard.db import Db, START_CAPITAL_CENTS, jload
+from catalyst.discovery.conjunctions import sector_band
 from catalyst.dashboard.render import (
     BAKEOFF_CAVEAT,
     MIN_TRADES_FOR_MEANING,
@@ -1176,6 +1177,18 @@ def _why_not_researched(db: Db, candidate_id: str) -> str:
             "not researched - an unprotected position blocks new entries",
         "unconfirmed_submit_blocks_entries":
             "not researched - an unconfirmed order blocks new entries",
+        # The five the cycle used to leave unrecorded, so every one of
+        # them read as the benign "not researched yet". One of them means
+        # there is no API key at all, which is not a queue.
+        "deferred_max_research_per_cycle":
+            "queued - over this cycle's research limit, next cycle",
+        "no_model_transport_configured":
+            "not researched - NO ANTHROPIC KEY configured, so nothing can "
+            "be researched at all",
+        "no_market_quote":
+            "not researched - no live quote for this ticker",
+        "ticker_already_entered_this_cycle":
+            "not researched - already entered this ticker this cycle",
     }
     for key, text in friendly.items():
         if key in reason:
@@ -1207,7 +1220,12 @@ def decisions_index(db: Db, p: str = "dec") -> str:
             status = "declined"
         rows.append([
             f'<a href="/decision?candidate_id={esc(r["id"])}">{esc(r["ticker"])}</a>',
-            esc(r["catalyst_type"]), esc(r["catalyst_date"]), esc(r["sector"]),
+            esc(r["catalyst_type"]), esc(r["catalyst_date"]),
+            # THE BAND, WITH THE CODE BESIDE IT. "2870" in a column
+            # headed SECTOR is a SIC code and means nothing to a reader;
+            # the mapping already existed for the correlation logic.
+            f'{esc(sector_band(r["sector"]))} '
+            f'<span class="prov">SIC {esc(r["sector"])}</span>',
             esc(r["direction"] or "-"),
             esc(f"{r['conviction']:.2f}" if r["conviction"] is not None else "-"),
             esc("yes" if r["priced_in"] else ("no" if r["priced_in"] is not None else "-")),
@@ -1236,7 +1254,8 @@ def _narrative_what_was_seen(t: queries.Trace, p: str) -> str:
             f"candidate from {len(t.source_event_ids)} raw source event(s): "
             f"<b>{esc(c['ticker'])}</b>, catalyst type <b>{esc(c['catalyst_type'])}</b>, "
             f"resolving {esc(c['catalyst_date'])} "
-            f"({esc(c['catalyst_date_confidence'])}), sector {esc(c['sector'])}, "
+            f"({esc(c['catalyst_date_confidence'])}), sector "
+            f"{esc(sector_band(c['sector']))} (SIC {esc(c['sector'])}), "
             f"correlation tags {esc(c['correlation_tags'])}.</p>"
         )
     else:
@@ -1847,11 +1866,17 @@ def trace_page(db: Db, candidate_id: str, p: str = "tr") -> str:
         conviction_f = float(conviction) if conviction is not None else None
     except (TypeError, ValueError):
         conviction_f = None
-    direction = str(view.get("direction") or "&mdash;")
+    # THE LITERAL CHARACTER, NEVER THE ENTITY. A placeholder that passes
+    # through esc() a second time becomes &amp;mdash;, and .upper() makes
+    # that &AMP;MDASH; - which the browser then renders as the visible
+    # text "&MDASH;". Owner-reported, on the verdict tile of a decision
+    # with no risk row. esc() leaves a real em dash alone.
+    DASH = "—"
+    direction = str(view.get("direction") or DASH)
     closed = dict(t.closed_q.rows[0]) if t.closed_q.rows else {}
 
     header = [tiles(f"{p}-tiles", [
-        ("Verdict", esc(action or "&mdash;").upper() or "&mdash;",
+        ("Verdict", esc(action.upper() if action else DASH),
          f"{pill(verdict_state, verdict_word)} "
          + esc(str(decision.get("at") or "no timestamp"))),
         ("Model view", esc(direction),
@@ -1859,7 +1884,7 @@ def trace_page(db: Db, candidate_id: str, p: str = "tr") -> str:
           else "no view recorded") + " - the model proposes, code disposes"),
         ("Size the code chose",
          dollars(_cents(decision.get("notional_usd"))) if decision.get("notional_usd")
-         else "&mdash;",
+         else DASH,
          "set by the risk engine, never by the model"),
         ("Outcome",
          dollars(closed.get("realized_pnl_cents")) if closed else "open / none",
@@ -2088,22 +2113,51 @@ def bundle_buttons(p: str) -> str:
     them - having gone, reasonably, to Logs. A control that exists on a
     page nobody thinks to open has not shipped.
     """
-    from catalyst.dashboard.server import DIAGNOSTIC_SCOPES
+    from catalyst.dashboard.server import (
+        DEFAULT_WINDOW_DAYS, DIAGNOSTIC_SCOPES, LOG_WINDOW_DAYS,
+    )
 
     out = [f'<h3 id="{p}-bundle">Collect logs to send on</h3>',
-           "<p>Pick the one that matches what went wrong. Each downloads "
-           "a single file. <b>Safe to send on</b>: keys and secrets are "
-           "stripped twice &mdash; once where each value is captured, "
-           "and again over the whole file before it is written.</p>"]
+           "<p>Pick what went wrong and how far back to look, then "
+           "download one file. <b>Safe to send on</b>: keys and secrets "
+           "are stripped twice &mdash; once where each value is "
+           "captured, and again over the whole file before it is "
+           "written.</p>",
+           f'<form id="{p}-bundle-form" method="get" '
+           'action="/diagnostics.json">']
     for key in ("everything", "all", "pricing", "logic", "data",
                 "execution"):
         spec = DIAGNOSTIC_SCOPES[key]
         master = " master" if key == "everything" else ""
         out.append(
-            f'<p class="bundlerow"><a class="bundlebtn{master}" '
-            f'href="/diagnostics.json?scope={key}" '
-            f'download="catalyst-{key}.json">{esc(spec["label"])}</a>'
+            f'<p class="bundlerow"><label class="bundlebtn{master}">'
+            f'<input type="radio" name="scope" value="{key}"'
+            + (" checked" if key == "everything" else "")
+            + f'> {esc(spec["label"])}</label>'
             f'<span class="bundlewhy">{esc(spec["why"])}</span></p>')
+    # HOW FAR BACK. Owner-asked: "When i click download log i want it to
+    # ask me how many days of logs so im not getting a massive file."
+    # A default of everything is how a diagnostic export becomes a file
+    # nobody can open.
+    opts = "".join(
+        f'<option value="{d or 0}"'
+        + (" selected" if d == DEFAULT_WINDOW_DAYS else "") + ">"
+        + (f"last {d} day{'s' if d != 1 else ''}" if d else "everything, "
+           "however old")
+        + "</option>"
+        for d in LOG_WINDOW_DAYS)
+    out.append(
+        f'<p class="bundlerow"><label class="bundlebtn" for="{p}-days">'
+        f'How far back</label><span class="bundlewhy">'
+        f'<select id="{p}-days" name="days">{opts}</select> '
+        "&mdash; anything with a timestamp is cut to this window. Rows "
+        "with no timestamp at all (the current positions, the price "
+        "table) always come out whole, and the file says which those "
+        "were.</span></p>"
+        f'<p class="bundlerow"><button class="bundlebtn master" '
+        f'type="submit" id="{p}-bundle-go">Download</button>'
+        '<span class="bundlewhy">One file, named for what you picked.'
+        "</span></p></form>")
     out.append(prov(
         "If the page itself will not load, the same file can be produced "
         "on the server with:  sudo -u catalyst /opt/catalyst/venv/bin/python "
@@ -2498,17 +2552,20 @@ def state_line(db: Db, p: str = "state") -> str:
             + " &middot; ".join(bits) + "</p>")
 
 
-def brain_view_controls(p: str, zoom: float, nodes: int) -> str:
+def brain_view_controls(p: str, zoom: float, nodes: int,
+                        focus: str = "") -> str:
     """Zoom and expand, as LINKS. No JavaScript, by design - the map is
     documented as deterministic, and a JS pan/zoom draws a different
     picture per browser. Each control is a URL, so a view the owner
     finds useful can be bookmarked or pasted into a bug report.
     """
+    tail = f"&amp;focus={esc(focus)}" if focus else ""
+
     def opt(label, key, value, current):
         on = abs(float(current) - float(value)) < 1e-9
         other = "nodes" if key == "zoom" else "zoom"
         other_v = nodes if key == "zoom" else zoom
-        href = f"/brain?{key}={value}&amp;{other}={other_v:g}"
+        href = f"/brain?{key}={value}&amp;{other}={other_v:g}{tail}"
         cls = "viewopt on" if on else "viewopt"
         return (f'<span class="{cls}">{label}</span>' if on else
                 f'<a class="{cls}" href="{href}">{label}</a>')
@@ -2520,7 +2577,7 @@ def brain_view_controls(p: str, zoom: float, nodes: int) -> str:
                    (("fit", 1), ("1.5x", 1.5), ("2x", 2), ("3x", 3)))
         + ' <span class="viewbar-label">Show per layer</span> '
         + " ".join(opt(t, "nodes", v, nodes) for t, v in
-                   (("14", 14), ("30", 30), ("60", 60), ("all", 999)))
+                   (("8", 8), ("14", 14), ("30", 30), ("all", 999)))
         + "</p>"
         + prov("Zoom widens the drawing and the panel scrolls sideways; "
                "it never redraws the graph differently. Node labels are "
@@ -2528,8 +2585,33 @@ def brain_view_controls(p: str, zoom: float, nodes: int) -> str:
                "always on hover."))
 
 
+def brain_ways_in(b, p: str) -> str:
+    """The handful of nodes worth opening first.
+
+    OWNER-REPORTED: "its got too much data all at once and isnt easy to
+    navigate." A whole-graph picture has no entry point - every node
+    looks like every other node, so there is nowhere obvious to click
+    and the reader is left to scan a texture. These are the busiest
+    nodes, named, in order, each opening its own neighbourhood.
+    """
+    top = queries.busiest_nodes(b, limit=8)
+    if not top:
+        return ""
+    chips = "".join(
+        f'<a class="waychip" href="/brain?focus={esc(nid)}">'
+        f'{esc(nlabel)}<span class="waychip-n">{weight}</span></a>'
+        for nid, nlabel, _layer, weight in top)
+    return (f'<div class="waysin" id="{p}-waysin">'
+            "<h3>Start with one thing</h3>"
+            f"<p>{chips}</p>"
+            + prov("The most connected nodes, with how many links each "
+                   "carries. Opening one draws just that node and what "
+                   "it touches - the same recorded links, a picture you "
+                   "can read.") + "</div>")
+
+
 def brain_panel(db: Db, p: str = "brain", zoom: float = 1.0,
-                nodes: int = None) -> str:
+                nodes: int = None, focus: str = "") -> str:
     """The whole system's wiring in one picture.
 
     Not a metaphor and not an illustration: every node is a row and
@@ -2552,12 +2634,47 @@ def brain_panel(db: Db, p: str = "brain", zoom: float = 1.0,
                                    meaning="no rows behind this layer yet"))
         return section(f"{p}-section", "The brain", "".join(out))
 
-    out.append(
-        f'<p id="{p}-headline"><span class="big">{b.edge_count}</span> recorded '
-        f"link(s) across {b.node_count} node(s). Left to right is the path a "
-        "filing takes to become a trade: what the bot read, what it built from "
-        "it, what it linked, what the model made of it, what the code decided, "
-        "and what actually happened.</p>")
+    # FOCUS FIRST. A whole-graph picture answers "is anything connected"
+    # and little else; past a few dozen nodes the lines are a texture.
+    # Owner-reported: "its got too much data all at once and isnt easy
+    # to navigate." The focused view is a SUBSET of the same edges, so a
+    # line here is the same recorded row it was on the whole map.
+    whole = b
+    focus_label = ""
+    if focus:
+        b = queries.brain_focus(whole, focus)
+        focus_label = next(
+            (nlabel for _lbl, ns in whole.layers for nid, nlabel, _w in ns
+             if nid == focus), focus)
+        if not b.edge_count:
+            out.append(note(
+                f'<b id="{p}-nofocus">Nothing is recorded as connecting to '
+                f"{esc(str(focus_label))}.</b> That is a fact about the "
+                "data rather than a gap in the page - every line on this "
+                "map is a stored row. "
+                f'<a href="/brain">Show the whole map</a>.'))
+            return section(f"{p}-section", "The brain", "".join(out))
+        out.append(
+            f'<p class="crumb" id="{p}-crumb">'
+            f'<a href="/brain">The whole map</a> &rsaquo; '
+            f"<b>{esc(str(focus_label))}</b></p>")
+        out.append(
+            f'<p id="{p}-headline"><span class="big">{b.edge_count}</span> '
+            f"link(s) touching <b>{esc(str(focus_label))}</b>, across "
+            f"{b.node_count} node(s), out to "
+            f"{queries.FOCUS_HOPS} step(s). This is a slice of the "
+            f"{whole.edge_count} link(s) on the whole map, not a "
+            f"different picture. "
+            f'<a href="/node?id={esc(focus)}">What is this node?</a></p>')
+    else:
+        out.append(
+            f'<p id="{p}-headline"><span class="big">{b.edge_count}</span> '
+            f"recorded link(s) across {b.node_count} node(s). Left to right "
+            "is the path a filing takes to become a trade: what the bot "
+            "read, what it built from it, what it linked, what the model "
+            "made of it, what the code decided, and what actually "
+            "happened.</p>")
+        out.append(brain_ways_in(b, p))
     # Candidate nodes go somewhere: clicking one opens its decision.
     # EVERY node that HAS a record links to it, not just candidates.
     # The owner asked to "click to see the news"; only Candidate nodes
@@ -2592,11 +2709,12 @@ def brain_panel(db: Db, p: str = "brain", zoom: float = 1.0,
                 # empty page. A link that goes somewhere useless is worse
                 # than no link, because it costs a click to find out.
                 links[key] = f"/newsmap?ticker={esc(str(nlabel).strip())}"
-    out.append(brain_view_controls(p, zoom, cap))
+    out.append(brain_view_controls(p, zoom, cap, focus=focus))
     out.append('<div class="chart-wrap chart-scroll">' + charts.neural_map(
         [(esc(label), [(esc(nid), esc(nlabel), w) for nid, nlabel, w in nodes])
          for label, nodes in b.layers],
-        [(esc(s), esc(d), w, esc(t)) for s, d, w, t in b.edges],
+        [(esc(s), esc(d), w, esc(t))
+         for s, d, w, t in queries.collapse_edges(b.edges)],
         chart_id=f"{p}-map", links=links,
         max_per_layer=cap, zoom=zoom) + "</div>")
     out.append(prov(

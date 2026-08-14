@@ -610,6 +610,20 @@ a.viewopt:hover { border-color: var(--accent); color: var(--ink); }
               border-radius: 2px; padding: 0 5px; font-size: 10px;
               letter-spacing: .06em; font-weight: 700; margin-right: 6px;
               vertical-align: 1px; }
+/* Entry points into the map. A graph with no obvious place to click
+   leaves the reader scanning a texture; these are the busiest nodes,
+   named, each opening its own neighbourhood. */
+.waysin { margin: 10px 0 14px; }
+.waysin h3 { margin: 0 0 6px; }
+.waysin p { margin: 0 0 4px; display: flex; flex-wrap: wrap; gap: 6px; }
+.waychip { display: inline-flex; align-items: baseline; gap: 6px;
+           padding: 4px 9px; border: 1px solid var(--line);
+           border-radius: 12px; font-size: 12px; text-decoration: none;
+           background: var(--panel); }
+.waychip:hover { border-color: var(--accent); color: var(--accent); }
+.waychip-n { color: var(--muted); font-size: 11px;
+             font-variant-numeric: tabular-nums; }
+.crumb { margin: 0 0 6px; font-size: 12px; color: var(--muted); }
 /* The way OUT of a fault, beside the description of it. A block that
    says what is wrong and not where to fix it sends the reader hunting -
    the reconciliation block told the owner to open the wrong page. */

@@ -1495,6 +1495,98 @@ def brain(db: Db, limit: int = 60) -> Brain:
     return b
 
 
+#: How many hops out from a focused node the map draws. ONE, measured:
+#: this graph is hub-and-spoke, so two hops from a busy node reaches
+#: most of it and gives back the wall the focus existed to escape.
+#:
+#:     focus                     hops=1     hops=2
+#:     skip                      4n/40e    24n/60e
+#:     no_trade                 12n/20e    19n/60e
+#:     Insider trades (Form 4)    9n/8e    11n/12e
+FOCUS_HOPS = 1
+
+
+def collapse_edges(edges: list) -> list:
+    """One line per relationship, however many rows recorded it.
+
+    Twenty decisions all citing conviction_below_floor are twenty rows
+    and twenty edges, drawn as twenty identical lines on top of each
+    other: forty SVG elements the reader sees as one, with no hint that
+    the relationship is heavy rather than singular.
+
+    The COUNT IS NOT LOST - it becomes the line's weight, and the hover
+    text says how many rows are behind it. The headline still reports
+    every recorded link, because that is what the database holds.
+    """
+    merged: dict = {}
+    for src, dst, weight, title in edges:
+        key = (src, dst)
+        if key in merged:
+            w, t, n = merged[key]
+            merged[key] = (w + (weight or 1), t, n + 1)
+        else:
+            merged[key] = (weight or 1, title, 1)
+    return [(src, dst, w, (f"{t}  (and {n - 1} more like it - "
+                           f"{n} recorded links)" if n > 1 else t))
+            for (src, dst), (w, t, n) in merged.items()]
+
+
+def brain_focus(whole: Brain, node_id: str, hops: int = FOCUS_HOPS) -> Brain:
+    """The neighbourhood of ONE node, as its own small map.
+
+    OWNER-REPORTED: "its got too much data all at once and isnt easy to
+    navigate."
+
+    A whole-graph picture answers "is anything connected" and almost
+    nothing else - past a few dozen nodes the lines are a texture rather
+    than information. What a reader actually wants is one thing and what
+    it touches, which is small, legible, and a question the graph can
+    answer exactly.
+
+    Nothing is invented here: this is a SUBSET of the same edges, so a
+    line on a focused map is the same recorded row it was on the whole
+    one. The counts are recomputed over the subset, because reporting
+    the whole graph's totals beside a fragment of it would misdescribe
+    the picture on screen.
+    """
+    focused = Brain(queries=list(whole.queries))
+    if not node_id:
+        return focused
+    reached = {node_id}
+    for _ in range(max(1, hops)):
+        nxt = set(reached)
+        for src, dst, _w, _t in whole.edges:
+            if src in reached:
+                nxt.add(dst)
+            if dst in reached:
+                nxt.add(src)
+        if nxt == reached:
+            break                       # nothing further to reach
+        reached = nxt
+    focused.edges = [e for e in whole.edges
+                     if e[0] in reached and e[1] in reached]
+    kept = {n for e in focused.edges for n in (e[0], e[1])} | {node_id}
+    focused.layers = [
+        (label, [n for n in nodes if n[0] in kept])
+        for label, nodes in whole.layers]
+    focused.layers = [(lbl, ns) for lbl, ns in focused.layers if ns]
+    focused.node_count = sum(len(n) for _, n in focused.layers)
+    focused.edge_count = len(focused.edges)
+    return focused
+
+
+def busiest_nodes(b: Brain, limit: int = 8) -> list:
+    """The handful worth focusing on first, most connected first.
+
+    A map with no way in is a map nobody uses. These are the entry
+    points: [(id, label, layer, links)].
+    """
+    ranked = [(nid, nlabel, layer, weight)
+              for layer, nodes in b.layers for nid, nlabel, weight in nodes]
+    ranked.sort(key=lambda r: -r[3])
+    return ranked[:limit]
+
+
 # --------------------------------------------------------------------------
 # The news map: what was said, about whom, and what the bot did about it
 # --------------------------------------------------------------------------
@@ -1912,5 +2004,12 @@ def node_detail(db: Db, node_id: str) -> NodeDetail:
     if detail.label and kind in ("cand", "company", "ent"):
         detail.links.append(("See what the news said about it",
                              f"/newsmap?ticker={detail.label}"))
-    detail.links.append(("Back to the map", "/brain"))
+    # THE NAVIGATION LOOP. Map -> this runbook -> just this node's
+    # corner of the map -> the next runbook. Without the middle step the
+    # only way back into the picture is the whole picture, which is the
+    # thing that was hard to read in the first place.
+    if detail.found:
+        detail.links.append(("Draw just this node and what it touches",
+                             f"/brain?focus={node_id}"))
+    detail.links.append(("Back to the whole map", "/brain"))
     return detail
