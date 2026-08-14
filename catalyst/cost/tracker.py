@@ -547,3 +547,47 @@ def acknowledge_discrepancy(conn: sqlite3.Connection, event_id: str, acknowledge
     conn.commit()
     if cur.rowcount == 0:
         raise ValueError(f"no unacknowledged reconciliation event {event_id!r}")
+
+
+def clear_pauses_that_no_longer_qualify(conn: sqlite3.Connection) -> int:
+    """Re-judge OLD paused rows against the rule now in force. Returns
+    how many were cleared.
+
+    THE UPGRADE ALONE DOES NOT UNBLOCK ANYTHING, and that is the trap
+    this exists to close. drift_is_material() governs whether a NEW
+    reconciliation pauses; a row already written under the old five-cent
+    rule sits in the database unacknowledged and keeps blocking every
+    call forever. The owner would have upgraded, seen "spending was
+    blocked" unchanged, and reasonably concluded the fix did nothing.
+
+    This is not "ignore a fault". It re-asks the same question with the
+    rule the owner chose on 2026-08-14 - block only if large - and
+    clears only the rows whose own recorded discrepancy does not clear
+    that bar. A row that WOULD still pause is left alone, and every
+    clearance is stamped with why, so the audit trail says who decided
+    and on what basis.
+    """
+    rows = conn.execute(
+        "SELECT id, discrepancy_cents, cost_api_total_cents FROM "
+        "cost_reconciliation_events WHERE action_taken = 'scheduled_paused' "
+        "AND acknowledged_at IS NULL").fetchall()
+    cleared = 0
+    for row_id, discrepancy, api_total in rows:
+        try:
+            drift = Decimal(str(discrepancy))
+            spend = Decimal(str(api_total))
+        except (TypeError, ValueError, ArithmeticError):
+            continue          # unreadable: leave it blocking, for a human
+        if drift_is_material(drift, None, None, window_total=spend):
+            continue          # still large under the current rule
+        conn.execute(
+            "UPDATE cost_reconciliation_events SET acknowledged_by = ?, "
+            "acknowledged_at = ? WHERE id = ?",
+            ("auto: re-judged under the block-only-if-large rule "
+             "(owner decision 2026-08-14); this discrepancy does not "
+             "clear the current bar",
+             datetime.now(timezone.utc).isoformat(), row_id))
+        cleared += 1
+    if cleared:
+        conn.commit()
+    return cleared

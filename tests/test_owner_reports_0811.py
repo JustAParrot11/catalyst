@@ -354,7 +354,11 @@ def _tmp_db_with_feed_error():
     conn = sqlite3.connect(path)
     conn.executescript(open("catalyst/storage/schema.sql").read())
     conn.execute("INSERT INTO raw_events_errors VALUES (?,?,?)",
-                 ("edgar_form4", "2026-08-11T12:00:00+00:00",
+                 # Anchored to the REAL clock: the feed-health panel now
+                 # looks back a few days, and a hardcoded date silently
+                 # ages out of that window - the same calendar rot that
+                 # already bit test_risk.py on this branch.
+                 ("edgar_form4", datetime.now(timezone.utc).isoformat(),
                   "<html><title>SEC.gov | Request Rate Threshold Exceeded"
                   "</title><body>" + ("padding " * 400) + "</body></html>"))
     conn.commit()

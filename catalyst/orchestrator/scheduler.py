@@ -617,6 +617,22 @@ def main(argv: list[str] | None = None) -> int:
     if parent:
         os.makedirs(parent, mode=0o700, exist_ok=True)
     init_db(path).close()
+    # A pause written under the OLD five-cent rule keeps blocking every
+    # call after the upgrade, because the new rule only governs new
+    # reconciliations. Re-judge stale pauses against the rule now in
+    # force, or the owner upgrades, sees "spending was blocked"
+    # unchanged, and concludes the fix did nothing.
+    try:
+        from catalyst.cost.tracker import clear_pauses_that_no_longer_qualify
+        _conn = init_db(path)
+        cleared = clear_pauses_that_no_longer_qualify(_conn)
+        _conn.close()
+        if cleared:
+            _log.info("cleared %d reconciliation pause(s) that no longer "
+                      "qualify under the block-only-if-large rule", cleared)
+    except Exception:  # noqa: BLE001 - never block startup on housekeeping
+        _log.warning("could not re-judge stale reconciliation pauses",
+                     exc_info=True)
     _log.info("Database ready at %s", path)
 
     if "--selftest" in args:

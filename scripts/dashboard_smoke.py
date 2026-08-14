@@ -371,6 +371,7 @@ TRACE_SIMPLE = "/decision?candidate_id=cand-traded-1"
 TRACE_FULL = TRACE_SIMPLE + "&view=full"
 
 ROUTES = ["/", "/performance", "/funnel", "/costs", "/decisions", "/brain",
+          "/chain",
           TRACE_SIMPLE, TRACE_FULL,
           "/decision?candidate_id=cand-declined-1",
           "/decision?candidate_id=cand-declined-1&view=full",
@@ -388,10 +389,11 @@ def phase_traded(tmp: Path) -> None:
     os.environ["CATALYST_BARS"] = str(bars)
 
     with Served(db_file) as s:
-        pages = {}
+        pages, headers_by_route = {}, {}
         for route in ROUTES:
             status, headers, body = s.get(route)
             pages[route] = body
+            headers_by_route[route] = headers
             check(f"GET {route} -> 200", status == 200, f"got {status}")
             check(f"{route} is uncached",
                   headers.get("Cache-Control", "").startswith("no-store"),
@@ -517,6 +519,43 @@ def phase_traded(tmp: Path) -> None:
                 closed = len(_re.findall(rf"</{tag}>", body))
                 check(f"{route} closes every <{tag}>", opened == closed,
                       f"opened {opened}, closed {closed}")
+
+        # THE DOWNLOAD MUST DOWNLOAD. Without a Content-Disposition the
+        # browser renders JSON inline, so "one click exports a diagnostic
+        # bundle" became "select this wall of text and copy it"
+        # (owner-reported).
+        disp = headers_by_route["/diagnostics.json"].get(
+            "Content-Disposition", "")
+        check("diagnostics bundle downloads rather than opening in a tab",
+              disp.startswith("attachment"), f"Content-Disposition={disp!r}")
+        check("the downloaded bundle has a dated .json filename",
+              "catalyst-diagnostics" in disp and ".json" in disp, disp)
+
+        # EVERY LINK THE MAP EMITS MUST GO SOMEWHERE REAL. A node that
+        # links to an empty page costs a click to discover, which is
+        # worse than a node that does not link at all.
+        import re as _re2
+        brain_links = set(_re2.findall(r'<a href="(/[^"]+)"', pages["/brain"]))
+        for href in sorted(brain_links):
+            st2, _, body2 = s.get(href.replace("&amp;", "&"))
+            check(f"brain link {href} resolves", st2 == 200, f"got {st2}")
+        check("the brain emits at least one click-through", bool(brain_links))
+
+        chain = pages["/chain"]
+        for needle, label in [
+            ("Found", "the FOUND step"),
+            ("Judged", "the JUDGED step"),
+            ("Sized", "the SIZED step"),
+            ("Placed", "the PLACED step"),
+            ("Three officers bought", "the model's own words in the chain"),
+            ("<details", "steps that expand in place"),
+            ("Open positions, re-checked", "the re-evaluation section"),
+            ("never push it out", "the only-ever-shorten rule on the page"),
+        ]:
+            check(f"/chain shows {label}", needle in chain)
+        check("/chain steps are ordered", 
+              chain.index("Found") < chain.index("Judged") < chain.index("Sized"))
+        check("/chain needs no JavaScript", "<script" not in chain.lower())
 
         costs = pages["/costs"]
         for needle, label in [

@@ -282,6 +282,12 @@ class Stage:
         return max(0, self.entered - self.count)
 
 
+#: How far back the feed-health panel looks. Older than this is
+#: history, not an alert - the panel had no window at all and so
+#: alarmed about resolved failures indefinitely.
+FEED_FAULT_WINDOW_DAYS = 3
+
+
 @dataclass
 class Funnel:
     stages: list
@@ -293,6 +299,9 @@ class Funnel:
     feed_events: int = 0
     feed_query: QueryResult | None = None
     feed_faults: list = field(default_factory=list)
+    #: Faults the feed has since recovered from. Shown for the
+    #: record, never under NEEDS ATTENTION.
+    feed_healed: list = field(default_factory=list)
 
 
 #: Risk-engine skip codes in English. The codes are what the risk engine
@@ -385,12 +394,37 @@ def funnel(db: Db) -> Funnel:
 
     # --- feed health: upstream of the funnel, and a different question
     raw_q = db.count("raw_events")
+    # HAS IT RECOVERED? That is the question the panel was not asking.
+    # It listed the last 20 errors EVER, with no window and no check for
+    # whether the feed had read successfully since - so a Form 4 failure
+    # from a rate-limit episode days ago sat under "NEEDS ATTENTION"
+    # permanently, and the owner could not tell a live fault from a
+    # healed one ("are these all old errors not removing from the screen
+    # or a genuine issue").
+    #
+    # A fault is only ATTENTION-worthy while the feed has not read
+    # anything since it. That is checkable, from rows that exist.
     err_q = db.q(
         "SELECT source, attempted_at, error_text FROM raw_events_errors "
-        "ORDER BY attempted_at DESC LIMIT 20"
-    )
-    feed_faults = [(f"{source_label(r['source'])} could not be read", 1,
-                    str(r["error_text"] or "")) for r in err_q.rows]
+        "WHERE attempted_at >= ? ORDER BY attempted_at DESC LIMIT 20",
+        ((datetime.now(timezone.utc) - timedelta(days=FEED_FAULT_WINDOW_DAYS)
+          ).isoformat(),))
+    feed_faults, feed_healed = [], []
+    for r in err_q.rows:
+        source, when = str(r["source"]), str(r["attempted_at"])
+        ok_since = db.q(
+            "SELECT COUNT(*) AS n FROM raw_events WHERE source = ? "
+            "AND fetched_at > ?", (source, when))
+        n_ok = int(ok_since.rows[0]["n"]) if ok_since.rows else 0
+        entry = (f"{source_label(source)} could not be read", 1,
+                 str(r["error_text"] or ""))
+        if n_ok > 0:
+            feed_healed.append(
+                (f"{source_label(source)} failed, then recovered", 1,
+                 f"{n_ok} successful read(s) since {when[:16]} - "
+                 "resolved, shown for the record"))
+        else:
+            feed_faults.append(entry)
 
     # --- the funnel proper, over candidate ids
     cand_ids, cand_q = _ids(db, "SELECT id FROM candidates")
@@ -1459,3 +1493,188 @@ def news_map(db: Db, *, days: int = 3, kind: str = "",
                  "only_linked": only_linked},
         cross_feed_tickers=tuple(sorted(linked)),
     )
+
+
+# --------------------------------------------------------------------------
+# Decision chains: every step, in order, with its justification
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class ChainStep:
+    """One link in the chain from raw filing to placed order."""
+
+    n: int
+    stage: str          # short label: "Found", "Linked", "Judged", ...
+    headline: str       # one line: WHAT happened
+    why: str            # one line: WHY it moved on, or why it stopped
+    detail: list        # [(label, value)] shown when expanded
+    href: str = ""      # click-through to the underlying record
+    stopped: bool = False
+
+
+@dataclass
+class Chain:
+    candidate_id: str
+    ticker: str
+    verdict: str        # "traded", "declined", "in progress"
+    steps: list = field(default_factory=list)
+
+
+@dataclass
+class Chains:
+    chains: list = field(default_factory=list)
+    query: QueryResult | None = None
+
+
+def decision_chains(db: Db, limit: int = 12) -> Chains:
+    """The ordered story of each recent candidate.
+
+    THE OWNER ASKED FOR THIS IN THESE WORDS: "I want every decision with
+    justification in order from what is researched to find to placing a
+    trade."
+
+    The brain map answers "what is connected to what". It cannot answer
+    "what happened, then what, and why" - a picture of a graph has no
+    order in it. This does, one row per step, and every step carries the
+    reason it moved on or the reason it stopped.
+
+    Nothing here is inferred. Each step is built from rows that exist,
+    and a step with no row says so rather than being quietly skipped -
+    a chain that hides its gaps reads as a decision that was never made.
+    """
+    cand_q = db.q(
+        "SELECT id, ticker, catalyst_type, source_event_ids, discovered_at, "
+        "       sector FROM candidates ORDER BY discovered_at DESC LIMIT ?",
+        (limit,))
+    out: list = []
+    for c in cand_q.rows:
+        cid, ticker = str(c["id"]), str(c["ticker"])
+        steps: list = []
+
+        # 1. FOUND - the raw evidence, with the actual headline where the
+        #    feed carried one. "a news event" is not evidence; the words
+        #    are.
+        ids = jload(c["source_event_ids"], []) or []
+        sources = []
+        if ids:
+            marks = ",".join("?" * len(ids))
+            for r in db.q(
+                f"SELECT source, source_id, payload_raw FROM raw_events "
+                f"WHERE source_id IN ({marks})",
+                tuple(str(i) for i in ids)).rows:
+                p = jload(r["payload_raw"], {}) or {}
+                sources.append((
+                    str(r["source"]),
+                    str(p.get("headline") or p.get("matched_phrase")
+                        or p.get("catalyst_type") or r["source_id"])[:140],
+                    str(p.get("filed_date") or p.get("filing_date") or "")[:10]))
+        steps.append(ChainStep(
+            n=1, stage="Found",
+            headline=(f"{len(sources)} piece(s) of evidence on {ticker}"
+                      if sources else f"{ticker} surfaced with no readable source rows"),
+            why=(f"grouped as {c['catalyst_type']}"
+                 + (f" in {c['sector']}" if c["sector"] else "")),
+            detail=[(f"{s} ({when or 'undated'})", text) for s, text, when in sources]
+                   or [("no raw_events row matched", str(ids))],
+            stopped=not sources))
+
+        # 2. LINKED - only for a conjunction, and it says which feeds.
+        feeds = sorted({s for s, _, _ in sources})
+        if len(feeds) > 1:
+            steps.append(ChainStep(
+                n=2, stage="Linked",
+                headline=f"{len(feeds)} independent feeds landed on {ticker}",
+                why="two unrelated sources agreeing is the whole reason this "
+                    "one was researched rather than skipped",
+                detail=[("feeds", ", ".join(feeds))]))
+
+        # 3. JUDGED - what the model concluded, in its own words.
+        view = db.q(
+            "SELECT direction, conviction, thesis, invalidation, priced_in, "
+            "       priced_in_reasoning, expected_holding_days "
+            "FROM research_views WHERE candidate_id = ?", (cid,))
+        calls = db.q(
+            "SELECT skipped_reason, cost_cents FROM research_calls "
+            "WHERE candidate_id = ? ORDER BY called_at DESC LIMIT 1", (cid,))
+        if view.rows:
+            v = view.rows[0]
+            steps.append(ChainStep(
+                n=len(steps) + 1, stage="Judged",
+                headline=f"{v['direction']} at {float(v['conviction']):.2f} conviction",
+                why=str(v["thesis"])[:400],
+                detail=[("what would prove it wrong", str(v["invalidation"])),
+                        ("already priced in?",
+                         ("yes - " if v["priced_in"] else "no - ")
+                         + str(v["priced_in_reasoning"])),
+                        ("expected hold", f"{v['expected_holding_days']} days")],
+                href=f"/decision?candidate_id={cid}&view=full",
+                stopped=str(v["direction"]) == "no_trade"))
+        else:
+            reason = (str(calls.rows[0]["skipped_reason"]) if calls.rows
+                      and calls.rows[0]["skipped_reason"] else "not researched yet")
+            steps.append(ChainStep(
+                n=len(steps) + 1, stage="Judged",
+                headline="no view was obtained",
+                why=reason, detail=[("skip reason", reason)], stopped=True))
+
+        # 4. SIZED - what deterministic code did with that view, and
+        #    which limit bound. This is where the model stops mattering.
+        dec = db.q(
+            "SELECT action, side, notional_usd, qty, stop_price, "
+            "       planned_exit_date, skip_reasons FROM risk_decisions "
+            "WHERE candidate_id = ? ORDER BY decided_at DESC LIMIT 1", (cid,))
+        if dec.rows:
+            d = dec.rows[0]
+            reasons = jload(d["skip_reasons"], []) or []
+            traded = str(d["action"]) == "trade"
+            steps.append(ChainStep(
+                n=len(steps) + 1, stage="Sized",
+                headline=(f"trade {d['side']} ${d['notional_usd']}" if traded
+                          else "declined by the risk engine"),
+                why=("stop at " + str(d["stop_price"]) + ", hard exit "
+                     + str(d["planned_exit_date"]) if traded
+                     else "; ".join(str(r) for r in reasons[:3]) or "no reason recorded"),
+                detail=([("quantity", str(d["qty"])),
+                         ("stop", str(d["stop_price"])),
+                         ("hard exit date", str(d["planned_exit_date"]))] if traded
+                        else [("limit that bound", str(r)) for r in reasons]),
+                stopped=not traded))
+
+        # 5. PLACED / 6. HAPPENED
+        orders = db.q(
+            "SELECT id, side, qty, status, submitted_at FROM orders "
+            "WHERE decision_id = ? ORDER BY submitted_at", (cid,))
+        if orders.rows:
+            o = orders.rows[0]
+            fills = db.q("SELECT price, qty, filled_at FROM fills "
+                         "WHERE order_id = ? ORDER BY filled_at", (o["id"],))
+            steps.append(ChainStep(
+                n=len(steps) + 1, stage="Placed",
+                headline=f"{o['side']} {o['qty']} - {o['status']}",
+                why=(f"filled at {fills.rows[0]['price']}" if fills.rows
+                     else "no fill recorded against this order"),
+                detail=[("submitted", str(o["submitted_at"]))]
+                       + [("fill", f"{f['qty']} @ {f['price']} on {f['filled_at']}")
+                          for f in fills.rows],
+                stopped=not fills.rows))
+            closed = db.q(
+                "SELECT realized_pnl_cents, exit_reason, actual_holding_days "
+                "FROM closed_trades WHERE position_id IN "
+                "(SELECT id FROM positions WHERE entry_order_ids LIKE ?)",
+                (f'%{o["id"]}%',))
+            if closed.rows:
+                ct = closed.rows[0]
+                steps.append(ChainStep(
+                    n=len(steps) + 1, stage="Closed",
+                    headline=f"{int(ct['realized_pnl_cents'])/100:+.2f} realised",
+                    why=f"exited on {ct['exit_reason']} after "
+                        f"{ct['actual_holding_days']} day(s)",
+                    detail=[("trigger", str(ct["exit_reason"]))]))
+
+        verdict = ("traded" if any(s.stage == "Placed" for s in steps)
+                   else "declined" if any(s.stopped for s in steps)
+                   else "in progress")
+        out.append(Chain(candidate_id=cid, ticker=ticker, verdict=verdict,
+                         steps=steps))
+    return Chains(chains=out, query=cand_q)

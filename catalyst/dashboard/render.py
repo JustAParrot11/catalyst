@@ -542,6 +542,39 @@ button { background: var(--series-1); color: #fff; border-color: transparent;
 /* A zoomed map is WIDER than the panel on purpose: it scrolls sideways
    rather than being squashed back to fit, which would undo the zoom. */
 .chart-scroll { overflow-x: auto; }
+/* The chain: one row per step, expandable in place. Reading the story
+   top to bottom must not mean losing your place, so a step opens where
+   it sits rather than navigating away. */
+.chain { border: 1px solid var(--hairline); border-radius: 4px;
+         margin: 14px 0; overflow: hidden; }
+.chain-head { margin: 0; padding: 8px 12px; font-size: 14px;
+              background: var(--surface-2);
+              border-bottom: 1px solid var(--hairline); }
+.chain-head .prov { font-weight: 400; margin-left: 8px; }
+.chain-step { border-top: 1px solid var(--hairline); }
+.chain-step:first-of-type { border-top: none; }
+.chain-step > summary { display: grid; grid-template-columns: 2em 6.5em 1fr;
+                        gap: 10px; align-items: baseline; cursor: pointer;
+                        padding: 8px 12px; list-style: none; }
+.chain-step > summary::-webkit-details-marker { display: none; }
+.chain-step > summary:hover { background: var(--surface-2); }
+.chain-step[open] > summary { background: var(--surface-2); }
+.chain-n { font-variant-numeric: tabular-nums; font-weight: 700;
+           color: var(--muted); text-align: right; }
+.chain-stage { font-size: 11px; letter-spacing: .06em; font-weight: 700;
+               text-transform: uppercase; color: var(--accent); }
+/* min-width:0 so a long line wraps INSIDE its column instead of
+   widening it - the same grid trap the funnel hit. */
+.chain-text { min-width: 0; overflow-wrap: anywhere; }
+.chain-why { display: block; color: var(--muted); font-size: 12px;
+             margin-top: 2px; }
+.chain-step.stopped .chain-stage { color: var(--serious); }
+.chain-body { padding: 4px 12px 12px 12px; }
+.chain-fact { display: grid; grid-template-columns: 12em 1fr; gap: 10px;
+              padding: 3px 0; font-size: 12.5px; }
+.chain-k { color: var(--muted); }
+.chain-v { min-width: 0; overflow-wrap: anywhere; }
+.chain-link { display: inline-block; margin-top: 6px; font-size: 12px; }
 .chart-scroll svg { max-width: none; }
 .viewbar { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px;
            margin: 8px 0 4px 0; }
@@ -586,6 +619,7 @@ NAV_GROUPS = [
         ("/funnel", "Pipeline", "Raw filings through to orders"),
     ]),
     ("Investigate", [
+        ("/chain", "Every decision", "Found \u2192 linked \u2192 judged \u2192 sized \u2192 traded"),
         ("/brain", "The brain", "Everything it has linked, as one map"),
         ("/newsmap", "News map", "What was said, about whom"),
         ("/decisions", "Decisions", "Why each trade was taken or declined"),
