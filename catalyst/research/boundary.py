@@ -251,6 +251,35 @@ class CostContext:
 Transport = Callable[[dict], dict]
 
 
+#: Content blocks the API pairs itself. `server_tool_use` (web search)
+#: is executed by Anthropic inside the same turn and answered there, so
+#: demanding a tool_result for one would refuse a request the API
+#: accepts.
+CLIENT_TOOL_USE = "tool_use"
+
+
+def _answer_tool_calls(echo: dict | None, why: str | None) -> list | str:
+    """The user turn that follows an echoed assistant message.
+
+    Plain text when there is nothing to answer; otherwise one
+    `tool_result` per `tool_use` in the echo, because the Messages API
+    requires the match and rejects the whole request without it.
+    """
+    ask = "Submit your conclusion now via submit_research_view."
+    blocks = (echo or {}).get("content")
+    ids = [b.get("id") for b in blocks
+           if isinstance(b, dict) and b.get("type") == CLIENT_TOOL_USE
+           and b.get("id")] if isinstance(blocks, list) else []
+    if not ids:
+        return ask
+    detail = (f"That submission was rejected: {why}. " if why else
+              "That submission could not be read. ")
+    return [{"type": "tool_result", "tool_use_id": tid, "is_error": True,
+             "content": detail + "Required fields are missing or invalid. "
+                        + ask}
+            for tid in ids]
+
+
 def _assistant_echo(turn) -> dict | None:
     """The assistant message to send back, or None if there is nothing
     valid to send.
@@ -364,6 +393,35 @@ def invalid_payload_reason(payload: dict,
                         f"{type(block).__name__}")
             if not block.get("type"):
                 return f"message {i} content block {j} has no 'type'"
+    # EVERY `tool_use` MUST BE ANSWERED IN THE NEXT MESSAGE. The API
+    # rejects the whole request otherwise - "tool_use ids were found
+    # without tool_result blocks immediately after" - and it does so
+    # after the previous turn has already been paid for. Five of the
+    # owner's live research calls died on exactly this.
+    #
+    # `server_tool_use` (web search) is deliberately NOT checked: it is
+    # executed and answered by Anthropic inside the same turn, so
+    # demanding a tool_result for one would refuse a request the API
+    # accepts.
+    for i, message in enumerate(messages):
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        pending = [b.get("id") for b in content if isinstance(b, dict)
+                   and b.get("type") == CLIENT_TOOL_USE and b.get("id")]
+        if not pending:
+            continue
+        following = (messages[i + 1].get("content")
+                     if i + 1 < len(messages) else None)
+        answered = {b.get("tool_use_id") for b in following
+                    if isinstance(b, dict) and b.get("type") == "tool_result"} \
+            if isinstance(following, list) else set()
+        missing = [t for t in pending if t not in answered]
+        if missing:
+            return (f"message {i} calls tool_use {missing[0]} and the next "
+                    "message carries no matching tool_result - the API "
+                    "rejects this outright")
+
     if messages[-1].get("role") == "assistant" and not continuing_pause_turn:
         # A trailing assistant message asks the API to CONTINUE it. That
         # is exactly right for a pause_turn and wrong everywhere else,
@@ -441,6 +499,7 @@ def investigate(
     tools_offered = tuple(t.get("name", t.get("type", "?")) for t in tools)
 
     turns: list[APITurn] = []
+    last_view_error: str | None = None
     # WHICH gate refused, not merely that one did. authorize() separates
     # cap_exceeded from reconciliation_discrepancy_unacknowledged from
     # unpriced_cost_rows, and the three have completely different fixes -
@@ -598,14 +657,26 @@ def investigate(
             view = make_view_from_tool_input(candidate.id, early)
             _record_findings(call_id, early, conn)
             return finish(view, None)
-        except (KeyError, TypeError, ValueError):
-            pass          # fall through to the forced extraction turn
+        except (KeyError, TypeError, ValueError) as exc:
+            # fall through to the forced extraction turn, carrying the
+            # reason so the tool_result can name it
+            last_view_error = f"{type(exc).__name__}: {exc}"
 
     echo = _assistant_echo(turn)
     if echo is not None:
         messages.append(echo)
-    messages.append({"role": "user", "content": (
-        "Submit your conclusion now via submit_research_view.")})
+    # ANSWER THE TOOL CALL. The echo above is verbatim, so when the model
+    # submitted early and the view failed to parse it still carries that
+    # `tool_use` block - and the Messages API requires the very next
+    # message to carry a matching `tool_result`. Sending plain text
+    # instead is a 400 ("tool_use ids were found without tool_result
+    # blocks immediately after"), AFTER the exploration turn has been
+    # paid for. Five of the owner's live research calls died this way.
+    #
+    # The result also carries WHY the view was rejected, which is more
+    # use to the model than "submit your conclusion" and costs the same.
+    messages.append({"role": "user",
+                     "content": _answer_tool_calls(echo, last_view_error)})
 
     # ---- extraction: tool_choice FORCED. The model cannot answer in
     # prose; the only way out is the schema. Two live-API facts learned
