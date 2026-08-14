@@ -400,7 +400,7 @@ def funnel_panel(db: Db, p: str = "funnel") -> str:
                 for reason, n, detail in stage.drops)
             out.append(
                 f'<div class="funnel-why" id="{p}-drops-{esc(stage.key)}">'
-                f"<h4>Why they stopped here</h4><ul>{items}</ul>")
+                f"<h3>Why they stopped here</h3><ul>{items}</ul>")
             explained = 0
             for _r, n, _d in stage.drops:
                 try:
@@ -440,8 +440,8 @@ def funnel_panel(db: Db, p: str = "funnel") -> str:
                 for reason, n, detail in stage.faults)
             out.append(
                 f'<div class="funnel-fault" id="{p}-faults-{esc(stage.key)}">'
-                '<h4><span class="fault-chip">NEEDS ATTENTION</span> '
-                f"Things that went wrong here</h4><ul>{items}</ul></div>")
+                '<h3><span class="fault-chip">NEEDS ATTENTION</span> '
+                f"Things that went wrong here</h3><ul>{items}</ul></div>")
 
         # A step starved by the one above it is a CONSEQUENCE, not a
         # finding. Only the first starved step gets the full empty-state
@@ -511,8 +511,8 @@ def funnel_panel(db: Db, p: str = "funnel") -> str:
             for reason, n, detail in data.feed_faults)
         feed.append(
             f'<div class="funnel-fault" id="{p}-feed-faults">'
-            '<h4><span class="fault-chip">NEEDS ATTENTION</span> '
-            f"Feeds that could not be read</h4><ul>{items}</ul></div>")
+            '<h3><span class="fault-chip">NEEDS ATTENTION</span> '
+            f"Feeds that could not be read</h3><ul>{items}</ul></div>")
     elif data.feed_events == 0 and data.feed_query is not None:
         feed.append(zero_block(
             f"{p}-feed-empty", data.feed_query,
