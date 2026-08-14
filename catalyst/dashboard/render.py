@@ -610,6 +610,14 @@ a.viewopt:hover { border-color: var(--accent); color: var(--ink); }
               border-radius: 2px; padding: 0 5px; font-size: 10px;
               letter-spacing: .06em; font-weight: 700; margin-right: 6px;
               vertical-align: 1px; }
+/* The way OUT of a fault, beside the description of it. A block that
+   says what is wrong and not where to fix it sends the reader hunting -
+   the reconciliation block told the owner to open the wrong page. */
+.fault-fix { display: inline-block; margin-top: 4px; padding: 3px 8px;
+             border: 1px solid var(--serious); border-radius: 2px;
+             font-size: 12px; font-weight: 600; text-decoration: none;
+             white-space: nowrap; }
+.fault-fix:hover { background: var(--serious); color: #fff; }
 .quiet { color: var(--muted); font-size: 12px; margin: 0 0 6px 36px;
          max-width: 70ch; }
 .quiet summary { color: var(--muted); font-size: 12px; }

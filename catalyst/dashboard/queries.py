@@ -368,36 +368,63 @@ def _ids(db: Db, sql: str, params: tuple = ()) -> tuple[set, QueryResult]:
 #: ("Unsure what the reason for block actually is it needs to be
 #: clearer"). The identifier is kept BESIDE the sentence, never instead
 #: of it, so it stays greppable and the two can never disagree.
+# (plain sentence, what to do, where to go).
+#
+# THE LINK IS A THIRD FIELD, NOT MARKUP IN THE SENTENCE. The advice text
+# reaches the page through raw(), which escapes and redacts - stored text
+# must never become markup, and that is right. So an anchor written into
+# the sentence renders as literal &lt;a href=...&gt; on screen. Verified
+# by rendering; it looked exactly like a bug in the page.
 GOVERNOR_REASONS = {
     "cap_exceeded": (
         "the monthly budget ran out",
         "Raise it on the Settings page, or wait for the month to roll "
         "over. The Cost page shows the cap in force and what has been "
-        "spent against it."),
+        "spent against it.",
+        ("/costs#cost-section", "Open the Cost page")),
     "reconciliation_discrepancy_unacknowledged": (
         "a cost cross-check is holding spending until someone confirms it",
         "This is NOT out of money. The daily check compared what the bot "
         "recorded against what Anthropic billed, they differed, and "
-        "nothing may be spent until that is acknowledged. Open "
-        "Maintenance and acknowledge it, or upgrade - recent versions "
-        "clear a difference too small to matter automatically."),
+        "nothing may be spent until that is acknowledged. It takes one "
+        "click, changes no figure anywhere, and only records that a "
+        "human looked.",
+        # THE BUTTON IS ON THE COST PAGE, NOT MAINTENANCE. This used to
+        # say "Open Maintenance and acknowledge it", and /maintenance has
+        # no acknowledge form on it - verified by rendering both. The
+        # owner followed the instruction, found nothing to click, and
+        # reported the block as unfixed. It was: the advice was wrong.
+        ("/costs#cost-unacked", "Acknowledge it on the Cost page")),
     "unpriced_cost_rows": (
         "a cost row could not be priced, so spending stopped",
         "This is a code fault, not a budget one: an API response arrived "
         "with a shape the pricing table does not know. Send the Cost & "
-        "pricing bundle from Maintenance."),
+        "pricing bundle.",
+        ("/logs#log-bundle", "Collect the Cost & pricing log")),
 }
+
+_UNKNOWN_REASON = (
+    "This reason has no plain-English explanation recorded yet - send "
+    "the Everything bundle so it can be diagnosed.",
+    ("/logs#log-bundle", "Collect the Everything log"))
 
 
 def explain_governor_reason(reason: str):
     """(plain sentence, what to do). Unknown reasons pass through
     unchanged rather than being guessed at - a confident wrong
     explanation is worse than the identifier."""
-    plain, todo = GOVERNOR_REASONS.get(
-        str(reason), (str(reason), "This reason has no plain-English "
-                      "explanation recorded yet - send the Everything "
-                      "bundle from Maintenance."))
-    return plain, todo
+    entry = GOVERNOR_REASONS.get(str(reason))
+    if entry is None:
+        return str(reason), _UNKNOWN_REASON[0]
+    return entry[0], entry[1]
+
+
+def governor_reason_link(reason: str):
+    """(href, label) for the page that can actually resolve this block,
+    or None. Kept apart from the sentence so the sentence can stay
+    escaped text - see the note above GOVERNOR_REASONS."""
+    entry = GOVERNOR_REASONS.get(str(reason))
+    return entry[2] if entry else _UNKNOWN_REASON[1]
 
 
 def funnel(db: Db) -> Funnel:
@@ -518,7 +545,8 @@ def funnel(db: Db) -> Funnel:
         gov_faults.append((
             f"spending was blocked \u2014 {plain}", r["n"],
             f"{todo}  [{r['reason']}]  "
-            + _last_seen(r["last_at"], r["first_at"])))
+            + _last_seen(r["last_at"], r["first_at"]),
+            governor_reason_link(r["reason"])))
     stages.append(Stage(
         "researched", "Researched by the model", len(s_res), researched_q,
         drops=drops, faults=gov_faults, entered=len(s_cand),
