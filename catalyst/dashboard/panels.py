@@ -570,6 +570,31 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
             "a month. You have not set a budget of your own - the settings page "
             "takes one, and the bot obeys it either way."))
 
+    # WHAT A SEARCH ACTUALLY COSTS, beside what it was assumed to cost.
+    # The pre-call estimate that guards the cap is built from this
+    # number, and its seed came from a single measured call. The estimate
+    # raises itself on evidence but never lowers itself - lowering the
+    # seed is a human decision, and this is the number it needs.
+    if c.search_tokens_observed is None:
+        out.append(prov(
+            f'<span id="{p}-search-tokens">A web search is estimated to add '
+            f"<b>{c.search_tokens_seed:,}</b> input tokens, from one measured "
+            f"call. Only {c.search_tokens_sample} searching turn(s) have been "
+            "recorded so far - too few to measure against, so the estimate is "
+            "still the seed. Nothing is being adapted on this yet.</span>"))
+    else:
+        direction = ("ABOVE the seed, so the estimate has raised itself"
+                     if c.search_tokens_observed > c.search_tokens_seed
+                     else "below the seed, and the estimate is deliberately "
+                          "NOT lowered by itself - that is a change for you "
+                          "to make, not for the bot to make on a quiet spell")
+        out.append(prov(
+            f'<span id="{p}-search-tokens">A web search was seeded at '
+            f"<b>{c.search_tokens_seed:,}</b> input tokens from a single call. "
+            f"Measured across {c.search_tokens_sample} searching turns, the "
+            f"75th percentile is <b>{c.search_tokens_observed:,}</b> - "
+            f"{direction}.</span>"))
+
     # Pace against the cap. days_elapsed is already on the panel; the
     # marker is where an evenly-spent month would sit today, so under
     # or over pace is a glance rather than mental arithmetic.

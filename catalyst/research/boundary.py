@@ -19,6 +19,7 @@ repriced - never the reverse.
 """
 
 import json
+import sqlite3
 import time
 import uuid
 from dataclasses import dataclass
@@ -88,18 +89,94 @@ _MTOK = Decimal(1_000_000)
 EXPLORATION_TURN_ESTIMATE_CENTS = Decimal("15")   # base path, no searches
 EXTRACTION_TURN_ESTIMATE_CENTS = Decimal("8")
 
-#: Input tokens a single web search adds. MEASURED: the first live
-#: research call (2026-08-10) sent 24k input tokens carrying 2 searches
-#: against a ~2k prompt, so ~11k per search. Rounded up, because the
-#: estimate must not be the optimistic side of a measurement of one.
+#: SEED value for input tokens a single web search adds. Measured from
+#: the first live research call (2026-08-10): 24k input tokens carrying
+#: 2 searches against a ~2k prompt, so ~11k per search, rounded up.
+#:
+#: A sample of ONE, which is why input_tokens_per_search() below replaces
+#: it with the real distribution as soon as there is one. This constant
+#: is the floor and the starting point, never the last word.
 INPUT_TOKENS_PER_SEARCH = 12_000
 #: The prompt itself, before any search results come back.
 PROMPT_TOKENS_ESTIMATE = 2_000
+#: Turns that actually searched, before the measured figure is used at
+#: all. BUILD-BRIEF: "Adapting on four trades is fitting noise, and noise
+#: is what you are trying to remove."
+MIN_CALIBRATION_SAMPLE = 8
+#: Which point of the observed distribution to estimate from. The mean is
+#: dragged down by cheap turns and the estimate exists to cover the
+#: expensive ones, so this sits high without chasing the single worst.
+CALIBRATION_PERCENTILE = 0.75
+
+
+def observed_tokens_per_search(conn) -> tuple[int | None, int]:
+    """(tokens per search at CALIBRATION_PERCENTILE, sample size).
+
+    Read from the raw usage object stored verbatim on every turn
+    (TRAPS.md) rather than from named columns, so a renamed or nested
+    field shows up as a missing sample instead of silently pricing
+    itself at zero.
+
+    Turns that billed no searches are excluded: they say nothing about
+    what a search costs, and dividing by zero of them says nothing at
+    all.
+    """
+    if conn is None:
+        return None, 0
+    try:
+        rows = conn.execute(
+            "SELECT raw_usage_json FROM cost_events "
+            "WHERE component IN ('research', 'position_review')").fetchall()
+    except sqlite3.Error:
+        return None, 0
+    per_search: list[float] = []
+    for (blob,) in rows:
+        try:
+            usage = json.loads(blob)
+            searches = int((usage.get("server_tool_use") or {}).get(
+                "web_search_requests", 0) or 0)
+            if searches < 1:
+                continue
+            search_tokens = int(usage.get("input_tokens", 0) or 0) \
+                - PROMPT_TOKENS_ESTIMATE
+            if search_tokens <= 0:
+                continue
+            per_search.append(search_tokens / searches)
+        except (TypeError, ValueError, AttributeError, json.JSONDecodeError):
+            continue      # evidence lost, never a raised exception
+    if len(per_search) < MIN_CALIBRATION_SAMPLE:
+        return None, len(per_search)
+    per_search.sort()
+    idx = min(len(per_search) - 1,
+              int(len(per_search) * CALIBRATION_PERCENTILE))
+    return int(per_search[idx]), len(per_search)
+
+
+def input_tokens_per_search(conn=None) -> int:
+    """The seed, RAISED by measured evidence and never lowered.
+
+    THE ASYMMETRY IS THE WHOLE DESIGN. Raising is always safe: the
+    governor compares the estimate against ACTUAL month-to-date spend
+    rather than reserving it, so pessimism costs only at the cap
+    boundary. Lowering re-opens the hole a flat constant already put in
+    that cap once - and a quiet fortnight of cheap turns is all the
+    "evidence" an auto-lowering estimate would need.
+
+    So a human lowers the seed, on the observed figure, which the
+    dashboard shows beside it. That is BUILD-BRIEF's "tighten quickly on
+    evidence of harm; loosen slowly on evidence of over-caution", taken
+    to its limit for a parameter guarding a spend cap.
+    """
+    observed, _sample = observed_tokens_per_search(conn)
+    if observed is None:
+        return INPUT_TOKENS_PER_SEARCH
+    return max(INPUT_TOKENS_PER_SEARCH, observed)
 
 
 def exploration_turn_estimate_cents(searches: int,
                                     on_date: date | None = None,
-                                    model: str = RESEARCH_MODEL) -> Decimal:
+                                    model: str = RESEARCH_MODEL,
+                                    conn=None) -> Decimal:
     """Pessimistic cost of one exploration turn at this search budget.
 
     Priced through rates_for(), the same table that prices the actual
@@ -109,14 +186,15 @@ def exploration_turn_estimate_cents(searches: int,
     """
     on_date = on_date or datetime.now(timezone.utc).date()
     in_rate, out_rate = rates_for(model, on_date)
-    input_tokens = _exploration_input_tokens(searches)
+    input_tokens = _exploration_input_tokens(searches, conn)
     return (Decimal(input_tokens) * in_rate / _MTOK
             + Decimal(MAX_EXPLORATION_TOKENS) * out_rate / _MTOK
             + Decimal(searches) * WEB_SEARCH_CENTS_PER_QUERY)
 
 
-def _exploration_input_tokens(searches: int) -> int:
-    return PROMPT_TOKENS_ESTIMATE + searches * INPUT_TOKENS_PER_SEARCH
+def _exploration_input_tokens(searches: int, conn=None) -> int:
+    return (PROMPT_TOKENS_ESTIMATE
+            + searches * input_tokens_per_search(conn))
 
 
 #: Output tokens the forced turn emits: one small JSON tool call. It is
@@ -127,7 +205,8 @@ EXTRACTION_OUTPUT_TOKENS_ESTIMATE = 512
 
 def extraction_turn_estimate_cents(searches: int,
                                    on_date: date | None = None,
-                                   model: str = RESEARCH_MODEL) -> Decimal:
+                                   model: str = RESEARCH_MODEL,
+                                   conn=None) -> Decimal:
     """Pessimistic cost of the forced extraction turn.
 
     THE SAME HOLE AS EXPLORATION'S, one line down. This turn RE-SENDS THE
@@ -148,7 +227,7 @@ def extraction_turn_estimate_cents(searches: int,
     on_date = on_date or datetime.now(timezone.utc).date()
     in_rate, out_rate = rates_for(model, on_date)
     # prompt + every search result + the assistant turn being echoed back
-    input_tokens = (_exploration_input_tokens(searches)
+    input_tokens = (_exploration_input_tokens(searches, conn)
                     + MAX_EXPLORATION_TOKENS)
     return (Decimal(input_tokens) * in_rate / _MTOK
             + Decimal(EXTRACTION_OUTPUT_TOKENS_ESTIMATE) * out_rate / _MTOK)
@@ -397,10 +476,10 @@ def investigate(
         # conjunction buys ten searches where the base path buys three,
         # and Sonnet 5's introductory pricing ends 2026-08-31.
         try:
-            cents = (extraction_turn_estimate_cents(search_budget,
-                                                    model=model) if forced
-                     else exploration_turn_estimate_cents(search_budget,
-                                                          model=model))
+            cents = (extraction_turn_estimate_cents(
+                         search_budget, model=model, conn=conn) if forced
+                     else exploration_turn_estimate_cents(
+                         search_budget, model=model, conn=conn))
         except UnknownModelError:
             # No rate for this model means record_usage cannot price the
             # call either, and has_unpriced_rows will block the next
