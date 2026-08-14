@@ -196,6 +196,13 @@ def route_chain(db: Db, params: dict) -> str:
         "/chain", db.path, db=db)
 
 
+def route_node(db: Db, params: dict) -> str:
+    node_id = (params.get("id") or [""])[0][:200]
+    return render_page("Node", panels.node_panel(db, node_id, p="node"),
+                       "/node", db.path, db=db,
+                       subtitle="One node of the map, with its runbook")
+
+
 def route_brain(db: Db, params: dict) -> str:
     def _num(key, default, lo, hi):
         """A pasted or edited URL must never 500 the page."""
@@ -515,6 +522,7 @@ HTML_ROUTES = {
     "/decisions": route_decisions,
     "/decision": route_decision,
     "/brain": route_brain,
+    "/node": route_node,
     "/chain": route_chain,
     "/newsmap": route_newsmap,
     "/refusals": route_refusals,

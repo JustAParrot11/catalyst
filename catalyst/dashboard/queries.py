@@ -1718,3 +1718,90 @@ def decision_chains(db: Db, limit: int = 12) -> Chains:
         out.append(Chain(candidate_id=cid, ticker=ticker, verdict=verdict,
                          steps=steps))
     return Chains(chains=out, query=cand_q)
+
+
+# --------------------------------------------------------------------------
+# One node of the brain map, opened
+# --------------------------------------------------------------------------
+
+#: WHAT EACH KIND OF NODE IS, and what to do when you land on one. The
+#: owner asked to "click in and it opens another page with the runbook":
+#: a map tells you a thing is connected to another thing, and then leaves
+#: you to work out what either of them means.
+NODE_RUNBOOK = {
+    "src": ("A data feed",
+            "One of the free sources the bot reads. Its links point at "
+            "the candidates it produced. If this node has no links, the "
+            "feed read something that never became a candidate - normal "
+            "for most filings, a problem only if it NEVER produces any. "
+            "Feed failures are on the Pipeline page."),
+    "cand": ("A candidate the bot built",
+             "A ticker something was noticed about. Its links point back "
+             "to the evidence and forward to what the model and the risk "
+             "engine did. Open its decision for the whole audit trail."),
+    "ent": ("A named entity",
+            "A person, company or filing the evidence graph recorded "
+            "alongside a candidate - an insider, a counterparty, an "
+            "agency. Useful for spotting the same name across unrelated "
+            "candidates."),
+    "view": ("What the model concluded",
+             "Candidates group here by direction. A pile on 'no_trade' "
+             "is normal and healthy; a pile on 'long' with nothing "
+             "traded means the risk engine is refusing them, and the "
+             "Pipeline page names which limit."),
+    "why": ("A reason something stopped",
+            "Every candidate that ended here stopped for this reason. If "
+            "one reason dominates, that is the single thing to change - "
+            "the Pipeline page shows the same counts with the drop "
+            "reasons in full."),
+    "company": ("A company in the news map",
+                "Stories and filings that named this ticker. The news "
+                "map filtered to it shows what was said and when."),
+}
+
+
+@dataclass
+class NodeDetail:
+    node_id: str
+    label: str
+    kind: str
+    kind_label: str
+    runbook: str
+    incoming: list = field(default_factory=list)   # [(other_label, why)]
+    outgoing: list = field(default_factory=list)
+    links: list = field(default_factory=list)      # [(text, href)]
+    found: bool = True
+
+
+def node_detail(db: Db, node_id: str) -> NodeDetail:
+    """Everything recorded about ONE node of the map.
+
+    Built from the same brain() query the picture is, so the page and
+    the drawing can never disagree about what connects to what. A node
+    id that is not in the graph returns found=False rather than an empty
+    page pretending to be a real one.
+    """
+    kind = str(node_id).split(":", 1)[0]
+    kind_label, runbook = NODE_RUNBOOK.get(
+        kind, ("A node", "No runbook is recorded for this kind of node "
+                         "yet - send the Everything bundle from "
+                         "Maintenance if it matters."))
+    b = brain(db)
+    labels = {nid: lbl for _, nodes in b.layers for nid, lbl, _ in nodes}
+    detail = NodeDetail(
+        node_id=str(node_id), label=labels.get(str(node_id), str(node_id)),
+        kind=kind, kind_label=kind_label, runbook=runbook,
+        found=str(node_id) in labels)
+    for src, dst, _w, title in b.edges:
+        if dst == node_id:
+            detail.incoming.append((labels.get(src, src), str(title)))
+        elif src == node_id:
+            detail.outgoing.append((labels.get(dst, dst), str(title)))
+    if kind == "cand":
+        detail.links.append(("Open the full decision record",
+                             f"/decision?candidate_id={node_id[5:]}&view=full"))
+    if detail.label and kind in ("cand", "company", "ent"):
+        detail.links.append(("See what the news said about it",
+                             f"/newsmap?ticker={detail.label}"))
+    detail.links.append(("Back to the map", "/brain"))
+    return detail
