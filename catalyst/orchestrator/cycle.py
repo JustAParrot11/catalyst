@@ -665,19 +665,25 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
             # (stress ESCALATION-9)
             report.drop_reasons.setdefault("researched", []).append(
                 f"{c.id}: ticker_already_entered_this_cycle")
+            _note_not_attempted(conn, c.id,
+                                "ticker_already_entered_this_cycle", now)
             continue
         if block_entries is not None:
             report.drop_reasons.setdefault("researched", []).append(
                 f"{c.id}: {block_entries}")
+            _note_not_attempted(conn, c.id, str(block_entries), now)
             continue
         if transport is None:
             report.drop_reasons.setdefault("researched", []).append(
                 f"{c.id}: no_model_transport_configured")
+            _note_not_attempted(conn, c.id,
+                                "no_model_transport_configured", now)
             continue
         market = build_market_snapshot(broker, c.ticker, now)
         if market is None:
             report.drop_reasons.setdefault("researched", []).append(
                 f"{c.id}: no_market_quote")
+            _note_not_attempted(conn, c.id, "no_market_quote", now)
             continue
         log = investigate(
             c, CostContext(conn=conn,
@@ -787,6 +793,7 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
     for c in fresh[max_research:]:
         report.drop_reasons.setdefault("researched", []).append(
             f"{c.id}: deferred_max_research_per_cycle")
+        _note_not_attempted(conn, c.id, "deferred_max_research_per_cycle", now)
     report.funnel["researched"] = researched
     report.funnel["proposed"] = proposed
     report.funnel["orders_placed"] = placed
@@ -803,28 +810,77 @@ MAX_QUOTE_AGE = timedelta(minutes=10)
 MAX_RESEARCH_ATTEMPTS = 2
 
 
+#: Marks a research_calls row that records a candidate the cycle never
+#: ATTEMPTED - no prompt, no API call, no spend. Distinct from
+#: budget_denied (the governor refused a real attempt) and from a failed
+#: call (the API was reached and something went wrong).
+NOT_ATTEMPTED = "not_attempted: "
+
+
+def _note_not_attempted(conn, candidate_id: str, reason: str,
+                        now: datetime) -> None:
+    """Record WHY a candidate went unresearched this cycle.
+
+    OWNER-REPORTED, looking at six candidates: "why does it appear to
+    have never researched?" The decisions table said "not researched
+    yet" for all of them, which sounds like a queue. It was covering six
+    different situations, one of which - no model transport configured -
+    means no API key and is not a queue at all.
+
+    Every one of those skips existed only in the in-memory cycle report,
+    which is gone the moment the process moves on. Nothing per-candidate
+    reached the database, so neither the funnel nor the decisions table
+    could name the gate. They both already read skipped_reason, so
+    writing the reason there makes it visible in both without either
+    knowing this function exists.
+
+    The id is deterministic, so a candidate deferred for twenty cycles
+    keeps ONE row with the latest timestamp rather than twenty. Cost and
+    latency are zero because nothing was spent, and that is the point:
+    these rows must never be mistaken for attempts.
+    """
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO research_calls "
+            "(id, candidate_id, model, prompt_rendered, tools_offered, "
+            "cost_cents, latency_ms, skipped_reason, called_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (f"na:{candidate_id}:{reason[:40]}", candidate_id, "",
+             "", "[]", "0", 0, NOT_ATTEMPTED + reason, now.isoformat()))
+        conn.commit()
+    except sqlite3.Error:
+        pass          # observability must never break the cycle
+
+
 def _failed_attempts(conn, candidate_id: str) -> int:
     """Paid research calls for this candidate that produced no view.
 
     Counts research_calls rows that actually reached the API - a row
     with a skipped_reason set by the governor never spent anything and
-    must not count against the candidate.
+    must not count against the candidate. Neither must a not_attempted
+    row: a candidate deferred twice for being over the per-cycle cap
+    would otherwise be discarded forever, having never been tried once.
     """
     try:
         row = conn.execute(
             "SELECT COUNT(*) FROM research_calls WHERE candidate_id = ? "
-            "AND (skipped_reason IS NULL OR skipped_reason NOT LIKE "
-            "'budget_denied%')", (candidate_id,)).fetchone()
+            "AND (skipped_reason IS NULL OR (skipped_reason NOT LIKE "
+            "'budget_denied%' AND skipped_reason NOT LIKE ?))",
+            (candidate_id, NOT_ATTEMPTED + "%")).fetchone()
         return int(row[0]) if row else 0
     except sqlite3.Error:
         return 0
 
 
 def _last_skip_reason(conn, candidate_id: str) -> str:
+    """The last reason an ATTEMPT failed. A not_attempted row is not an
+    attempt, so it must not be quoted as why the attempts failed."""
     try:
         row = conn.execute(
             "SELECT skipped_reason FROM research_calls WHERE candidate_id = ? "
-            "ORDER BY called_at DESC LIMIT 1", (candidate_id,)).fetchone()
+            "AND skipped_reason IS NOT NULL AND skipped_reason NOT LIKE ? "
+            "ORDER BY called_at DESC LIMIT 1",
+            (candidate_id, NOT_ATTEMPTED + "%")).fetchone()
         return str(row[0]) if row and row[0] else ""
     except sqlite3.Error:
         return ""

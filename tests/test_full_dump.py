@@ -131,8 +131,12 @@ class TestTheButtonIsThere:
 
         report = maintenance.build_report(Db(bare), None, run_active=False)
         html_out = panels.maintenance_panel(report)
-        assert 'href="/diagnostics.json?scope=everything"' in html_out
+        assert 'action="/diagnostics.json"' in html_out
+        assert 'value="everything"' in html_out
         assert "bundlebtn master" in html_out
         # ...and it is the FIRST one, because it is what to send when
         # you do not know which of the others applies.
-        assert html_out.index("scope=everything") < html_out.index("scope=all")
+        assert (html_out.index('value="everything"')
+                < html_out.index('value="all"'))
+        # ...and it is the one selected if the reader picks nothing.
+        assert 'value="everything" checked' in html_out

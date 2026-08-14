@@ -292,9 +292,13 @@ class TestDiagnosticExport:
 
         report = maintenance.build_report(db, None, run_active=False)
         html = panels.maintenance_panel(report)
+        # A form now, not six links: it also has to ASK how far back
+        # (owner-asked, "so im not getting a massive file"), and a link
+        # cannot carry an answer the reader has not given yet.
+        assert 'action="/diagnostics.json"' in html
         for scope in DIAGNOSTIC_SCOPES:
-            assert f'href="/diagnostics.json?scope={scope}"' in html, scope
-            assert f'download="catalyst-{scope}.json"' in html, scope
+            assert f'value="{scope}"' in html, scope
+        assert 'name="days"' in html, "nothing asks how far back"
         assert "keys and secrets are stripped" in html.replace("\n", " ")
 
     def test_every_button_says_what_it_covers(self, db):

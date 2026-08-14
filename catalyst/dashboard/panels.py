@@ -11,6 +11,7 @@ from decimal import Decimal
 
 from catalyst.dashboard import charts, queries
 from catalyst.dashboard.db import Db, START_CAPITAL_CENTS, jload
+from catalyst.discovery.conjunctions import sector_band
 from catalyst.dashboard.render import (
     BAKEOFF_CAVEAT,
     MIN_TRADES_FOR_MEANING,
@@ -1176,6 +1177,18 @@ def _why_not_researched(db: Db, candidate_id: str) -> str:
             "not researched - an unprotected position blocks new entries",
         "unconfirmed_submit_blocks_entries":
             "not researched - an unconfirmed order blocks new entries",
+        # The five the cycle used to leave unrecorded, so every one of
+        # them read as the benign "not researched yet". One of them means
+        # there is no API key at all, which is not a queue.
+        "deferred_max_research_per_cycle":
+            "queued - over this cycle's research limit, next cycle",
+        "no_model_transport_configured":
+            "not researched - NO ANTHROPIC KEY configured, so nothing can "
+            "be researched at all",
+        "no_market_quote":
+            "not researched - no live quote for this ticker",
+        "ticker_already_entered_this_cycle":
+            "not researched - already entered this ticker this cycle",
     }
     for key, text in friendly.items():
         if key in reason:
@@ -1207,7 +1220,12 @@ def decisions_index(db: Db, p: str = "dec") -> str:
             status = "declined"
         rows.append([
             f'<a href="/decision?candidate_id={esc(r["id"])}">{esc(r["ticker"])}</a>',
-            esc(r["catalyst_type"]), esc(r["catalyst_date"]), esc(r["sector"]),
+            esc(r["catalyst_type"]), esc(r["catalyst_date"]),
+            # THE BAND, WITH THE CODE BESIDE IT. "2870" in a column
+            # headed SECTOR is a SIC code and means nothing to a reader;
+            # the mapping already existed for the correlation logic.
+            f'{esc(sector_band(r["sector"]))} '
+            f'<span class="prov">SIC {esc(r["sector"])}</span>',
             esc(r["direction"] or "-"),
             esc(f"{r['conviction']:.2f}" if r["conviction"] is not None else "-"),
             esc("yes" if r["priced_in"] else ("no" if r["priced_in"] is not None else "-")),
@@ -1236,7 +1254,8 @@ def _narrative_what_was_seen(t: queries.Trace, p: str) -> str:
             f"candidate from {len(t.source_event_ids)} raw source event(s): "
             f"<b>{esc(c['ticker'])}</b>, catalyst type <b>{esc(c['catalyst_type'])}</b>, "
             f"resolving {esc(c['catalyst_date'])} "
-            f"({esc(c['catalyst_date_confidence'])}), sector {esc(c['sector'])}, "
+            f"({esc(c['catalyst_date_confidence'])}), sector "
+            f"{esc(sector_band(c['sector']))} (SIC {esc(c['sector'])}), "
             f"correlation tags {esc(c['correlation_tags'])}.</p>"
         )
     else:
@@ -1847,11 +1866,17 @@ def trace_page(db: Db, candidate_id: str, p: str = "tr") -> str:
         conviction_f = float(conviction) if conviction is not None else None
     except (TypeError, ValueError):
         conviction_f = None
-    direction = str(view.get("direction") or "&mdash;")
+    # THE LITERAL CHARACTER, NEVER THE ENTITY. A placeholder that passes
+    # through esc() a second time becomes &amp;mdash;, and .upper() makes
+    # that &AMP;MDASH; - which the browser then renders as the visible
+    # text "&MDASH;". Owner-reported, on the verdict tile of a decision
+    # with no risk row. esc() leaves a real em dash alone.
+    DASH = "—"
+    direction = str(view.get("direction") or DASH)
     closed = dict(t.closed_q.rows[0]) if t.closed_q.rows else {}
 
     header = [tiles(f"{p}-tiles", [
-        ("Verdict", esc(action or "&mdash;").upper() or "&mdash;",
+        ("Verdict", esc(action.upper() if action else DASH),
          f"{pill(verdict_state, verdict_word)} "
          + esc(str(decision.get("at") or "no timestamp"))),
         ("Model view", esc(direction),
@@ -1859,7 +1884,7 @@ def trace_page(db: Db, candidate_id: str, p: str = "tr") -> str:
           else "no view recorded") + " - the model proposes, code disposes"),
         ("Size the code chose",
          dollars(_cents(decision.get("notional_usd"))) if decision.get("notional_usd")
-         else "&mdash;",
+         else DASH,
          "set by the risk engine, never by the model"),
         ("Outcome",
          dollars(closed.get("realized_pnl_cents")) if closed else "open / none",
@@ -2088,22 +2113,51 @@ def bundle_buttons(p: str) -> str:
     them - having gone, reasonably, to Logs. A control that exists on a
     page nobody thinks to open has not shipped.
     """
-    from catalyst.dashboard.server import DIAGNOSTIC_SCOPES
+    from catalyst.dashboard.server import (
+        DEFAULT_WINDOW_DAYS, DIAGNOSTIC_SCOPES, LOG_WINDOW_DAYS,
+    )
 
     out = [f'<h3 id="{p}-bundle">Collect logs to send on</h3>',
-           "<p>Pick the one that matches what went wrong. Each downloads "
-           "a single file. <b>Safe to send on</b>: keys and secrets are "
-           "stripped twice &mdash; once where each value is captured, "
-           "and again over the whole file before it is written.</p>"]
+           "<p>Pick what went wrong and how far back to look, then "
+           "download one file. <b>Safe to send on</b>: keys and secrets "
+           "are stripped twice &mdash; once where each value is "
+           "captured, and again over the whole file before it is "
+           "written.</p>",
+           f'<form id="{p}-bundle-form" method="get" '
+           'action="/diagnostics.json">']
     for key in ("everything", "all", "pricing", "logic", "data",
                 "execution"):
         spec = DIAGNOSTIC_SCOPES[key]
         master = " master" if key == "everything" else ""
         out.append(
-            f'<p class="bundlerow"><a class="bundlebtn{master}" '
-            f'href="/diagnostics.json?scope={key}" '
-            f'download="catalyst-{key}.json">{esc(spec["label"])}</a>'
+            f'<p class="bundlerow"><label class="bundlebtn{master}">'
+            f'<input type="radio" name="scope" value="{key}"'
+            + (" checked" if key == "everything" else "")
+            + f'> {esc(spec["label"])}</label>'
             f'<span class="bundlewhy">{esc(spec["why"])}</span></p>')
+    # HOW FAR BACK. Owner-asked: "When i click download log i want it to
+    # ask me how many days of logs so im not getting a massive file."
+    # A default of everything is how a diagnostic export becomes a file
+    # nobody can open.
+    opts = "".join(
+        f'<option value="{d or 0}"'
+        + (" selected" if d == DEFAULT_WINDOW_DAYS else "") + ">"
+        + (f"last {d} day{'s' if d != 1 else ''}" if d else "everything, "
+           "however old")
+        + "</option>"
+        for d in LOG_WINDOW_DAYS)
+    out.append(
+        f'<p class="bundlerow"><label class="bundlebtn" for="{p}-days">'
+        f'How far back</label><span class="bundlewhy">'
+        f'<select id="{p}-days" name="days">{opts}</select> '
+        "&mdash; anything with a timestamp is cut to this window. Rows "
+        "with no timestamp at all (the current positions, the price "
+        "table) always come out whole, and the file says which those "
+        "were.</span></p>"
+        f'<p class="bundlerow"><button class="bundlebtn master" '
+        f'type="submit" id="{p}-bundle-go">Download</button>'
+        '<span class="bundlewhy">One file, named for what you picked.'
+        "</span></p></form>")
     out.append(prov(
         "If the page itself will not load, the same file can be produced "
         "on the server with:  sudo -u catalyst /opt/catalyst/venv/bin/python "

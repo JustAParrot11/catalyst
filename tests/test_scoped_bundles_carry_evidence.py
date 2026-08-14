@@ -207,7 +207,7 @@ class TestTheButtonsAreWhereSomeoneWouldLook:
 
         html_out = panels.logs_panel(Db(loaded), {})
         for key in DIAGNOSTIC_SCOPES:
-            assert f"scope={key}" in html_out, (
+            assert f'value="{key}"' in html_out, (
                 f"the Logs page does not offer {key}")
 
     def test_the_logs_page_offers_them_even_with_no_logs_table(self, tmp_path):
@@ -218,7 +218,7 @@ class TestTheButtonsAreWhereSomeoneWouldLook:
         p = str(tmp_path / "nologs.db")
         sqlite3.connect(p).close()
         html_out = panels.logs_panel(Db(p), {})
-        assert "scope=everything" in html_out
+        assert 'value="everything"' in html_out
 
     def test_maintenance_still_offers_them_too(self, loaded):
         from catalyst.dashboard import maintenance, panels
@@ -226,15 +226,30 @@ class TestTheButtonsAreWhereSomeoneWouldLook:
         html_out = panels.maintenance_panel(
             maintenance.build_report(Db(loaded), None, run_active=False))
         for key in DIAGNOSTIC_SCOPES:
-            assert f"scope={key}" in html_out
+            assert f'value="{key}"' in html_out
 
-    def test_they_download_rather_than_opening_in_a_tab(self, loaded):
+    def test_they_download_rather_than_opening_in_a_tab(self):
         """OWNER-REPORTED: "The download button just opens the text in a
-        new tab and doesnt start a download". The bare link on the Logs
-        page had no download attribute at all."""
-        from catalyst.dashboard import panels
+        new tab and doesnt start a download".
 
-        html_out = panels.logs_panel(Db(loaded), {})
-        assert 'download="catalyst-everything.json"' in html_out
-        assert 'href="/diagnostics.json"' not in html_out, (
-            "the old scopeless link is still there and still opens in a tab")
+        The property is enforced SERVER-SIDE now, by Content-Disposition,
+        rather than by a download attribute on a link - which is the real
+        mechanism, and the only one that still works once the picker is a
+        form rather than six links."""
+        from catalyst.dashboard import server as srv
+
+        captured = {}
+
+        class Spy(srv.Handler):
+            def __init__(self):        # no socket: the suite is offline
+                pass
+
+            def _send(self, code, body, ctype, extra=None):
+                captured["extra"] = extra or {}
+
+        Spy()._send_json(200, {"a": 1}, filename="catalyst-everything.json")
+        disp = captured["extra"].get("Content-Disposition", "")
+        assert "attachment" in disp, (
+            "without Content-Disposition: attachment the browser renders "
+            "the JSON inline, which is exactly what the owner reported")
+        assert "catalyst-everything.json" in disp

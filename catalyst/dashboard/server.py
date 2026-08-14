@@ -17,7 +17,7 @@ import json
 import re
 import sys
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -380,7 +380,44 @@ DIAGNOSTIC_SCOPES = {
 }
 
 
-def diagnostics_bundle(db: Db, scope: str = "all") -> dict:
+#: Offered in the UI as "how far back". None = everything.
+LOG_WINDOW_DAYS = (1, 7, 30, 90, None)
+DEFAULT_WINDOW_DAYS = 7
+
+#: Candidate timestamp columns, most specific first. The window is
+#: applied by NAMING the column a table actually has rather than by a
+#: hardcoded table->column map, which would rot silently the first time
+#: a table was added: a table whose time column nobody remembered to
+#: register would be exported in full while the bundle claimed a window.
+_TIME_COLUMNS = (
+    "ts", "at", "called_at", "decided_at", "reconciled_at", "changed_at",
+    "fetched_at", "attempted_at", "discovered_at", "refused_at",
+    "reviewed_at", "priced_at", "closed_at", "opened_at", "placed_at",
+    "submitted_at", "filled_at", "confirmed_at", "replaced_at", "set_at",
+    "first_seen_at", "asserted_at", "recorded_at", "created_at", "run_at",
+    "repriced_at", "taken_at", "triggered_at", "checked_at",
+)
+
+
+def _time_column(db: Db, table: str) -> str:
+    cols = set(db.columns(table))
+    return next((c for c in _TIME_COLUMNS if c in cols), "")
+
+
+def window_days(raw) -> int | None:
+    """Coerce a ?days= value. A hostile or absent one falls back to the
+    default rather than raising - a diagnostic export must not be the
+    thing that 500s while someone is diagnosing something else."""
+    try:
+        n = int(str(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_WINDOW_DAYS
+    if n <= 0:
+        return None                       # 0 or negative = no window
+    return min(n, 3650)
+
+
+def diagnostics_bundle(db: Db, scope: str = "all", days: int | None = None) -> dict:
     """One-click diagnostic export, credentials redacted.
 
     Redaction runs over the WHOLE bundle after assembly as well as at
@@ -436,10 +473,27 @@ def diagnostics_bundle(db: Db, scope: str = "all") -> dict:
     # model's reply, nor the thesis. Only counts. "research_views: 1"
     # answers no question anyone would send a bundle to ask.
     # The Overview keeps its counts; that is what it is for.
+    # HOW FAR BACK. Owner-asked: "When i click download log i want it to
+    # ask me how many days of logs so im not getting a massive file."
+    # The window is stated, and so is every table it could NOT be
+    # applied to - a table with no timestamp column comes out whole, and
+    # saying so is the difference between a short file and a wrong one.
+    cutoff = ""
+    if days:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    bundle["window_days"] = days
+    bundle["window_note"] = (
+        f"Only rows timestamped on or after {cutoff} are included. "
+        "Tables listed under window_not_applicable have no timestamp "
+        "column and are included in full."
+        if days else "No time window - everything, however old.")
+
     row_tables = spec["tables"]
     if spec.get("full_rows") or row_tables is not None:
         bundle["rows"] = {}
         bundle["rows_truncated"] = {}
+        bundle["window_applied_to"] = {}
+        bundle["window_not_applicable"] = []
         present = set(db.tables())
         if row_tables is not None:
             # A NAMED TABLE THAT IS NOT HERE IS SAID OUT LOUD. A scope
@@ -455,8 +509,17 @@ def diagnostics_bundle(db: Db, scope: str = "all") -> dict:
                        "database - it is missing, not empty" for t in absent}
         for name in sorted(present if row_tables is None
                            else present & set(row_tables)):
-            res = db.q(f"SELECT * FROM {name} LIMIT ?",
-                       (FULL_DUMP_ROWS_PER_TABLE + 1,))
+            col = _time_column(db, name) if cutoff else ""
+            if cutoff:
+                if col:
+                    bundle["window_applied_to"][name] = col
+                else:
+                    bundle["window_not_applicable"].append(name)
+            res = (db.q(f"SELECT * FROM {name} WHERE {col} >= ? LIMIT ?",
+                        (cutoff, FULL_DUMP_ROWS_PER_TABLE + 1))
+                   if col else
+                   db.q(f"SELECT * FROM {name} LIMIT ?",
+                        (FULL_DUMP_ROWS_PER_TABLE + 1,)))
             if res.error:
                 bundle["rows"][name] = [{"query_error": res.error}]
                 continue
@@ -522,8 +585,10 @@ def diagnostics_bundle(db: Db, scope: str = "all") -> dict:
         bundle["cost"] = {"error": traceback.format_exc()}
 
     errs = db.q("SELECT source, attempted_at, error_text FROM raw_events_errors "
-                "ORDER BY attempted_at DESC LIMIT ?",
-                (FULL_DUMP_ROWS_PER_TABLE if spec.get("full_rows") else 50,))
+                + ("WHERE attempted_at >= ? " if cutoff else "")
+                + "ORDER BY attempted_at DESC LIMIT ?",
+                ((cutoff,) if cutoff else ())
+                + (FULL_DUMP_ROWS_PER_TABLE if spec.get("full_rows") else 50,))
     bundle["recent_errors"] = errs.dicts() if not errs.error else [{"query_error": errs.error}]
 
     if db.table_exists("logs"):
@@ -535,9 +600,11 @@ def diagnostics_bundle(db: Db, scope: str = "all") -> dict:
             like = " OR ".join(["component LIKE ?"] * len(components))
             lg = db.q(
                 "SELECT ts, level, component, message, cycle_id, "
-                f"traceback_text, context_json FROM logs WHERE {like} "
-                "ORDER BY ts DESC LIMIT 1000",
-                tuple(f"{c}%" for c in components))
+                f"traceback_text, context_json FROM logs WHERE ({like}) "
+                + ("AND ts >= ? " if cutoff else "")
+                + "ORDER BY ts DESC LIMIT 1000",
+                tuple(f"{c}%" for c in components)
+                + ((cutoff,) if cutoff else ()))
             # An empty result must not read as "nothing went wrong": say
             # which components were asked for.
             if not lg.error and not lg.rows:
@@ -548,12 +615,16 @@ def diagnostics_bundle(db: Db, scope: str = "all") -> dict:
         elif spec.get("full_rows"):
             lg = db.q("SELECT ts, level, component, message, cycle_id, "
                       "traceback_text, context_json FROM logs "
-                      "ORDER BY ts DESC LIMIT ?",
-                      (FULL_DUMP_ROWS_PER_TABLE,))
+                      + ("WHERE ts >= ? " if cutoff else "")
+                      + "ORDER BY ts DESC LIMIT ?",
+                      ((cutoff, FULL_DUMP_ROWS_PER_TABLE) if cutoff
+                       else (FULL_DUMP_ROWS_PER_TABLE,)))
         else:
             lg = db.q("SELECT ts, level, component, message, cycle_id, "
                       "traceback_text, context_json FROM logs "
-                      "ORDER BY ts DESC LIMIT 300")
+                      + ("WHERE ts >= ? " if cutoff else "")
+                      + "ORDER BY ts DESC LIMIT 300",
+                      (cutoff,) if cutoff else ())
         bundle["recent_logs"] = lg.dicts() if not lg.error else [{"query_error": lg.error}]
     else:
         bundle["recent_logs"] = [{"note": "logs table absent; see "
@@ -753,9 +824,11 @@ class Handler(BaseHTTPRequestHandler):
                 params = parse_qs(parsed.query or "")
                 raw = (params.get("scope") or ["all"])[0]
                 scope = raw if raw in DIAGNOSTIC_SCOPES else "all"
+                days = window_days((params.get("days") or [None])[0])
+                span = f"{days}d" if days else "all"
                 return self._send_json(
-                    200, diagnostics_bundle(db, scope=scope),
-                    filename=f"catalyst-{scope}-{stamp}.json")
+                    200, diagnostics_bundle(db, scope=scope, days=days),
+                    filename=f"catalyst-{scope}-{span}-{stamp}.json")
             handler = HTML_ROUTES.get(parsed.path)
             if handler is None:
                 return self._send_html(404, render_page(
