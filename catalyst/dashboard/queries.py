@@ -275,7 +275,14 @@ class Stage:
     #: attrition in error orange - and "order status: filled" with it -
     #: is what made this panel read as a wall of faults
     #: (owner-reported: "Funnel still has this is the orange errors?").
-    faults: list = field(default_factory=list)  # [(reason, n, detail)]
+    #: [(reason, n, detail)] and optionally a 4th element, (href, label):
+    #: the page that can actually clear this fault.
+    faults: list = field(default_factory=list)
+    #: Faults that have since RESOLVED. Same shape, shown as history so
+    #: a cleared block cannot masquerade as a live one - nor vanish
+    #: silently, which would make it indistinguishable from one that
+    #: never happened.
+    healed: list = field(default_factory=list)
 
     @property
     def left(self) -> int:
@@ -375,13 +382,19 @@ def _ids(db: Db, sql: str, params: tuple = ()) -> tuple[set, QueryResult]:
 # must never become markup, and that is right. So an anchor written into
 # the sentence renders as literal &lt;a href=...&gt; on screen. Verified
 # by rendering; it looked exactly like a bug in the page.
+#
+# A FOURTH FIELD CARRIES THE PAST TENSE. The sentence is written for a
+# live block, so reusing it for a cleared one produces "spending was
+# blocked, then resumed - a cost cross-check IS HOLDING spending", which
+# contradicts itself in one line. Caught by reading the render.
 GOVERNOR_REASONS = {
     "cap_exceeded": (
         "the monthly budget ran out",
         "Raise it on the Settings page, or wait for the month to roll "
         "over. The Cost page shows the cap in force and what has been "
         "spent against it.",
-        ("/costs#cost-section", "Open the Cost page")),
+        ("/costs#cost-section", "Open the Cost page"),
+        "the monthly budget had run out"),
     "reconciliation_discrepancy_unacknowledged": (
         "a cost cross-check is holding spending until someone confirms it",
         "This is NOT out of money. The daily check compared what the bot "
@@ -394,19 +407,29 @@ GOVERNOR_REASONS = {
         # no acknowledge form on it - verified by rendering both. The
         # owner followed the instruction, found nothing to click, and
         # reported the block as unfixed. It was: the advice was wrong.
-        ("/costs#cost-unacked", "Acknowledge it on the Cost page")),
+        ("/costs#cost-unacked", "Acknowledge it on the Cost page"),
+        "a cost cross-check was holding spending until someone confirmed it"),
     "unpriced_cost_rows": (
         "a cost row could not be priced, so spending stopped",
         "This is a code fault, not a budget one: an API response arrived "
         "with a shape the pricing table does not know. Send the Cost & "
         "pricing bundle.",
-        ("/logs#log-bundle", "Collect the Cost & pricing log")),
+        ("/logs#log-bundle", "Collect the Cost & pricing log"),
+        "a cost row could not be priced"),
 }
 
 _UNKNOWN_REASON = (
     "This reason has no plain-English explanation recorded yet - send "
     "the Everything bundle so it can be diagnosed.",
-    ("/logs#log-bundle", "Collect the Everything log"))
+    ("/logs#log-bundle", "Collect the Everything log"),
+    None)
+
+
+def governor_reason_past(reason: str) -> str:
+    """The same block described as something that HAPPENED. See the note
+    above GOVERNOR_REASONS."""
+    entry = GOVERNOR_REASONS.get(str(reason))
+    return (entry[3] if entry and entry[3] else str(reason))
 
 
 def explain_governor_reason(reason: str):
@@ -417,6 +440,46 @@ def explain_governor_reason(reason: str):
     if entry is None:
         return str(reason), _UNKNOWN_REASON[0]
     return entry[0], entry[1]
+
+
+def governor_gate_still_closed(db, reason: str, last_deny_at, last_allow_at) -> bool:
+    """Is the gate that produced this denial STILL shut?
+
+    OWNER-REPORTED: the funnel said "125 spending was blocked ... last
+    seen yesterday", the advice said acknowledge it, and the Cost page
+    had nothing to acknowledge - because the pause had already been
+    cleared. Reproduced:
+
+        reconciliation acknowledged: True
+          governor actually blocking right now : False
+          funnel shows a NEEDS ATTENTION block : True
+          Cost page offers an acknowledge form : False
+
+    A count of every denial ever recorded is history. Painting it as
+    current state sends the owner to fix something already fixed, and -
+    far worse - trains them to ignore the block, which is the one panel
+    that must be believed when it IS live.
+
+    Each gate is asked the question it can actually answer, from rows
+    that exist. Nothing is inferred from the age of the denial.
+    """
+    if reason == "reconciliation_discrepancy_unacknowledged":
+        # Authoritative: the same condition cost.tracker gates on.
+        q = db.q("SELECT COUNT(*) AS n FROM cost_reconciliation_events "
+                 "WHERE action_taken = 'scheduled_paused' "
+                 "AND acknowledged_at IS NULL")
+        return bool(q.rows and int(q.rows[0]["n"]))
+    if reason == "unpriced_cost_rows":
+        q = db.q("SELECT COUNT(*) AS n FROM cost_events "
+                 "WHERE priced_cents IS NULL")
+        return bool(q.rows and int(q.rows[0]["n"]))
+    # Everything else, including cap_exceeded and any gate added later:
+    # the governor authorising ANY spend after the last denial means the
+    # gate opened. Where there has been no authorisation at all, the
+    # denial stands - silence is not evidence of recovery.
+    if not last_allow_at:
+        return True
+    return str(last_deny_at) >= str(last_allow_at)
 
 
 def governor_reason_link(reason: str):
@@ -539,17 +602,35 @@ def funnel(db: Db) -> Funnel:
         "SELECT reason, COUNT(*) n, MIN(at) first_at, MAX(at) last_at "
         "FROM cost_governor_events WHERE decision = 'deny' "
         "GROUP BY reason ORDER BY n DESC")
-    gov_faults = []
+    allow_q = db.q("SELECT MAX(at) AS last_allow FROM cost_governor_events "
+                   "WHERE decision != 'deny'")
+    last_allow_at = allow_q.rows[0]["last_allow"] if allow_q.rows else None
+    gov_faults, gov_healed = [], []
     for r in gov_q.rows:
         plain, todo = explain_governor_reason(r["reason"])
-        gov_faults.append((
-            f"spending was blocked \u2014 {plain}", r["n"],
-            f"{todo}  [{r['reason']}]  "
-            + _last_seen(r["last_at"], r["first_at"]),
-            governor_reason_link(r["reason"])))
+        seen = _last_seen(r["last_at"], r["first_at"])
+        if governor_gate_still_closed(db, r["reason"], r["last_at"],
+                                      last_allow_at):
+            gov_faults.append((
+                f"spending was blocked \u2014 {plain}", r["n"],
+                f"{todo}  [{r['reason']}]  " + seen,
+                governor_reason_link(r["reason"])))
+        else:
+            # RESOLVED. Kept visible, because a fault that vanishes
+            # silently is indistinguishable from one that never
+            # happened - but out of the block that demands action.
+            gov_healed.append((
+                "spending was blocked, then resumed \u2014 "
+                + governor_reason_past(r["reason"]), r["n"],
+                f"This is history, not something to act on: the check "
+                f"that stopped spending has since cleared"
+                + (f" and the governor has authorised spend since "
+                   f"{str(last_allow_at)[:16]}" if last_allow_at else "")
+                + f".  [{r['reason']}]  " + seen))
     stages.append(Stage(
         "researched", "Researched by the model", len(s_res), researched_q,
-        drops=drops, faults=gov_faults, entered=len(s_cand),
+        drops=drops, faults=gov_faults, healed=gov_healed,
+        entered=len(s_cand),
         plain="Claude read the candidate and everything the feeds hold on "
               "it. This is the only step that costs money, so it is also "
               "the step the cost governor can block.",

@@ -449,7 +449,28 @@ def funnel_panel(db: Db, p: str = "funnel") -> str:
             out.append(
                 f'<div class="funnel-fault" id="{p}-faults-{esc(stage.key)}">'
                 '<h3><span class="fault-chip">NEEDS ATTENTION</span> '
-                f"Things that went wrong here</h3><ul>{items}</ul></div>")
+                f"Things that went wrong here</h3><ul>{items}</ul>"
+                "<p class='prov'>Only blocks whose cause is still in "
+                "force. One that has since cleared is listed as history "
+                "below, not here.</p></div>")
+
+        # RESOLVED, and said so. A block already lifted must not wear the
+        # same orange as a live one - the owner went to acknowledge a
+        # pause that had already been cleared and found nothing to click.
+        if getattr(stage, "healed", None):
+            done = "".join(
+                f'<li><span class="funnel-why-n">{esc(h[1])}</span>'
+                + '<span class="funnel-why-text">' + esc(h[0])
+                + (f' <span class="prov">{raw(h[2])}</span>' if h[2] else "")
+                + "</span></li>"
+                for h in stage.healed)
+            out.append(
+                f'<div class="funnel-why" id="{p}-healed-{esc(stage.key)}">'
+                "<h3>Blocked earlier, running again now</h3>"
+                f"<ul>{done}</ul>"
+                "<p class='prov'>Nothing to do. Kept visible because a "
+                "fault that vanishes silently is indistinguishable from "
+                "one that never happened.</p></div>")
 
         # A step starved by the one above it is a CONSEQUENCE, not a
         # finding. Only the first starved step gets the full empty-state
