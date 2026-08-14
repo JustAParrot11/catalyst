@@ -780,15 +780,28 @@ def neural_map(
     # so the drawing got taller and no wider and the zoom did nothing
     # horizontally. An explicit width overflows the panel, which is what
     # .chart-scroll is there to scroll.
+    # AND ITS HEIGHT MUST FOLLOW. At width 100% the drawing scales down
+    # to the panel but a fixed pixel height does not, so the browser
+    # centres a 252px picture in a 368px box and leaves a dead band
+    # above and below it. Measured, not guessed: svgH 368, content 252.
+    # .map-fit hands the height back to the aspect ratio.
     svg_width = "100%" if zoom <= 1.0 else str(width)
+    fit = " map-fit" if zoom <= 1.0 else ""
     out = [
-        f'<svg id="{chart_id}" class="chart" viewBox="0 0 {width} {height}" '
+        f'<svg id="{chart_id}" class="chart{fit}" viewBox="0 0 {width} {height}" '
         f'width="{svg_width}" height="{height}" role="img" xmlns="http://www.w3.org/2000/svg" '
         'aria-label="The bot\'s wiring: '
         + "; ".join(f"{label} ({len(nodes)})" for label, nodes, _ in kept)
         + '. Every line is one recorded link.">',
         f'<rect x="0" y="0" width="{width}" height="{height}" fill="var(--page)" '
         f'stroke="var(--hairline)"/>',
+        # EVERYTHING DRAWN GOES IN ONE GROUP. An interaction layer can
+        # then pan and zoom by transforming this node alone, which is
+        # the whole of what it is permitted to do: move the camera,
+        # never decide what is in shot. The SVG itself stays free of
+        # script, so the drawing remains a server-rendered artifact that
+        # reproduces exactly with JavaScript turned off.
+        f'<g class="camera" id="{chart_id}-camera">',
     ]
 
     # Column headings, then the edges beneath every node.
@@ -834,7 +847,7 @@ def neural_map(
         #      element under the pointer, so a sibling selector on the
         #      hit path never matched.
         out.append(
-            f'<g class="edge-wrap">'
+            f'<g class="edge-wrap" data-src="{src}" data-dst="{dst}">'
             f'<path class="edge" d="{d}" fill="none" stroke="var(--accent)" '
             f'stroke-width="1.1" opacity="{opacity:.2f}" pointer-events="none"/>'
             f'<path class="edge-hit" d="{d}" fill="none" stroke="transparent" '
@@ -852,7 +865,10 @@ def neural_map(
             x, y = pos[nid]
             r = radius[nid]
             out.append(
-                f'<g class="node"><circle cx="{x:.1f}" cy="{y:.1f}" '
+                f'<g class="node" data-node="{nid}" data-label="{node_label}" '
+                f'data-links="{weight}" data-layer="{label}" '
+                f'tabindex="0" role="button">'
+                f'<circle cx="{x:.1f}" cy="{y:.1f}" '
                 f'r="{max(r + 9, 13):.1f}" fill="transparent" '
                 f'pointer-events="all">'
                 f"<title>{node_label} - {weight} link(s)</title></circle>"
@@ -895,6 +911,7 @@ def neural_map(
             else:
                 out.append(label_svg)
 
+    out.append("</g>")
     out.append(
         f'<text x="{width - 10}" y="{height - 10}" font-size="{FONT_SIZE - 1}" '
         # SAY BOTH NUMBERS WHEN THEY DIFFER. Duplicate edges are drawn

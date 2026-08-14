@@ -444,6 +444,7 @@ button { background: var(--series-1); color: #fff; border-color: transparent;
          font-weight: 600; cursor: pointer; }
 .chart { display: block; margin: 10px 0; max-width: 100%; }
 .chart-wrap { overflow-x: auto; }
+.chart.map-fit { height: auto; display: block; }
 .tag { display: inline-block; background: var(--surface-2);
        border: 1px solid var(--hairline); border-radius: 2px; padding: 1px 6px;
        font-size: 12px; margin-right: 4px; }
@@ -610,6 +611,45 @@ a.viewopt:hover { border-color: var(--accent); color: var(--ink); }
               border-radius: 2px; padding: 0 5px; font-size: 10px;
               letter-spacing: .06em; font-weight: 700; margin-right: 6px;
               vertical-align: 1px; }
+/* --- the map as a map ---------------------------------------------
+   Drag to move, scroll to zoom, click to follow a thread. The tool
+   strip is hidden until the script adds .map-live, so with scripting
+   off the page never advertises a drag that does nothing. */
+.maptools { display: none; align-items: center; flex-wrap: wrap; gap: 12px;
+            margin: 0 0 8px; font-size: 12px; }
+.maptools.on { display: flex; }
+/* The magnification links are the no-JS zoom. Where the mouse works
+   they are a worse version of something already in your hand. */
+.map-tools-live .viewbar-camera { display: none; }
+.maphint { color: var(--muted); }
+.mapfind input { font: inherit; padding: 3px 7px; width: 12em;
+                 border: 1px solid var(--line); border-radius: 3px;
+                 background: var(--panel); color: inherit; }
+.mapzoom { color: var(--muted); font-variant-numeric: tabular-nums; }
+.chart-wrap { position: relative; }
+.map-live svg.chart { cursor: grab; touch-action: none; }
+.map-grabbing svg.chart { cursor: grabbing; }
+.map-live svg.chart:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+.map-live .node { cursor: pointer; }
+/* Picking a node dims what it does not touch. Dimming, never hiding:
+   a map that removes what you did not click is a different picture,
+   not the same one with your answer marked. */
+.map-picked .node { opacity: .25; }
+.map-picked .node.near { opacity: .9; }
+.map-picked .node.on { opacity: 1; }
+.map-picked .node.on circle { stroke: var(--accent); stroke-width: 3; }
+.map-picked .edge-wrap { opacity: .12; }
+.map-picked .edge-wrap.on { opacity: 1; }
+.map-picked .edge-wrap.on .edge { stroke-width: 2; }
+.map-finding .node { opacity: .3; }
+.map-finding .node.found { opacity: 1; }
+.map-finding .node.found circle { stroke: var(--accent); stroke-width: 3; }
+.mapcard { display: flex; align-items: baseline; flex-wrap: wrap; gap: 10px;
+           margin: 0 0 8px; padding: 7px 11px; font-size: 12px;
+           border: 1px solid var(--accent); border-radius: 4px;
+           background: var(--surface-2); }
+.mapcard[hidden] { display: none; }
+.mapcard .cardsub { color: var(--muted); font-size: 11px; }
 /* Entry points into the map. A graph with no obvious place to click
    leaves the reader scanning a texture; these are the busiest nodes,
    named, each opening its own neighbourhood. */
