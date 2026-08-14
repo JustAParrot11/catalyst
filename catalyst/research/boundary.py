@@ -53,9 +53,33 @@ from catalyst.research.schema import (
 RESEARCH_MODEL = "claude-sonnet-5"      # judgement calls; cheap enough to
                                         # keep the $5/month cap honest
 MAX_EXPLORATION_TURNS = 2               # pause_turn continuations included
-#: Output cap per turn. 512 truncated a real forced tool call mid-JSON
-#: and wasted the paid call, so this does not go back down.
-MAX_EXPLORATION_TOKENS = 2048
+#: Output cap on the EXPLORATION turn - the one that thinks and searches.
+#: MEASURED, from the owner's live bundle for 2026-08-14. Of 65
+#: exploration turns, 38 stopped on `max_tokens` and 26 on `tool_use`:
+#:
+#:     turn 0 (exploration):  max_tokens 38   tool_use 26   end_turn 1
+#:     turn 1 (extraction):   tool_use 18
+#:
+#: 58% of the bot's thinking turns were being cut off mid-sentence and
+#: then forced, on the very next turn, to submit a conclusion. That is
+#: not a cost control, it is a quality ceiling, and it was invisible
+#: because a truncated turn still produces a view.
+#:
+#: max_tokens is a CEILING, NOT A PURCHASE: output is billed on what the
+#: model actually emits. Raising it costs nothing on the 26 turns that
+#: already finished, and buys room on the 38 that did not.
+#:
+#: Owner's steer, 2026-08-14: "i dont want to be narrowing the bots
+#: scope" and "we dont want to reduce quality".
+MAX_EXPLORATION_TOKENS = 8192
+
+#: The FORCED turn emits one JSON tool call and nothing else, and this
+#: number is already tuned by a live failure: a 512 ceiling truncated a
+#: real forced tool call mid-JSON, the parser refused the partial view,
+#: and the paid call was wasted. It stays where it was - the extraction
+#: turn was never the one being starved (18 of 18 stopped on tool_use,
+#: none on max_tokens).
+MAX_EXTRACTION_TOKENS = 2048
 _MTOK = Decimal(1_000_000)
 
 # Pre-call estimates, deliberately pessimistic (the governor compares
@@ -198,8 +222,8 @@ def _exploration_input_tokens(searches: int, conn=None) -> int:
 
 
 #: Output tokens the forced turn emits: one small JSON tool call. It is
-#: capped at MAX_EXPLORATION_TOKENS like every turn, but the schema is a
-#: handful of fields and the measured call emitted far less.
+#: capped at MAX_EXTRACTION_TOKENS, but the schema is a handful of
+#: fields and the measured call emitted far less.
 EXTRACTION_OUTPUT_TOKENS_ESTIMATE = 512
 
 
@@ -691,7 +715,7 @@ def investigate(
     last_error: str | None = None
     for attempt in ("first", "repair"):
         turn = run_turn({
-            "model": model, "max_tokens": MAX_EXPLORATION_TOKENS,
+            "model": model, "max_tokens": MAX_EXTRACTION_TOKENS,
             "messages": messages,
             "tools": [SUBMIT_RESEARCH_VIEW_TOOL],
             "tool_choice": {"type": "tool", "name": "submit_research_view"},
