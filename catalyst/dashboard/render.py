@@ -539,6 +539,22 @@ button { background: var(--series-1); color: #fff; border-color: transparent;
    3) but folded, and forced to wrap and scroll rather than stretching
    the panel to the width of the longest unbroken line. */
 .raw-fold { margin: 4px 0 0 0; }
+/* A zoomed map is WIDER than the panel on purpose: it scrolls sideways
+   rather than being squashed back to fit, which would undo the zoom. */
+.chart-scroll { overflow-x: auto; }
+.chart-scroll svg { max-width: none; }
+.viewbar { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px;
+           margin: 8px 0 4px 0; }
+.viewbar-label { font-size: 11px; letter-spacing: .07em;
+                 text-transform: uppercase; color: var(--muted);
+                 font-weight: 700; margin-left: 10px; }
+.viewbar-label:first-of-type { margin-left: 0; }
+.viewopt { font-size: 12px; padding: 2px 8px; border-radius: 3px;
+           border: 1px solid var(--hairline); text-decoration: none;
+           color: var(--ink-2); }
+a.viewopt:hover { border-color: var(--accent); color: var(--ink); }
+.viewopt.on { background: var(--accent); color: #fff;
+              border-color: var(--accent); font-weight: 700; }
 .raw-fold summary { font-size: 11px; color: var(--muted); }
 .raw-fold pre { max-height: 16em; overflow: auto; white-space: pre-wrap;
                 overflow-wrap: anywhere; font-size: 10.5px;

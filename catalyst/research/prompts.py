@@ -70,6 +70,7 @@ def _signals_block(signals: list) -> str:
     it otherwise: a downgrade before a readout means something different
     from a downgrade after one.
     """
+    tagged = False
     lines = ["WHAT EACH FEED SAID, INDEPENDENTLY",
              "These arrived from separate sources. They were not written "
              "with each other in mind, and nothing has judged them yet:"]
@@ -84,10 +85,17 @@ def _signals_block(signals: list) -> str:
                 "  [pattern-matched as GOOD for the equity]" if hint > 0 else
                 "  [pattern-matched as BAD for the equity]")
         lines.append(f"  - {when}  ({sig.source}) {str(what)[:180]}{tone}")
-    lines.append(
-        "The GOOD/BAD tags above are a crude keyword match done by code, "
-        "not a judgement. Disagree with them freely - saying one is wrong "
-        "is useful.")
+        tagged = tagged or bool(tone)
+    # Only explain the tags if any were actually emitted. The sentence
+    # used to be unconditional, so a conjunction whose feeds carried no
+    # direction_hint told the model to "disagree freely" with GOOD/BAD
+    # tags that were not on the page - an instruction pointing at
+    # nothing, paid for by the token.
+    if tagged:
+        lines.append(
+            "The GOOD/BAD tags above are a crude keyword match done by "
+            "code, not a judgement. Disagree with them freely - saying "
+            "one is wrong is useful.")
     return "\n".join(lines)
 
 

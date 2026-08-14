@@ -2411,7 +2411,38 @@ def state_line(db: Db, p: str = "state") -> str:
             + " &middot; ".join(bits) + "</p>")
 
 
-def brain_panel(db: Db, p: str = "brain") -> str:
+def brain_view_controls(p: str, zoom: float, nodes: int) -> str:
+    """Zoom and expand, as LINKS. No JavaScript, by design - the map is
+    documented as deterministic, and a JS pan/zoom draws a different
+    picture per browser. Each control is a URL, so a view the owner
+    finds useful can be bookmarked or pasted into a bug report.
+    """
+    def opt(label, key, value, current):
+        on = abs(float(current) - float(value)) < 1e-9
+        other = "nodes" if key == "zoom" else "zoom"
+        other_v = nodes if key == "zoom" else zoom
+        href = f"/brain?{key}={value}&amp;{other}={other_v:g}"
+        cls = "viewopt on" if on else "viewopt"
+        return (f'<span class="{cls}">{label}</span>' if on else
+                f'<a class="{cls}" href="{href}">{label}</a>')
+
+    return (
+        f'<p class="viewbar" id="{p}-controls">'
+        "<span class=\"viewbar-label\">Zoom</span> "
+        + " ".join(opt(t, "zoom", v, zoom) for t, v in
+                   (("fit", 1), ("1.5x", 1.5), ("2x", 2), ("3x", 3)))
+        + ' <span class="viewbar-label">Show per layer</span> '
+        + " ".join(opt(t, "nodes", v, nodes) for t, v in
+                   (("14", 14), ("30", 30), ("60", 60), ("all", 999)))
+        + "</p>"
+        + prov("Zoom widens the drawing and the panel scrolls sideways; "
+               "it never redraws the graph differently. Node labels are "
+               "trimmed only to fit their column, and the full name is "
+               "always on hover."))
+
+
+def brain_panel(db: Db, p: str = "brain", zoom: float = 1.0,
+                nodes: int = None) -> str:
     """The whole system's wiring in one picture.
 
     Not a metaphor and not an illustration: every node is a row and
@@ -2419,6 +2450,7 @@ def brain_panel(db: Db, p: str = "brain") -> str:
     machine that draws links the machine does not have would be worse
     than no picture, because it would be believed.
     """
+    cap = int(nodes) if nodes else charts.MAX_NODES_PER_LAYER
     b = queries.brain(db)
     out = []
     if not b.edge_count:
@@ -2443,11 +2475,13 @@ def brain_panel(db: Db, p: str = "brain") -> str:
     links = {esc(nid): f"/decision?candidate_id={esc(nid[5:])}"
              for label, nodes in b.layers if label == "Candidates"
              for nid, _, _ in nodes}
-    out.append('<div class="chart-wrap">' + charts.neural_map(
+    out.append(brain_view_controls(p, zoom, cap))
+    out.append('<div class="chart-wrap chart-scroll">' + charts.neural_map(
         [(esc(label), [(esc(nid), esc(nlabel), w) for nid, nlabel, w in nodes])
          for label, nodes in b.layers],
         [(esc(s), esc(d), w, esc(t)) for s, d, w, t in b.edges],
-        chart_id=f"{p}-map", links=links) + "</div>")
+        chart_id=f"{p}-map", links=links,
+        max_per_layer=cap, zoom=zoom) + "</div>")
     out.append(prov(
         "Every line is one recorded relationship - a source event named by a "
         "candidate, an assertion in the evidence graph, a view against a "

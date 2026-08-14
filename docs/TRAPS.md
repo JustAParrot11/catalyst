@@ -9,6 +9,19 @@ Short list, all learned the hard way. Everything else is your call.
 - The Anthropic Cost API reports **whole days only**. Today's spend is not
   queryable until the day closes — a naive reading shows $0 and looks like
   a broken account.
+
+  **Owner decision, 2026-08-14: a daily figure is fine.** The lag is
+  accepted — if a day's true cost lands slightly differently from the
+  local estimate, the budget simply re-bases the next day. So the
+  reconciliation is a *correction*, not an alarm, and a discrepancy is
+  not by itself evidence of a fault.
+
+  What this does **not** mean: the local ledger is still required and is
+  not a duplicate of the API. The governor has to know spend *now*, in
+  the middle of a day, to decide whether the next call is affordable —
+  and the Cost API cannot answer that at any price. Local tracking is
+  the only real-time number there is; the API is the end-of-day check on
+  it.
 - Amounts are decimal strings in **cents**, not dollars.
 - **Cache tokens are billed but are not in `input_tokens`.** Capture
   `cache_read_input_tokens` and `cache_creation_input_tokens` explicitly.

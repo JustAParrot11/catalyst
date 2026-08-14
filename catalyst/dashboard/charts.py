@@ -715,6 +715,8 @@ def neural_map(
     width: int = 1180,
     row_gap: int = 34,
     links: dict | None = None,   # node_id -> href, for clickable nodes
+    max_per_layer: int = MAX_NODES_PER_LAYER,
+    zoom: float = 1.0,
 ) -> str:
     """The system's live wiring, drawn as connected layers.
 
@@ -731,12 +733,20 @@ def neural_map(
 
     kept = []
     for label, nodes in layers:
-        shown = list(nodes)[:MAX_NODES_PER_LAYER]
+        shown = list(nodes)[:max_per_layer]
         kept.append([label, shown, max(0, len(nodes) - len(shown))])
     if not any(nodes for _, nodes, _ in kept):
         raise ValueError("neural_map needs at least one node; use placeholder()")
     kept = _untangle(kept, edges)
 
+    # ZOOM IS SERVER-SIDE, deliberately. This chart is documented as
+    # "no physics, no animation, no JavaScript" and that is what makes it
+    # reproducible; a JS pan/zoom would draw a different picture per
+    # browser. Scaling the geometry and letting the container scroll
+    # gives the owner room without giving up determinism.
+    zoom = max(1.0, min(3.0, float(zoom or 1.0)))
+    width = int(width * zoom)
+    row_gap = int(row_gap * zoom)
     n_cols = len(kept)
     tallest = max((len(nodes) for _, nodes, _ in kept), default=1)
     height = max(340, 96 + row_gap * tallest)
@@ -752,9 +762,16 @@ def neural_map(
             pos[nid] = (cx, top + row_gap * ri + row_gap / 2)
             radius[nid] = 4.0 + 4.0 * math.sqrt(max(weight, 0) / max_w)
 
+    # AT ZOOM 1 the map is responsive (width 100%, shrinks to the panel).
+    # ZOOMED, it must carry an explicit PIXEL width: with width="100%" the
+    # browser scales the bigger viewBox straight back down to the panel,
+    # so the drawing got taller and no wider and the zoom did nothing
+    # horizontally. An explicit width overflows the panel, which is what
+    # .chart-scroll is there to scroll.
+    svg_width = "100%" if zoom <= 1.0 else str(width)
     out = [
         f'<svg id="{chart_id}" class="chart" viewBox="0 0 {width} {height}" '
-        f'width="100%" height="{height}" role="img" xmlns="http://www.w3.org/2000/svg" '
+        f'width="{svg_width}" height="{height}" role="img" xmlns="http://www.w3.org/2000/svg" '
         'aria-label="The bot\'s wiring: '
         + "; ".join(f"{label} ({len(nodes)})" for label, nodes, _ in kept)
         + '. Every line is one recorded link.">',
@@ -830,7 +847,16 @@ def neural_map(
                 f'pointer-events="none"/></g>')
             tx = x - r - 7 if left_side else x + r + 7
             anchor = "end" if left_side else "start"
-            text = node_label if len(node_label) <= 20 else node_label[:19] + "…"
+            # FIT THE COLUMN, don't guess at 20 characters. The label
+            # runs from the node towards the column edge, so the room it
+            # has is half a column less the node and its padding. A
+            # fixed 20 threw away readable text in a wide column and
+            # still overflowed a narrow one (owner-reported: "you can
+            # only read a few lines before it cuts off").
+            room_px = max(40.0, col_w / 2 - r - 14)
+            fits = max(8, int(room_px / (FONT_SIZE * 0.56)))
+            trimmed = len(node_label) > fits
+            text = node_label if not trimmed else node_label[:fits - 1] + "…"
             # A HALO, not a shadow. With this many connectors a bare
             # label is crossed by three of them and reads as struck
             # through - painting the page colour as a stroke UNDER the
@@ -839,7 +865,12 @@ def neural_map(
                 f'<text x="{tx:.1f}" y="{y + 3.5:.1f}" font-size="{FONT_SIZE - 1}" '
                 f'text-anchor="{anchor}" fill="var(--ink-2)" '
                 f'stroke="var(--page)" stroke-width="3.5" paint-order="stroke" '
-                f'style="stroke-linejoin:round">{text}</text>')
+                f'style="stroke-linejoin:round">{text}'
+                # A trimmed label must still be READABLE somewhere. The
+                # node circle already has a title; the text did not, so
+                # hovering the words themselves said nothing.
+                + (f"<title>{node_label}</title>" if trimmed else "")
+                + "</text>")
             href = links.get(nid)
             if href:
                 # A node that maps to a page is a LINK, so clicking it
