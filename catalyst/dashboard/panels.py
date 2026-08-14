@@ -2570,19 +2570,250 @@ def brain_view_controls(p: str, zoom: float, nodes: int,
         return (f'<span class="{cls}">{label}</span>' if on else
                 f'<a class="{cls}" href="{href}">{label}</a>')
 
+    # TWO KINDS OF CONTROL, AND THEY ARE NOT THE SAME KIND.
+    #
+    # "Show per layer" changes WHAT IS DRAWN, so it has to be a request
+    # to the server and it stays a link always.
+    #
+    # Zoom only moves the CAMERA. Where the script runs you scroll to
+    # zoom and drag to move, so a row of magnification links is a worse
+    # version of something already in your hand - it hides itself
+    # (.viewbar-camera, hidden by .map-live) rather than sitting there
+    # as clutter. With scripting off it is the only zoom there is, so it
+    # stays. Owner-asked: "cant we move the mouse ourself instead of
+    # zooming etc."
     return (
-        f'<p class="viewbar" id="{p}-controls">'
+        f'<p class="viewbar viewbar-camera" id="{p}-controls-camera">'
         "<span class=\"viewbar-label\">Zoom</span> "
         + " ".join(opt(t, "zoom", v, zoom) for t, v in
                    (("fit", 1), ("1.5x", 1.5), ("2x", 2), ("3x", 3)))
-        + ' <span class="viewbar-label">Show per layer</span> '
+        + "</p>"
+        + f'<p class="viewbar" id="{p}-controls">'
+        + '<span class="viewbar-label">Show per layer</span> '
         + " ".join(opt(t, "nodes", v, nodes) for t, v in
                    (("8", 8), ("14", 14), ("30", 30), ("all", 999)))
         + "</p>"
-        + prov("Zoom widens the drawing and the panel scrolls sideways; "
-               "it never redraws the graph differently. Node labels are "
-               "trimmed only to fit their column, and the full name is "
-               "always on hover."))
+        + prov("How many nodes are drawn is a question for the server, "
+               "so it reloads the page and the answer is in the URL. "
+               "Moving and zooming is not - it never redraws the graph "
+               "differently. Node labels are trimmed only to fit their "
+               "column, and the full name is always on hover."))
+
+
+#: The one rule the interaction layer lives under. Stated here because
+#: it is the reason a dashboard that handles money is allowed a script
+#: at all, and it is what the tests check.
+CAMERA_RULE = (
+    "This script may move the camera and change what is emphasised. It "
+    "never decides what is drawn: the nodes, the lines and the numbers "
+    "are the server's, and turning JavaScript off gives back exactly the "
+    "same picture with the links still working.")
+
+
+def brain_interaction(chart_id: str, p: str) -> str:
+    """Drag to move, wheel to zoom, click to follow a thread.
+
+    OWNER-ASKED: "cant we move the mouse ourself instead of zooming etc,
+    think about how it can display useful info but also be intuitive."
+
+    Zoom-by-link was defensible and it was not intuitive. Nobody reads a
+    map by picking a magnification from a list; they grab it and move
+    it. So the map now behaves like a map.
+
+    WHY A SCRIPT IS ALLOWED HERE, when the rest of this dashboard has
+    none. The objection to JavaScript was never the mouse - it was that
+    a client-side graph draws a different picture per browser and cannot
+    be pasted into a bug report. That objection is answered by
+    CAMERA_RULE rather than by refusing the mouse: the SVG is still
+    rendered by the server, still deterministic, still identical with
+    scripting off. What the layer adds is a viewport and a highlight.
+    Every link, every control and every number keeps working without it.
+
+    The whole thing is deliberately small and dependency-free. Nothing
+    is fetched, nothing is computed from the database, nothing is
+    stored.
+    """
+    return f"""<script>
+/* {CAMERA_RULE} */
+(function () {{
+  var svg = document.getElementById({chart_id!r});
+  var cam = document.getElementById({chart_id!r} + '-camera');
+  if (!svg || !cam) return;               /* no map on this page */
+  var box = svg.viewBox.baseVal;
+  var view = {{x: 0, y: 0, k: 1}};
+  var MIN = 0.4, MAX = 8;
+  var stage = svg.parentNode;
+  stage.classList.add('map-live');
+  /* Reveal the mouse controls only where they work. The strip sits
+     BEFORE the chart in the document, so no sibling selector can reach
+     it - the script has to turn it on itself. */
+  var tools = document.getElementById({p!r} + '-tools');
+  if (tools) tools.classList.add('on');
+  document.body.classList.add('map-tools-live');
+
+  function apply() {{
+    cam.setAttribute('transform',
+      'translate(' + view.x.toFixed(2) + ',' + view.y.toFixed(2) + ') ' +
+      'scale(' + view.k.toFixed(4) + ')');
+    var pct = document.getElementById({p!r} + '-zoomnow');
+    if (pct) pct.textContent = Math.round(view.k * 100) + '%';
+  }}
+  function reset() {{ view = {{x: 0, y: 0, k: 1}}; apply(); }}
+
+  /* Client coordinates -> the SVG's own units, so zooming keeps the
+     point under the cursor where it is rather than drifting. */
+  function at(evt) {{
+    var r = svg.getBoundingClientRect();
+    return {{x: (evt.clientX - r.left) / r.width * box.width,
+             y: (evt.clientY - r.top) / r.height * box.height}};
+  }}
+  function zoomAbout(pt, k) {{
+    k = Math.max(MIN, Math.min(MAX, k));
+    view.x = pt.x - (pt.x - view.x) * (k / view.k);
+    view.y = pt.y - (pt.y - view.y) * (k / view.k);
+    view.k = k;
+    apply();
+  }}
+
+  /* --- drag to move ------------------------------------------------ */
+  var drag = null, moved = 0;
+  svg.addEventListener('pointerdown', function (e) {{
+    if (e.button !== 0) return;
+    drag = {{x: e.clientX, y: e.clientY, vx: view.x, vy: view.y, held: false}};
+    moved = 0;
+  }});
+  svg.addEventListener('pointermove', function (e) {{
+    if (!drag) return;
+    var r = svg.getBoundingClientRect();
+    var dx = (e.clientX - drag.x) / r.width * box.width;
+    var dy = (e.clientY - drag.y) / r.height * box.height;
+    moved = Math.max(moved, Math.abs(e.clientX - drag.x)
+                          + Math.abs(e.clientY - drag.y));
+    /* CAPTURE ONLY ONCE A DRAG REALLY BEGINS. Capturing on pointerdown
+       retargets the click that follows to the SVG itself, so clicking a
+       node landed on the background instead and silently did nothing.
+       Found in a browser, not in the markup: pan, zoom, find and the
+       keyboard all worked, and only the node click was dead. */
+    if (moved <= 3) return;
+    if (!drag.held) {{
+      drag.held = true;
+      stage.classList.add('map-grabbing');
+      try {{ svg.setPointerCapture(e.pointerId); }} catch (err) {{}}
+    }}
+    view.x = drag.vx + dx; view.y = drag.vy + dy;
+    apply();
+  }});
+  function endDrag(e) {{
+    if (!drag) return;
+    var held = drag.held;
+    drag = null;
+    stage.classList.remove('map-grabbing');
+    if (held) {{ try {{ svg.releasePointerCapture(e.pointerId); }} catch (err) {{}} }}
+  }}
+  svg.addEventListener('pointerup', endDrag);
+  svg.addEventListener('pointercancel', endDrag);
+
+  /* --- wheel to zoom ----------------------------------------------- */
+  svg.addEventListener('wheel', function (e) {{
+    e.preventDefault();
+    zoomAbout(at(e), view.k * (e.deltaY < 0 ? 1.12 : 1 / 1.12));
+  }}, {{passive: false}});
+
+  /* --- click a node to follow its thread --------------------------- */
+  var nodes = [].slice.call(svg.querySelectorAll('[data-node]'));
+  var edges = [].slice.call(svg.querySelectorAll('[data-src]'));
+  var card = document.getElementById({p!r} + '-card');
+  var picked = null;
+
+  function clear() {{
+    picked = null;
+    stage.classList.remove('map-picked');
+    nodes.forEach(function (n) {{ n.classList.remove('on', 'near'); }});
+    edges.forEach(function (l) {{ l.classList.remove('on'); }});
+    if (card) card.hidden = true;
+  }}
+  function pick(g) {{
+    var id = g.getAttribute('data-node');
+    if (picked === id) {{ clear(); return; }}
+    picked = id;
+    stage.classList.add('map-picked');
+    var near = {{}};
+    edges.forEach(function (l) {{
+      var s = l.getAttribute('data-src'), d = l.getAttribute('data-dst');
+      var hit = (s === id || d === id);
+      l.classList.toggle('on', hit);
+      if (hit) {{ near[s] = 1; near[d] = 1; }}
+    }});
+    nodes.forEach(function (n) {{
+      var nid = n.getAttribute('data-node');
+      n.classList.toggle('on', nid === id);
+      n.classList.toggle('near', nid !== id && !!near[nid]);
+    }});
+    if (!card) return;
+    var links = g.getAttribute('data-links') || '0';
+    var q = encodeURIComponent(id);
+    card.innerHTML =
+      '<b>' + g.getAttribute('data-label') + '</b>'
+      + '<span class="cardsub">' + g.getAttribute('data-layer')
+      + ' &middot; ' + links + ' link(s) &middot; '
+      + Object.keys(near).length + ' shown connected</span>'
+      + '<a href="/node?id=' + q + '">What is this?</a>'
+      + '<a href="/brain?focus=' + q + '">Draw just this</a>';
+    card.hidden = false;
+  }}
+  nodes.forEach(function (g) {{
+    g.addEventListener('click', function (e) {{
+      if (moved > 4) return;              /* that was a drag, not a click */
+      e.preventDefault(); e.stopPropagation();
+      pick(g);
+    }});
+    g.addEventListener('keydown', function (e) {{
+      if (e.key === 'Enter' || e.key === ' ') {{ e.preventDefault(); pick(g); }}
+    }});
+  }});
+  svg.addEventListener('click', function () {{ if (moved <= 4) clear(); }});
+  svg.addEventListener('dblclick', function (e) {{ e.preventDefault(); reset(); }});
+
+  /* --- keyboard ----------------------------------------------------- */
+  svg.setAttribute('tabindex', '0');
+  svg.addEventListener('keydown', function (e) {{
+    var step = box.width / 12;
+    var was = {{x: view.x, y: view.y, k: view.k}};
+    if (e.key === 'ArrowLeft') view.x += step;
+    else if (e.key === 'ArrowRight') view.x -= step;
+    else if (e.key === 'ArrowUp') view.y += step;
+    else if (e.key === 'ArrowDown') view.y -= step;
+    else if (e.key === '+' || e.key === '=') view.k = Math.min(MAX, view.k * 1.2);
+    else if (e.key === '-' || e.key === '_') view.k = Math.max(MIN, view.k / 1.2);
+    else if (e.key === '0') {{ reset(); e.preventDefault(); return; }}
+    else if (e.key === 'Escape') {{ clear(); return; }}
+    else return;
+    e.preventDefault();
+    if (was.k !== view.k || was.x !== view.x) apply(); else apply();
+  }});
+
+  var btn = document.getElementById({p!r} + '-reset');
+  if (btn) btn.addEventListener('click', function (e) {{
+    e.preventDefault(); reset(); clear();
+  }});
+
+  /* Type to find. Highlights matches; it never removes a node, because
+     a map that quietly drops what you did not search for is a different
+     picture rather than the same one with your answer marked. */
+  var find = document.getElementById({p!r} + '-find');
+  if (find) find.addEventListener('input', function () {{
+    var q = find.value.trim().toLowerCase();
+    stage.classList.toggle('map-finding', q.length > 0);
+    nodes.forEach(function (n) {{
+      var hit = q && (n.getAttribute('data-label') || '')
+        .toLowerCase().indexOf(q) >= 0;
+      n.classList.toggle('found', !!hit);
+    }});
+  }});
+
+  apply();
+}})();
+</script>"""
 
 
 def brain_ways_in(b, p: str) -> str:
@@ -2710,13 +2941,34 @@ def brain_panel(db: Db, p: str = "brain", zoom: float = 1.0,
                 # than no link, because it costs a click to find out.
                 links[key] = f"/newsmap?ticker={esc(str(nlabel).strip())}"
     out.append(brain_view_controls(p, zoom, cap, focus=focus))
+    # THE MOUSE CONTROLS, and a plain statement of what they do. They are
+    # shown only where they work: the .map-live class is added by the
+    # script, so with scripting off this strip stays hidden rather than
+    # advertising a drag that does nothing.
+    out.append(
+        f'<p class="maptools" id="{p}-tools">'
+        f'<span class="maphint">Drag to move &middot; scroll to zoom '
+        f'&middot; click a node to follow its links &middot; '
+        f'double-click to reset</span>'
+        f'<label class="mapfind">find '
+        f'<input id="{p}-find" type="search" placeholder="a ticker, a feed"'
+        ' autocomplete="off"></label>'
+        f'<span class="mapzoom">zoom <b id="{p}-zoomnow">100%</b></span>'
+        f'<button type="button" class="viewopt" id="{p}-reset">'
+        "Reset view</button></p>"
+        # BESIDE THE MAP, NOT OVER IT. Overlaid on the drawing it
+        # covered the node it was describing - seen in a screenshot,
+        # which is the only way that kind of fault shows up.
+        f'<div class="mapcard" id="{p}-card" hidden></div>')
     out.append('<div class="chart-wrap chart-scroll">' + charts.neural_map(
         [(esc(label), [(esc(nid), esc(nlabel), w) for nid, nlabel, w in nodes])
          for label, nodes in b.layers],
         [(esc(s), esc(d), w, esc(t))
          for s, d, w, t in queries.collapse_edges(b.edges)],
         chart_id=f"{p}-map", links=links,
-        max_per_layer=cap, zoom=zoom) + "</div>")
+        max_per_layer=cap, zoom=zoom)
+        + "</div>")
+    out.append(brain_interaction(f"{p}-map", p))
     out.append(prov(
         "Every line is one recorded relationship - a source event named by a "
         "candidate, an assertion in the evidence graph, a view against a "

@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from catalyst.dashboard import panels, queries
+from catalyst.dashboard import charts, panels, queries
 from catalyst.dashboard.db import Db
 from catalyst.dashboard.server import DEFAULT_BRAIN_NODES, HTML_ROUTES
 
@@ -211,17 +211,119 @@ class TestThereIsAWayIn:
         assert f"focus={nid}" in html_out.split('class="viewbar"')[1][:2000]
 
 
-class TestItStillNeedsNoJavaScript:
-    """The map is documented as deterministic; a JS pan/zoom draws a
-    different picture per browser and cannot be pasted into a bug
-    report."""
+class TestTheScriptMayMoveTheCameraAndNothingElse:
+    """The map now takes a drag and a scroll wheel, so it has a script.
 
-    def test_the_focused_page_has_no_script(self, wired):
+    OWNER-ASKED: "cant we move the mouse ourself instead of zooming etc."
+
+    The old rule said no JavaScript at all, and that rule was protecting
+    something real - a client-side graph draws a different picture per
+    browser and cannot be pasted into a bug report. But the objection
+    was never the mouse. It was the picture.
+
+    So the rule is narrower and stronger now: THE SCRIPT MAY MOVE THE
+    CAMERA AND CHANGE EMPHASIS. IT NEVER DECIDES WHAT IS DRAWN. These
+    tests hold the parts of that a static check can reach; the browser
+    half - that the counts are identical with scripting on and off - is
+    measured in scripts/map_interaction_check.py.
+    """
+
+    def test_the_DRAWING_is_still_script_free(self, wired):
+        """The SVG is the evidence. It has to stay a server-rendered
+        artifact that reproduces byte for byte."""
         whole = queries.brain(Db(wired))
-        nid = queries.busiest_nodes(whole, 1)[0][0]
-        html_out = panels.brain_panel(Db(wired), focus=nid)
-        assert "<script" not in html_out.lower()
-        assert "onclick" not in html_out.lower()
+        svg = charts.neural_map(
+            [(lbl, [(i, l, w) for i, l, w in ns]) for lbl, ns in whole.layers],
+            whole.edges, chart_id="m")
+        assert "<script" not in svg.lower()
+        assert "onclick" not in svg.lower()
+
+    def test_the_same_database_still_draws_the_same_svg(self, wired):
+        whole = queries.brain(Db(wired))
+        args = ([(lbl, [(i, l, w) for i, l, w in ns])
+                 for lbl, ns in whole.layers], whole.edges)
+        assert charts.neural_map(*args, chart_id="m") == \
+            charts.neural_map(*args, chart_id="m")
+
+    def test_the_script_fetches_nothing_and_stores_nothing(self, wired):
+        """A camera does not need the network, and a dashboard that
+        handles money should not grow a client-side data path by
+        accident."""
+        js = panels.brain_interaction("brain-map", "brain")
+        for banned in ("fetch(", "XMLHttpRequest", "localStorage",
+                       "sessionStorage", "eval(", "import(", "WebSocket"):
+            assert banned not in js, f"the camera layer reached for {banned}"
+
+    def test_it_loads_no_library(self, wired):
+        js = panels.brain_interaction("brain-map", "brain")
+        assert "src=" not in js, "the interaction layer pulled in a dependency"
+
+    def test_it_cannot_REMOVE_anything_from_the_drawing(self, wired):
+        """The camera rule, made structural.
+
+        Driving a browser proves the layer BEHAVES; it does not prove it
+        cannot misbehave. A deliberately broken build whose script
+        removed the nodes it had not selected passed every browser check
+        I could write, because whether the removal fires depends on
+        which node is clicked and in what order.
+
+        Banning the APIs outright is deterministic and it does catch
+        that build. Dimming is a class change; removal is a different
+        picture, and there is no legitimate reason for a camera to hold
+        either tool.
+        """
+        js = panels.brain_interaction("brain-map", "brain")
+        # THE WHOLE SCRIPT, not a slice of it. The first version of this
+        # checked only the text before `var card` was declared - and the
+        # node loop that would do the removing sits after it, so the
+        # broken build passed this too. A guard that inspects part of
+        # the thing is not a guard.
+        for banned in (".remove()", "removeChild", "replaceChildren",
+                       "insertAdjacent", "createElement", "cloneNode",
+                       "appendChild", "removeAttribute('data-node')"):
+            assert banned not in js, (
+                f"the camera layer can {banned} - that is deciding what "
+                "is drawn, not moving the camera")
+
+    def test_the_card_is_the_only_thing_it_writes_into(self, wired):
+        """And it is beside the map, never part of it."""
+        js = panels.brain_interaction("brain-map", "brain")
+        assert js.count(".innerHTML") == 1
+        assert "card.innerHTML" in js
+
+    def test_it_states_the_rule_it_lives_under(self, wired):
+        """In the file, where someone changing it will read it."""
+        js = panels.brain_interaction("brain-map", "brain")
+        assert "never decides what is drawn" in js
+
+    def test_without_the_script_every_control_still_works(self, wired):
+        """The no-JS fallback is not a courtesy: it is the proof that the
+        script is only a camera."""
+        html_out = panels.brain_panel(Db(wired))
+        assert "/brain?focus=" in html_out, "the ways in are plain links"
+        assert 'href="/brain?zoom=2' in html_out or "zoom=2" in html_out
+        assert 'class="chart-wrap' in html_out
+
+    def test_the_mouse_hints_are_hidden_until_the_script_shows_them(self, wired):
+        """A page that says "drag to move" where dragging does nothing is
+        worse than one that says nothing."""
+        from catalyst.dashboard.render import _CSS
+
+        html_out = panels.brain_panel(Db(wired))
+        assert 'class="maptools"' in html_out
+        assert ".maptools { display: none" in _CSS
+        assert ".maptools.on { display: flex; }" in _CSS
+        assert "maptools.on" not in html_out, (
+            "the hint strip is visible before the script has confirmed it "
+            "can actually be dragged")
+
+    def test_picking_a_node_DIMS_rather_than_hides(self, wired):
+        """A map that removes what you did not click is a different
+        picture, not the same one with your answer marked."""
+        from catalyst.dashboard.render import _CSS
+
+        assert ".map-picked .node { opacity: .25; }" in _CSS
+        assert "display: none" not in _CSS.split(".map-picked")[1][:400]
 
 
 class TestAPastedURLCannotBreakThePage:

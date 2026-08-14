@@ -577,7 +577,20 @@ def phase_traded(tmp: Path) -> None:
         # links to an empty page costs a click to discover, which is
         # worse than a node that does not link at all.
         import re as _re2
-        brain_links = set(_re2.findall(r'<a href="(/[^"]+)"', pages["/brain"]))
+
+        def _no_script(html):
+            """Strip <script> blocks before looking for links.
+
+            The map's interaction layer BUILDS hrefs in JavaScript, so
+            the raw page contains href="/brain?focus=' + q + '" as
+            source text. Following that as a URL raised InvalidURL and
+            failed the smoke on a page that was perfectly fine. Links a
+            reader can click are in the markup, never in the script.
+            """
+            return _re2.sub(r"(?is)<script\b.*?</script>", "", html)
+
+        markup = _no_script(pages["/brain"])
+        brain_links = set(_re2.findall(r'<a href="(/[^"]+)"', markup))
         for href in sorted(brain_links):
             st2, _, body2 = s.get(href.replace("&amp;", "&"))
             check(f"brain link {href} resolves", st2 == 200, f"got {st2}")
@@ -586,7 +599,7 @@ def phase_traded(tmp: Path) -> None:
         # EVERY node opens a runbook page that says what it is.
         import re as _re3
         node_hrefs = sorted(set(_re3.findall(r'href="(/node\?id=[^"]+)"',
-                                             pages["/brain"])))
+                                             markup)))
         check("the map links nodes to their runbook page", bool(node_hrefs),
               "no /node links on /brain")
         for href in node_hrefs[:6]:
