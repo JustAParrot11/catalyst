@@ -297,18 +297,36 @@ def route_setup(db: Db, params: dict) -> str:
 #:
 #: `all` is the master and stays the default, so an existing link or
 #: bookmark keeps returning everything it always did.
+#: Rows per table in the full dump. High enough that a real database
+#: fits whole, low enough that one runaway table cannot make the file
+#: unopenable. Truncation is always DECLARED, never silent.
+FULL_DUMP_ROWS_PER_TABLE = 20_000
+
+
 class _Skipped(Exception):
     """This section is outside the requested scope."""
 
 
 DIAGNOSTIC_SCOPES = {
     "all": {
-        "label": "Everything",
-        "why": "the master bundle - every section below, plus row counts "
-               "for every table. Send this if you are not sure which.",
+        "label": "Overview",
+        "why": "a readable summary - the funnel, the cost ledger, recent "
+               "logs and errors, and a row count per table. Good for a "
+               "quick look; NOT a complete record.",
         "tables": None,          # None = every table
         "sections": None,        # None = every section
         "log_components": None,  # None = every component
+        "full_rows": False,
+    },
+    "everything": {
+        "label": "EVERYTHING (full dump)",
+        "why": "every row of every table, verbatim, with no summarising "
+               "and no limits. Large. This is the one to send when you "
+               "want the whole picture dissected rather than a report.",
+        "tables": None,
+        "sections": None,
+        "log_components": None,
+        "full_rows": True,
     },
     "pricing": {
         "label": "Cost & pricing",
@@ -396,6 +414,32 @@ def diagnostics_bundle(db: Db, scope: str = "all") -> dict:
         "This bundle is SCOPED. Tables and log components outside the "
         "scope are omitted on purpose, not missing. Use "
         "/diagnostics.json?scope=all for everything.")
+    # EVERY ROW, VERBATIM, when asked for. The overview bundle carries
+    # counts; a count cannot be dissected. The owner asked for "a log
+    # that is literally every and anything so you can dissect it, i dont
+    # want you to be missing any data" - so this reads whole tables,
+    # applies the same redaction as everything else, and states plainly
+    # if any table had to be truncated rather than silently shortening
+    # it (a bundle that quietly drops rows is worse than one that says
+    # it could not carry them).
+    if spec.get("full_rows"):
+        bundle["rows"] = {}
+        bundle["rows_truncated"] = {}
+        for name in sorted(db.tables()):
+            res = db.q(f"SELECT * FROM {name} LIMIT ?",
+                       (FULL_DUMP_ROWS_PER_TABLE + 1,))
+            if res.error:
+                bundle["rows"][name] = [{"query_error": res.error}]
+                continue
+            rows = res.dicts()
+            if len(rows) > FULL_DUMP_ROWS_PER_TABLE:
+                bundle["rows_truncated"][name] = (
+                    f"more than {FULL_DUMP_ROWS_PER_TABLE} rows; the first "
+                    f"{FULL_DUMP_ROWS_PER_TABLE} are included. Ask for this "
+                    "table on its own with ?scope=everything&table=" + name)
+                rows = rows[:FULL_DUMP_ROWS_PER_TABLE]
+            bundle["rows"][name] = rows
+
     wanted = spec["tables"]
     for name in sorted(db.tables()):
         if wanted is not None and name not in wanted:
@@ -449,7 +493,8 @@ def diagnostics_bundle(db: Db, scope: str = "all") -> dict:
         bundle["cost"] = {"error": traceback.format_exc()}
 
     errs = db.q("SELECT source, attempted_at, error_text FROM raw_events_errors "
-                "ORDER BY attempted_at DESC LIMIT 50")
+                "ORDER BY attempted_at DESC LIMIT ?",
+                (FULL_DUMP_ROWS_PER_TABLE if spec.get("full_rows") else 50,))
     bundle["recent_errors"] = errs.dicts() if not errs.error else [{"query_error": errs.error}]
 
     if db.table_exists("logs"):
@@ -471,6 +516,11 @@ def diagnostics_bundle(db: Db, scope: str = "all") -> dict:
                     "no log lines matched components "
                     + ", ".join(components)
                     + " - that is an empty result, not an absence of faults")
+        elif spec.get("full_rows"):
+            lg = db.q("SELECT ts, level, component, message, cycle_id, "
+                      "traceback_text, context_json FROM logs "
+                      "ORDER BY ts DESC LIMIT ?",
+                      (FULL_DUMP_ROWS_PER_TABLE,))
         else:
             lg = db.q("SELECT ts, level, component, message, cycle_id, "
                       "traceback_text, context_json FROM logs "

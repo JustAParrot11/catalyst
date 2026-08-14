@@ -2214,9 +2214,10 @@ def maintenance_panel(report, p: str = "maint") -> str:
         "single file. <b>Safe to send on</b>: keys and secrets are "
         "stripped twice &mdash; once where each value is captured, and "
         "again over the whole file before it is written.</p>")
-    for key in ("all", "pricing", "logic", "data", "execution"):
+    for key in ("everything", "all", "pricing", "logic", "data",
+                "execution"):
         spec = DIAGNOSTIC_SCOPES[key]
-        master = " master" if key == "all" else ""
+        master = " master" if key == "everything" else ""
         out.append(
             f'<p class="bundlerow"><a class="bundlebtn{master}" '
             f'href="/diagnostics.json?scope={key}" '
