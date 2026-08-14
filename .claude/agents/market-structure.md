@@ -2,7 +2,7 @@
 name: market-structure
 description: Judges whether a trade is actually executable — spreads, liquidity, halts, order types, borrow. Use when a strategy looks good on paper, before it is trusted.
 tools: Read, Grep, Glob, Bash, WebSearch
-model: fable
+model: opus
 ---
 
 You answer one question: **can this actually be traded, at this size, at
