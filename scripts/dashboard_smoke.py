@@ -566,6 +566,21 @@ def phase_traded(tmp: Path) -> None:
             check(f"brain link {href} resolves", st2 == 200, f"got {st2}")
         check("the brain emits at least one click-through", bool(brain_links))
 
+        # EVERY node opens a runbook page that says what it is.
+        import re as _re3
+        node_hrefs = sorted(set(_re3.findall(r'href="(/node\?id=[^"]+)"',
+                                             pages["/brain"])))
+        check("the map links nodes to their runbook page", bool(node_hrefs),
+              "no /node links on /brain")
+        for href in node_hrefs[:6]:
+            st5, _, body5 = s.get(href.replace("&amp;", "&"))
+            check(f"node page {href} renders", st5 == 200, f"got {st5}")
+            check(f"node page {href} carries a runbook",
+                  "What this is, and what to do" in body5)
+        st6, _, body6 = s.get("/node?id=nonsense:xyz")
+        check("an unknown node id says so rather than faking a page",
+              st6 == 200 and "Nothing in the map has the id" in body6)
+
         chain = pages["/chain"]
         for needle, label in [
             ("Found", "the FOUND step"),

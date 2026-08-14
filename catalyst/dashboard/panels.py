@@ -2523,6 +2523,12 @@ def brain_panel(db: Db, p: str = "brain", zoom: float = 1.0,
     for label, nodes in b.layers:
         for nid, nlabel, _ in nodes:
             key = esc(nid)
+            # EVERY node opens its own page now. Previously only some
+            # nodes linked anywhere, so clicking the map was a lottery -
+            # the owner asked to "click in and it opens another page
+            # with the runbook". /node works for any id in the graph and
+            # says so plainly when an id is not in it.
+            links[key] = f"/node?id={esc(nid)}"
             if label == "Candidates":
                 links[key] = f"/decision?candidate_id={esc(nid[5:])}"
             elif str(nlabel).strip().upper() in tickers:
@@ -2801,3 +2807,54 @@ def open_positions_panel(db: Db, p: str = "reviews") -> str:
                 + "</div></details>")
         out.append("</div>")
     return section(f"{p}-section", "Open positions, re-checked", "".join(out))
+
+
+def node_panel(db: Db, node_id: str, p: str = "node") -> str:
+    """One node of the map, opened, with its runbook.
+
+    Owner-asked: "or i can click in and it opens another page with the
+    runbook". A map tells you a thing is connected to another thing and
+    then leaves you to work out what either of them means. This says
+    what THIS node is, everything recorded as connecting to it, and what
+    to do when you land here.
+    """
+    d = queries.node_detail(db, node_id)
+    out = []
+    if not d.found:
+        out.append(note(
+            f'<b id="{p}-missing">Nothing in the map has the id '
+            f"{esc(d.node_id)}.</b> The graph is rebuilt from rows that "
+            "exist, so a node vanishes when the rows behind it are "
+            "removed or fall outside the window the map draws. That is "
+            "not an error - but nothing can be shown for it."))
+        out.append(f'<p><a href="/brain">Back to the map</a></p>')
+        return section(f"{p}-section", "Node not in the map", "".join(out))
+
+    out.append(
+        f'<p id="{p}-what"><span class="chain-stage">{esc(d.kind_label)}'
+        f"</span></p><p><b>{esc(d.label)}</b></p>")
+    out.append(note(f'<b id="{p}-runbook">What this is, and what to do.</b> '
+                    + esc(d.runbook)))
+
+    for title, rows, direction in (
+            ("What led here", d.incoming, "from"),
+            ("What it led to", d.outgoing, "to")):
+        out.append(f"<h3>{title}</h3>")
+        if not rows:
+            out.append(prov(
+                f"Nothing recorded {direction} this node. Every line on "
+                "the map is a stored row, so an empty side means no row "
+                "joins them - not that the link is missing from the "
+                "picture."))
+            continue
+        out.append(table(
+            f"{p}-{direction}", ["node", "what the record says"],
+            [[esc(label), esc(why)] for label, why in rows[:60]]))
+        if len(rows) > 60:
+            out.append(prov(f"{len(rows) - 60} more not shown."))
+
+    out.append("<h3>Where to next</h3>")
+    out.append("<p>" + " &middot; ".join(
+        f'<a href="{esc(href)}">{esc(text)}</a>' for text, href in d.links)
+        + "</p>")
+    return section(f"{p}-section", f"Node: {esc(d.label)}", "".join(out))
