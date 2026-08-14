@@ -507,7 +507,7 @@ button { background: var(--series-1); color: #fff; border-color: transparent;
                              border-left: 2px solid var(--hairline);
                              padding: 2px 0 2px 12px; }
 .funnel-fault { border-left-color: var(--serious); }
-.funnel-why h4, .funnel-fault h4 { margin: 0 0 4px 0; font-size: 11px;
+.funnel-why h3, .funnel-fault h3 { margin: 0 0 4px 0; font-size: 11px;
                                    letter-spacing: .07em; text-transform: uppercase;
                                    color: var(--muted); font-weight: 700; }
 .funnel-why ul, .funnel-fault ul { margin: 0; padding: 0; list-style: none; }
