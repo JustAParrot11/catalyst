@@ -489,6 +489,7 @@ def investigate(
     model: str = RESEARCH_MODEL,
     graph_context: str | None = None,
     signals: list | None = None,
+    market=None,
 ) -> ResearchCallLog:
     """`signals` is what each independent feed said about this ticker.
 
@@ -502,7 +503,8 @@ def investigate(
     conn = cost_context.conn
     started = time.monotonic()
     prompt = prompts.render_research_prompt(
-        candidate, graph_context=graph_context, signals=signals)
+        candidate, graph_context=graph_context, signals=signals,
+        market=market)
     # The schema tool is offered DURING exploration as well as in the
     # forced turn. If the model submits its view while it still has the
     # search results in hand, the extraction turn - which re-sends the

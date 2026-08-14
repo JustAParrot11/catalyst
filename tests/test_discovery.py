@@ -356,15 +356,29 @@ class TestTheSafetyInstructionsArePRESENT:
         assert "advisory only" in text
         assert "deterministic code" in text
 
-    def test_no_trade_is_encouraged_not_merely_permitted(self):
-        """Everything downstream is a threshold on model-reported
-        conviction, and the refusal tracker only samples refusals tagged
-        below_conviction_floor. If conviction inflates, more candidates
-        clear the floor AND the evidence that would detect the inflation
-        dries up - the loop degrades exactly when it is needed."""
+    def test_no_trade_is_available_but_must_be_JUSTIFIED(self):
+        """The original of this test asserted "Say no_trade freely", and
+        that instruction turned out to be both wrong and expensive.
+
+        Measured over the graded window: a filter refusing without skill
+        loses to the index by more than not filtering at all - accepting
+        every signal beat SPY by 16.6pp, refusing three quarters lost by
+        59.5pp, refusing all of them by 68.7pp. The bot was at the last
+        row: 26 of 30 views "already priced in", zero trades.
+
+        The pressure it was guarding against is real and has not gone
+        away - everything downstream is a threshold on model-reported
+        conviction, so inflated conviction both clears the floor and
+        dries up the evidence that would detect it. So no_trade stays
+        first-class and cheap to REACH; what changed is that it is no
+        longer advertised as free, because it is not.
+        """
         text = self._prompt()
-        assert "Say no_trade freely" in text
-        assert "a bad trade costs real money" in text
+        assert "DECLINING IS NOT FREE" in text
+        assert "do not refuse to be safe" in text
+        # ...and refusing on real evidence is still explicitly right.
+        assert "still means" in text and "no_trade" in text
+        assert "a no_trade you can justify is a good answer" in text
 
     def test_the_holding_period_is_anchored(self):
         """expected_holding_days is a live model-to-timing channel: it

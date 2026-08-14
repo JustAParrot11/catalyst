@@ -10,9 +10,13 @@ Design rules, enforced by tests/test_discovery.py:
   shaped like a quantity or an order. The model proposes, deterministic
   code disposes; the ResearchView schema cannot carry a quantity and
   the prompt must not invite one.
-- no_trade is explicitly framed as a free, first-class answer: declined
-  candidates are recorded and scored by the refusal tracker, so a
-  refusal is cheap evidence while a bad trade is expensive.
+- no_trade is a first-class answer that must be JUSTIFIED, not a free
+  one. It used to be framed as costing nothing; measured over the graded
+  window that is false - a filter refusing without skill loses to the
+  index by more than not filtering at all - and the model was declining
+  87% of candidates on a question it had no data to answer.
+- The market snapshot is rendered INTO the prompt. The model is asked
+  what price and volume have done; it is now told.
 - Graph context, when supplied, is clearly marked informational-only.
 """
 
@@ -99,9 +103,51 @@ def _signals_block(signals: list) -> str:
     return "\n".join(lines)
 
 
+def render_market_section(market) -> str:
+    """The numbers the model is asked to reason about.
+
+    IT WAS BEING ASKED TO JUDGE PRICE WITHOUT PRICE. Question 6 asks
+    "what price and volume have done since each filing became public",
+    and the rendered prompt carried none: ticker, SIC code and cluster
+    facts, 2,184 characters, no market data of any kind. The snapshot
+    already existed - cycle.py builds it immediately before the call and
+    handed it only to the risk engine. On the owner's live day the model
+    answered "already priced in" 26 times out of 30, which is what a
+    question with no evidence attached gets answered.
+
+    Owner, 2026-08-14: "the real value here is the bot reading the
+    market and news and using the numbers and data as backing for it to
+    make the ultimate call."
+    """
+    if market is None:
+        # NEVER SILENTLY. A missing snapshot is a fact the model should
+        # weigh, not a blank the model fills with an assumption.
+        return ("MARKET DATA\nUnavailable for this candidate at decision "
+                "time. Treat any claim about what the price has already "
+                "done as unverified.")
+    lines = ["MARKET DATA, measured at decision time (not from the model)"]
+    last = getattr(market, "last_close", None)
+    if last is not None:
+        lines.append(f"  - last close: ${last}")
+    spread = getattr(market, "half_spread_bp", None)
+    if spread is not None:
+        lines.append(
+            f"  - half-spread now: {spread} bp. This is what it costs to "
+            "get in and out; a thesis worth less than the round trip is "
+            "not a trade.")
+    vol = getattr(market, "median_daily_dollar_volume", None)
+    if vol is not None:
+        lines.append(
+            f"  - median daily dollar volume: ${int(vol):,}. Thin names "
+            "move on little, and are also where a cluster is least "
+            "likely to have been consumed already.")
+    return "\n".join(lines)
+
+
 def render_research_prompt(candidate: Candidate,
                            graph_context: str | None = None,
-                           signals: list | None = None) -> str:
+                           signals: list | None = None,
+                           market=None) -> str:
     searches = searches_for(candidate, signals)
     sections: list[str] = []
     sections.append(
@@ -164,6 +210,7 @@ def render_research_prompt(candidate: Candidate,
             "anything you rely on:\n"
             f"{graph_context}"
         )
+    sections.append(render_market_section(market))
     sections.append(
         "ANSWER THESE\n"
         "1. direction — \"long\", \"short\" or \"no_trade\".\n"
@@ -175,21 +222,31 @@ def render_research_prompt(candidate: Candidate,
         "5. expected_holding_days — whole days; this strategy holds days "
         f"to weeks (the graded arm held {HOLD_DAYS} trading days).\n"
         "6. priced_in — has the market already consumed these filings? "
-        "Give the evidence: what price and volume have done since each "
-        "filing became public, and whether the cluster has been widely "
-        "reported."
+        "Use the MARKET DATA above and anything you find by searching: "
+        "what price and volume have done since each filing became "
+        "public, and whether the cluster has been widely reported. "
+        "SAY WHICH EVIDENCE YOU USED. \"Probably priced in\" with no "
+        "figure behind it is not an answer to this question, and a "
+        "priced_in call you cannot support should be false."
     )
     sections.append(
         "GROUND RULES\n"
-        "- Say no_trade freely. A declined candidate costs nothing and is "
-        "scored later by the refusal tracker; a bad trade costs real "
-        "money. Thin, stale or already-consumed evidence means no_trade.\n"
+        "- DECLINING IS NOT FREE, and this brief used to say it was. "
+        "Measured over the graded window, a filter that refuses without "
+        "skill costs more than not filtering at all: accepting every "
+        "signal beat the index by 16.6 percentage points, refusing "
+        "three quarters of them lost by 59.5. Refuse when the evidence "
+        "says so and say why; do not refuse to be safe.\n"
+        "- Thin, stale or genuinely consumed evidence still means "
+        "no_trade, and a no_trade you can justify is a good answer.\n"
         "- Insider buying is public information. Your question is whether "
         "THIS cluster is still under-consumed by the market, not whether "
         "insider buying works in general.\n"
-        f"- You may use web_search at most {searches} times. Each search "
-        "costs real money; search only when the result could change your "
-        "answer.\n"
+        f"- You have web_search, up to {searches} times, and searching "
+        "is the job rather than an overhead: this system exists to link "
+        "what is being said publicly to an opportunity in a filing. Use "
+        "them where they could find or kill an opportunity. Unused "
+        "searches are not a saving if the answer is a guess.\n"
         "- Report judgements, not instructions: nothing about how much to "
         "trade, and no order, entry, stop or exit levels.\n"
         "- Submit your conclusion via the submit_research_view tool once "
