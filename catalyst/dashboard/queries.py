@@ -588,6 +588,12 @@ class CostPanel:
     reconcile_gap_days: int | None
     admin_key_present: bool
     owner_budget_usd: Decimal | None = None
+    #: (seed, observed, sample) tokens per web search. The seed
+    #: is a constant from ONE call; observed is measured from the
+    #: raw usage of every turn that actually searched.
+    search_tokens_seed: int = 0
+    search_tokens_observed: int | None = None
+    search_tokens_sample: int = 0
     #: Which bound set the cap above: "_owner_set", "_hard_capped", or
     #: "" for the base. The page must name the bound, not just the number.
     cap_source: str = ""
@@ -713,6 +719,20 @@ def cost_panel(db: Db, as_of: date | None = None) -> CostPanel:
     except Exception:  # noqa: BLE001 - fall back to the documented base
         effective_cap, cap_source = gov.BASE_CAP_CENTS, "_unreadable"
 
+    # What a web search ACTUALLY costs in input tokens, beside the
+    # seed constant it was estimated at. The estimate only ever
+    # raises itself; lowering the seed is a human decision, and
+    # this is the number that decision needs.
+    from catalyst.research.boundary import (
+        INPUT_TOKENS_PER_SEARCH as _seed_tokens,
+        observed_tokens_per_search,
+    )
+    try:
+        _observed_tokens, _observed_sample = \
+            observed_tokens_per_search(db.conn)
+    except Exception:  # noqa: BLE001 - provenance never gates a page
+        _observed_tokens, _observed_sample = None, 0
+
     return CostPanel(
         as_of=as_of, month_prefix=month, days_elapsed=as_of.day,
         scheduled_mtd_q=sched_q, manual_mtd_q=manual_q,
@@ -733,6 +753,9 @@ def cost_panel(db: Db, as_of: date | None = None) -> CostPanel:
         reconcile_gap_days=reconcile_gap_days,
         admin_key_present=admin_key_present,
         owner_budget_usd=owner_budget_usd,
+        search_tokens_seed=_seed_tokens,
+        search_tokens_observed=_observed_tokens,
+        search_tokens_sample=_observed_sample,
         creds_error=creds_error,
     )
 

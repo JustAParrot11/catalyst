@@ -488,6 +488,43 @@ def phase_traded(tmp: Path) -> None:
         check("trace feature-detects the evidence graph rather than assuming it",
               "graph_assertions" in trace)
 
+        # --- every route, judged for values that leaked because the
+        # page could not work something out. These are the shapes the
+        # owner has actually reported ("the dashboard shows $NaN"), and
+        # they are invisible to a check that only asserts what SHOULD be
+        # present. Tracebacks are excluded deliberately: the Logs page
+        # is required to show them (BUILD-BRIEF), escaped and redacted.
+        leaks = [
+            (r"\bNaN\b", "NaN"),
+            (r"\bundefined\b", "undefined"),
+            (r"&lt;class '", "a repr of a Python class"),
+            (r"\bNone\b(?![a-z<])", "a bare Python None"),
+            (r"\$None|\$NaN", "a money field that failed"),
+            (r"\{\{|\}\}", "an unrendered template placeholder"),
+            (r"Decimal\(", "a raw Decimal repr"),
+            (r"sqlite3\.", "a raw sqlite3 error"),
+        ]
+        import re as _re
+        for route, body in pages.items():
+            for pattern, label in leaks:
+                hit = _re.search(pattern, body)
+                context = ("" if not hit else
+                           " ... " + body[max(0, hit.start() - 60):
+                                          hit.start() + 60].replace("\n", " "))
+                check(f"{route} does not leak {label}", hit is None, context)
+            for tag in ("div", "table", "section"):
+                opened = len(_re.findall(rf"<{tag}[\s>]", body))
+                closed = len(_re.findall(rf"</{tag}>", body))
+                check(f"{route} closes every <{tag}>", opened == closed,
+                      f"opened {opened}, closed {closed}")
+
+        costs = pages["/costs"]
+        for needle, label in [
+            ("input tokens", "what a web search costs in tokens"),
+            ("seed", "that the figure started as a seed, not a measurement"),
+        ]:
+            check(f"costs page states {label}", needle in costs)
+
         declined = pages["/decision?candidate_id=cand-declined-1&view=full"]
         check("declined trace says code overruled the model",
               "Code overruled the model here" in declined)
