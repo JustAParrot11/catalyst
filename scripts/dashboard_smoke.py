@@ -389,10 +389,11 @@ def phase_traded(tmp: Path) -> None:
     os.environ["CATALYST_BARS"] = str(bars)
 
     with Served(db_file) as s:
-        pages = {}
+        pages, headers_by_route = {}, {}
         for route in ROUTES:
             status, headers, body = s.get(route)
             pages[route] = body
+            headers_by_route[route] = headers
             check(f"GET {route} -> 200", status == 200, f"got {status}")
             check(f"{route} is uncached",
                   headers.get("Cache-Control", "").startswith("no-store"),
@@ -518,6 +519,17 @@ def phase_traded(tmp: Path) -> None:
                 closed = len(_re.findall(rf"</{tag}>", body))
                 check(f"{route} closes every <{tag}>", opened == closed,
                       f"opened {opened}, closed {closed}")
+
+        # THE DOWNLOAD MUST DOWNLOAD. Without a Content-Disposition the
+        # browser renders JSON inline, so "one click exports a diagnostic
+        # bundle" became "select this wall of text and copy it"
+        # (owner-reported).
+        disp = headers_by_route["/diagnostics.json"].get(
+            "Content-Disposition", "")
+        check("diagnostics bundle downloads rather than opening in a tab",
+              disp.startswith("attachment"), f"Content-Disposition={disp!r}")
+        check("the downloaded bundle has a dated .json filename",
+              "catalyst-diagnostics" in disp and ".json" in disp, disp)
 
         chain = pages["/chain"]
         for needle, label in [

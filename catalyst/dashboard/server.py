@@ -476,9 +476,12 @@ class Handler(BaseHTTPRequestHandler):
     server_version = f"catalyst-dashboard/{BUILD_HASH}"
     db_file: str = ""
 
-    def _send(self, code: int, body: bytes, content_type: str):
+    def _send(self, code: int, body: bytes, content_type: str,
+              extra: dict | None = None):
         self.send_response(code)
         _no_store_headers(self, content_type, len(body))
+        for key, value in (extra or {}).items():
+            self.send_header(key, value)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -486,9 +489,11 @@ class Handler(BaseHTTPRequestHandler):
     def _send_html(self, code: int, html_doc: str):
         self._send(code, html_doc.encode("utf-8"), "text/html; charset=utf-8")
 
-    def _send_json(self, code: int, payload: dict):
+    def _send_json(self, code: int, payload: dict, filename: str = ""):
         body = json.dumps(payload, indent=2, default=str).encode("utf-8")
-        self._send(code, body, "application/json; charset=utf-8")
+        extra = ({"Content-Disposition": f'attachment; filename="{filename}"'}
+                 if filename else None)
+        self._send(code, body, "application/json; charset=utf-8", extra=extra)
 
     def log_message(self, fmt, *args):  # quieter, and to stderr
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
@@ -533,7 +538,15 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/health":
                 return self._send_json(200, health(db))
             if parsed.path == "/diagnostics.json":
-                return self._send_json(200, diagnostics_bundle(db))
+                # AS A DOWNLOAD, not a tab full of JSON. Without a
+                # Content-Disposition the browser renders it inline, so
+                # the "export a diagnostic bundle" button opened a wall
+                # of text the owner then had to select and copy by hand
+                # (owner-reported). The brief asks for ONE CLICK.
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+                return self._send_json(
+                    200, diagnostics_bundle(db),
+                    filename=f"catalyst-diagnostics-{stamp}.json")
             handler = HTML_ROUTES.get(parsed.path)
             if handler is None:
                 return self._send_html(404, render_page(
