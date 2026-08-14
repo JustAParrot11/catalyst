@@ -16,6 +16,14 @@ Short list, all learned the hard way. Everything else is your call.
   reconciliation is a *correction*, not an alarm, and a discrepancy is
   not by itself evidence of a fault.
 
+  **Implemented 2026-08-14 as "block only if large"** (owner's choice
+  when asked). A discrepancy pauses spending only when it clears BOTH an
+  absolute floor (`RECONCILE_PAUSE_FLOOR_CENTS`, 50c) AND a real
+  fraction of what the window actually cost. The old rule bounded
+  *accumulated* drift at five cents over a 30-day window, which halted
+  the bot for a day and refused 125 candidates — rounding alone reaches
+  five cents.
+
   What this does **not** mean: the local ledger is still required and is
   not a duplicate of the API. The governor has to know spend *now*, in
   the middle of a day, to decide whether the next call is affordable —
