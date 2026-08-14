@@ -538,6 +538,23 @@ def phase_traded(tmp: Path) -> None:
         master = _json.loads(s.get("/diagnostics.json?scope=all")[2])
         check("the master bundle says it is the master",
               master.get("scope") == "all" and "MASTER" in master["scope_note"])
+        # THE FULL DUMP MUST CARRY ROWS, not counts. "Everything" that
+        # contains no candidate rows, no orders and no fills is a report,
+        # not a record, and cannot be dissected.
+        full = _json.loads(s.get("/diagnostics.json?scope=everything")[2])
+        check("the full dump carries actual ROWS", bool(full.get("rows")),
+              "no 'rows' key at all")
+        check("the full dump includes candidate rows",
+              bool(full.get("rows", {}).get("candidates")))
+        check("the full dump includes order rows",
+              "orders" in full.get("rows", {}))
+        check("the full dump is bigger than the overview",
+              len(_json.dumps(full)) > len(_json.dumps(master)))
+        check("the full dump still redacts",
+              "sk-ant-" not in _json.dumps(full).replace("sk-ant-FAKE", ""))
+        check("truncation, if any, is DECLARED",
+              isinstance(full.get("rows_truncated"), dict))
+
         for scope in ("pricing", "logic", "data", "execution"):
             st3, hd3, body3 = s.get(f"/diagnostics.json?scope={scope}")
             b = _json.loads(body3)
