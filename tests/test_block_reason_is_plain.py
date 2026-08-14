@@ -22,6 +22,7 @@ and asking someone to keep re-picking a zoom as the graph grows is
 asking them to do the layout's job.
 """
 
+import pathlib
 import re
 
 import pytest
@@ -34,7 +35,48 @@ from catalyst.dashboard.queries import (
 from tests.test_dashboard import bare, seeded  # noqa: F401 - shared fixtures
 
 
+def _reasons_the_governor_can_emit() -> set:
+    """Read them out of governor.py, not out of the dictionary.
+
+    THE TEST BELOW USED TO PARAMETRISE OVER GOVERNOR_REASONS, which
+    checked the dictionary against itself and could never fail. The cost
+    auditor found what that let through: the governor appends a suffix
+    naming which bound applied, so with an owner-set cap it emits
+    `cap_exceeded_owner_set` - and the page answered "this reason has no
+    plain-English explanation recorded yet, send the Everything bundle"
+    to the condition "your budget ran out". The owner would have hit it
+    within days, on the exact complaint this file exists to answer.
+
+    Sourcing the strings from the module that emits them is the only
+    version of this test that can fail.
+    """
+    import re
+
+    src = (pathlib.Path(__file__).resolve().parents[1]
+           / "catalyst/cost/governor.py").read_text()
+    bases = set(re.findall(r'reason="([a-z_]+)"', src))
+    bases |= set(re.findall(r'reason=None if not reason_suffix else "([a-z_]+)"',
+                            src))
+    suffixes = set(re.findall(r'return [^\n]*, "(_[a-z_]+)"', src))
+    suffixes |= set(re.findall(r'"(_[a-z_]+)"\s*$', src, re.M))
+    # An allow is not a block and needs no runbook entry.
+    bases = {b for b in bases if not b.startswith("allowed")}
+    assert bases, "no reason strings found in governor.py - the regex rotted"
+    return bases | {b + s for b in bases for s in suffixes}
+
+
 class TestEveryGateExplainsItself:
+    @pytest.mark.parametrize("reason", sorted(_reasons_the_governor_can_emit()))
+    def test_every_string_the_governor_emits_resolves(self, reason):
+        """THE ONE THAT WAS MISSING. Not the dictionary's keys - the
+        governor's outputs."""
+        plain, todo = explain_governor_reason(reason)
+        assert plain != reason, (
+            f"the governor can emit {reason!r} and the page has no "
+            "sentence for it, so the owner is shown a code identifier "
+            "and told to collect a diagnostic bundle")
+        assert "no plain-English explanation" not in todo
+
     @pytest.mark.parametrize("reason", sorted(GOVERNOR_REASONS))
     def test_it_has_a_plain_sentence_and_an_action(self, reason):
         plain, todo = explain_governor_reason(reason)
