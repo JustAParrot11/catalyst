@@ -744,7 +744,15 @@ def neural_map(
     # reproducible; a JS pan/zoom would draw a different picture per
     # browser. Scaling the geometry and letting the container scroll
     # gives the owner room without giving up determinism.
-    zoom = max(1.0, min(3.0, float(zoom or 1.0)))
+    # ZOOM WITH THE NETWORK. The owner asked for "maybe zoom is as the
+    # network gets bigger": a map that is comfortable at 20 nodes is a
+    # wall at 120, and asking someone to keep re-picking a zoom as the
+    # graph grows is asking them to do the layout's job. The floor rises
+    # with the tallest column, so the drawing stays legible on its own
+    # and an explicit choice still wins above it.
+    _tallest = max((len(nodes) for _, nodes, _ in kept), default=1)
+    auto = 1.0 if _tallest <= 16 else min(3.0, 1.0 + (_tallest - 16) / 24.0)
+    zoom = max(1.0, min(3.0, max(float(zoom or 1.0), auto)))
     width = int(width * zoom)
     row_gap = int(row_gap * zoom)
     n_cols = len(kept)
