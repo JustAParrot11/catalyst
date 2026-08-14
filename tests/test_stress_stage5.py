@@ -963,7 +963,11 @@ class TestCostDisciplineAtTheBoundary:
         log = investigate(candidate(), CostContext(
             conn=db, governor_profit_share=Decimal("0.10"),
             cycle_id="cy", kind="scheduled"), transport)
-        assert log.skipped_reason == "budget_denied"
+        # ...and it says WHICH gate: an unpriced row is a pricing fault,
+        # not an exhausted budget, and reading "budget_denied" for it
+        # sends the reader to the settings page for a code bug.
+        assert log.skipped_reason.startswith("budget_denied")
+        assert "unpriced_cost_rows" in log.skipped_reason, log.skipped_reason
         assert calls["n"] == 0
         assert db.execute("SELECT decision, reason FROM cost_governor_events"
                           ).fetchone() == ("deny", "unpriced_cost_rows")

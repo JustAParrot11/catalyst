@@ -142,12 +142,20 @@ class TestInvestigate:
 
         result = investigate(candidate(), ctx(db), transport)
         assert result.parsed_view is None
-        assert result.skipped_reason == "budget_denied"
+        # The denial names its GATE. All three of authorize()'s refusals
+        # used to read a bare "budget_denied", and they need three
+        # different fixes - raise the budget, acknowledge a discrepancy,
+        # fix a pricing bug (owner-reported: 125 unexplained denials).
+        assert result.skipped_reason.startswith("budget_denied")
+        assert "cap_exceeded" in result.skipped_reason, result.skipped_reason
         assert calls["n"] == 0
         assert result.api_turns == ()
-        # the skip is still a recorded research_calls row (audit trail)
-        assert db.execute("SELECT skipped_reason FROM research_calls"
-                          ).fetchone()[0] == "budget_denied"
+        # the skip is still a recorded research_calls row (audit trail),
+        # carrying the same named gate rather than the bare string
+        persisted = db.execute(
+            "SELECT skipped_reason FROM research_calls").fetchone()[0]
+        assert persisted == result.skipped_reason
+        assert "cap_exceeded" in persisted, persisted
 
     def test_pause_turn_continuation_is_bounded(self, db):
         responses = [
