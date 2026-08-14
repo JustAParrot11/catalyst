@@ -531,6 +531,16 @@ def phase_traded(tmp: Path) -> None:
         check("the downloaded bundle has a dated .json filename",
               "catalyst-diagnostics" in disp and ".json" in disp, disp)
 
+        # EVERY LINK THE MAP EMITS MUST GO SOMEWHERE REAL. A node that
+        # links to an empty page costs a click to discover, which is
+        # worse than a node that does not link at all.
+        import re as _re2
+        brain_links = set(_re2.findall(r'<a href="(/[^"]+)"', pages["/brain"]))
+        for href in sorted(brain_links):
+            st2, _, body2 = s.get(href.replace("&amp;", "&"))
+            check(f"brain link {href} resolves", st2 == 200, f"got {st2}")
+        check("the brain emits at least one click-through", bool(brain_links))
+
         chain = pages["/chain"]
         for needle, label in [
             ("Found", "the FOUND step"),

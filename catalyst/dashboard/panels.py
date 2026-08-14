@@ -512,7 +512,25 @@ def funnel_panel(db: Db, p: str = "funnel") -> str:
         feed.append(
             f'<div class="funnel-fault" id="{p}-feed-faults">'
             '<h3><span class="fault-chip">NEEDS ATTENTION</span> '
-            f"Feeds that could not be read</h3><ul>{items}</ul></div>")
+            f"Feeds that could not be read</h3><ul>{items}</ul>"
+            f"<p class='prov'>Only failures from the last "
+            f"{queries.FEED_FAULT_WINDOW_DAYS} day(s) that the feed has NOT "
+            "read successfully since. A failure it recovered from is listed "
+            "separately below, not here.</p></div>")
+    if getattr(data, "feed_healed", None):
+        healed = "".join(
+            f'<li><span class="funnel-why-n">{esc(n)}</span>'
+            + '<span class="funnel-why-text">' + esc(reason)
+            + f'<span class="prov">{esc(detail)}</span></span></li>'
+            for reason, n, detail in data.feed_healed)
+        feed.append(
+            f'<div class="funnel-why" id="{p}-feed-healed">'
+            "<h3>Feeds that failed and recovered</h3>"
+            f"<ul>{healed}</ul>"
+            "<p class='prov'>These read successfully after the error, so "
+            "they are history rather than something to act on. Kept "
+            "visible because a fault that vanishes silently is "
+            "indistinguishable from one that never happened.</p></div>")
     elif data.feed_events == 0 and data.feed_query is not None:
         feed.append(zero_block(
             f"{p}-feed-empty", data.feed_query,
@@ -2472,9 +2490,33 @@ def brain_panel(db: Db, p: str = "brain", zoom: float = 1.0,
         "it, what it linked, what the model made of it, what the code decided, "
         "and what actually happened.</p>")
     # Candidate nodes go somewhere: clicking one opens its decision.
-    links = {esc(nid): f"/decision?candidate_id={esc(nid[5:])}"
-             for label, nodes in b.layers if label == "Candidates"
-             for nid, _, _ in nodes}
+    # EVERY node that HAS a record links to it, not just candidates.
+    # The owner asked to "click to see the news"; only Candidate nodes
+    # were clickable, so the sources and entities - the half of the map
+    # that says WHAT was read - went nowhere.
+    #
+    # A node with no page to open is deliberately left unlinked rather
+    # than pointed at a search that may return nothing: a link that goes
+    # somewhere useless is worse than no link, because it costs a click
+    # to discover.
+    tickers = {str(r["ticker"]).strip().upper()
+               for r in db.q("SELECT DISTINCT ticker FROM candidates "
+                             "WHERE ticker IS NOT NULL").rows}
+    links = {}
+    for label, nodes in b.layers:
+        for nid, nlabel, _ in nodes:
+            key = esc(nid)
+            if label == "Candidates":
+                links[key] = f"/decision?candidate_id={esc(nid[5:])}"
+            elif str(nlabel).strip().upper() in tickers:
+                # A node whose label IS a ticker opens the news map
+                # filtered to it - where the headlines actually are.
+                # Checked against tickers that exist rather than guessed:
+                # /newsmap filters on `ticker`, and a link built from a
+                # feed name ("SEC filings (EDGAR)") would resolve to an
+                # empty page. A link that goes somewhere useless is worse
+                # than no link, because it costs a click to find out.
+                links[key] = f"/newsmap?ticker={esc(str(nlabel).strip())}"
     out.append(brain_view_controls(p, zoom, cap))
     out.append('<div class="chart-wrap chart-scroll">' + charts.neural_map(
         [(esc(label), [(esc(nid), esc(nlabel), w) for nid, nlabel, w in nodes])

@@ -344,6 +344,18 @@ def test_a_feed_error_is_a_fault_not_candidate_attrition(seeded):
     never appear as a reason a candidate stopped. Listing it as one - in
     the same orange as a model declining a trade - is what made the
     owner read the whole page as errors."""
+    # A RECENT error, inserted here. The shared fixture's error is five
+    # days old, and the feed-health panel now looks back three - older
+    # than that is history rather than an alert. This test's subject is
+    # CLASSIFICATION (fault, not candidate attrition), not recency, so it
+    # supplies an error inside the window rather than widening the panel.
+    conn = sqlite3.connect(seeded)
+    conn.execute("INSERT INTO raw_events_errors VALUES (?,?,?)",
+                 ("federal_register",
+                  datetime.now(timezone.utc).isoformat(),
+                  '{"status":500,"body":"timeout"}'))
+    conn.commit()
+    conn.close()
     f = queries.funnel(Db(seeded))
     assert any("Federal Register" in reason for reason, _, _ in f.feed_faults)
     assert any("timeout" in str(detail) for _, _, detail in f.feed_faults)

@@ -282,6 +282,12 @@ class Stage:
         return max(0, self.entered - self.count)
 
 
+#: How far back the feed-health panel looks. Older than this is
+#: history, not an alert - the panel had no window at all and so
+#: alarmed about resolved failures indefinitely.
+FEED_FAULT_WINDOW_DAYS = 3
+
+
 @dataclass
 class Funnel:
     stages: list
@@ -293,6 +299,9 @@ class Funnel:
     feed_events: int = 0
     feed_query: QueryResult | None = None
     feed_faults: list = field(default_factory=list)
+    #: Faults the feed has since recovered from. Shown for the
+    #: record, never under NEEDS ATTENTION.
+    feed_healed: list = field(default_factory=list)
 
 
 #: Risk-engine skip codes in English. The codes are what the risk engine
@@ -385,12 +394,37 @@ def funnel(db: Db) -> Funnel:
 
     # --- feed health: upstream of the funnel, and a different question
     raw_q = db.count("raw_events")
+    # HAS IT RECOVERED? That is the question the panel was not asking.
+    # It listed the last 20 errors EVER, with no window and no check for
+    # whether the feed had read successfully since - so a Form 4 failure
+    # from a rate-limit episode days ago sat under "NEEDS ATTENTION"
+    # permanently, and the owner could not tell a live fault from a
+    # healed one ("are these all old errors not removing from the screen
+    # or a genuine issue").
+    #
+    # A fault is only ATTENTION-worthy while the feed has not read
+    # anything since it. That is checkable, from rows that exist.
     err_q = db.q(
         "SELECT source, attempted_at, error_text FROM raw_events_errors "
-        "ORDER BY attempted_at DESC LIMIT 20"
-    )
-    feed_faults = [(f"{source_label(r['source'])} could not be read", 1,
-                    str(r["error_text"] or "")) for r in err_q.rows]
+        "WHERE attempted_at >= ? ORDER BY attempted_at DESC LIMIT 20",
+        ((datetime.now(timezone.utc) - timedelta(days=FEED_FAULT_WINDOW_DAYS)
+          ).isoformat(),))
+    feed_faults, feed_healed = [], []
+    for r in err_q.rows:
+        source, when = str(r["source"]), str(r["attempted_at"])
+        ok_since = db.q(
+            "SELECT COUNT(*) AS n FROM raw_events WHERE source = ? "
+            "AND fetched_at > ?", (source, when))
+        n_ok = int(ok_since.rows[0]["n"]) if ok_since.rows else 0
+        entry = (f"{source_label(source)} could not be read", 1,
+                 str(r["error_text"] or ""))
+        if n_ok > 0:
+            feed_healed.append(
+                (f"{source_label(source)} failed, then recovered", 1,
+                 f"{n_ok} successful read(s) since {when[:16]} - "
+                 "resolved, shown for the record"))
+        else:
+            feed_faults.append(entry)
 
     # --- the funnel proper, over candidate ids
     cand_ids, cand_q = _ids(db, "SELECT id FROM candidates")
