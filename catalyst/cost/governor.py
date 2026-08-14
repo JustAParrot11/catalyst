@@ -167,7 +167,16 @@ def authorize(
                 authorized=True, kind=estimate.kind, estimate=estimate,
                 cap_cents=cap, period_to_date_cents=spent,
                 shortfall_cents=None,
-                reason=None if not reason_suffix else "allowed_at_hard_cap",
+                # NAME THE BOUND THAT APPLIED, not a fixed string. This
+                # read "allowed_at_hard_cap" for EVERY authorisation
+                # under any non-default cap, so an owner-set $25 budget
+                # logged 20 allows as "at the hard cap" while sitting at
+                # 42% of it. Found by the cost auditor; it had already
+                # misled a reading of the owner's own diagnostic bundle,
+                # which is precisely the cost of a wrong label on the
+                # rows the money question is settled from.
+                reason=None if not reason_suffix
+                else "allowed" + reason_suffix,
             )
     else:
         life = lifetime_cents("manual", conn)

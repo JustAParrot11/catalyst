@@ -416,7 +416,41 @@ GOVERNOR_REASONS = {
         "pricing bundle.",
         ("/logs#log-bundle", "Collect the Cost & pricing log"),
         "a cost row could not be priced"),
+    "lifetime_build_budget_exceeded": (
+        "the one-off build budget is spent",
+        "This is the $200 lifetime allowance for MANUAL testing, not the "
+        "monthly running budget. Scheduled trading is unaffected. Raise "
+        "it on the Settings page if you mean to keep testing by hand.",
+        ("/costs#cost-section", "Open the Cost page"),
+        "the one-off build budget was spent"),
 }
+
+#: The governor appends a suffix naming WHICH bound applied, so the
+#: string it emits is "cap_exceeded_owner_set", not "cap_exceeded".
+#: cost/governor.py:155-170.
+GOVERNOR_REASON_SUFFIXES = ("_owner_set", "_hard_capped")
+
+
+def _base_reason(reason: str) -> str:
+    """Strip the bound-name suffix before looking a reason up.
+
+    FOUND BY THE COST AUDITOR, in code this file already claimed to have
+    fixed. The owner runs an owner-set cap, so the moment it binds the
+    governor emits `cap_exceeded_owner_set` - which matched nothing, and
+    the page told them a budget running out had "no plain-English
+    explanation recorded yet" and asked them to collect a diagnostic
+    bundle. That is the exact complaint this dictionary exists to answer.
+
+    The test that should have caught it parametrised over the dictionary
+    itself, so it checked the dictionary against the dictionary and
+    could never fail. There is now a test that reads the reason strings
+    out of governor.py instead.
+    """
+    text = str(reason)
+    for suffix in GOVERNOR_REASON_SUFFIXES:
+        if text.endswith(suffix):
+            return text[: -len(suffix)]
+    return text
 
 _UNKNOWN_REASON = (
     "This reason has no plain-English explanation recorded yet - send "
@@ -428,7 +462,7 @@ _UNKNOWN_REASON = (
 def governor_reason_past(reason: str) -> str:
     """The same block described as something that HAPPENED. See the note
     above GOVERNOR_REASONS."""
-    entry = GOVERNOR_REASONS.get(str(reason))
+    entry = GOVERNOR_REASONS.get(_base_reason(reason))
     return (entry[3] if entry and entry[3] else str(reason))
 
 
@@ -436,7 +470,7 @@ def explain_governor_reason(reason: str):
     """(plain sentence, what to do). Unknown reasons pass through
     unchanged rather than being guessed at - a confident wrong
     explanation is worse than the identifier."""
-    entry = GOVERNOR_REASONS.get(str(reason))
+    entry = GOVERNOR_REASONS.get(_base_reason(reason))
     if entry is None:
         return str(reason), _UNKNOWN_REASON[0]
     return entry[0], entry[1]
@@ -486,7 +520,7 @@ def governor_reason_link(reason: str):
     """(href, label) for the page that can actually resolve this block,
     or None. Kept apart from the sentence so the sentence can stay
     escaped text - see the note above GOVERNOR_REASONS."""
-    entry = GOVERNOR_REASONS.get(str(reason))
+    entry = GOVERNOR_REASONS.get(_base_reason(reason))
     return entry[2] if entry else _UNKNOWN_REASON[1]
 
 
