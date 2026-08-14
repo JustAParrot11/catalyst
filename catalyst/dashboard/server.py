@@ -190,7 +190,18 @@ def route_decision(db: Db, params: dict) -> str:
 
 
 def route_brain(db: Db, params: dict) -> str:
-    return render_page("The brain", panels.brain_panel(db, p="brain"),
+    def _num(key, default, lo, hi):
+        """A pasted or edited URL must never 500 the page."""
+        try:
+            return max(lo, min(hi, float(params.get(key, [default])[0])))
+        except (TypeError, ValueError, IndexError):
+            return default
+
+    zoom = _num("zoom", 1.0, 1.0, 3.0)
+    nodes = int(_num("nodes", panels.charts.MAX_NODES_PER_LAYER, 1, 999))
+    return render_page("The brain",
+                       panels.brain_panel(db, p="brain", zoom=zoom,
+                                          nodes=nodes),
                        "/brain", db.path, db=db,
                        subtitle="Every line is one recorded link")
 
