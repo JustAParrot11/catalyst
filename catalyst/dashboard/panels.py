@@ -2600,3 +2600,145 @@ def news_map_panel(db: Db, params: dict | None = None, p: str = "newsmap") -> st
             "bot treats as more than coincidence."))
     return section(f"{p}-section", "News map: what was said, about whom",
                    "".join(out))
+
+
+# --------------------------------------------------------------------------
+# The chain: every decision, in order, with its justification
+# --------------------------------------------------------------------------
+
+
+def chain_panel(db: Db, p: str = "chain") -> str:
+    """What happened, then what, and why - in order.
+
+    The brain map answers "what is connected to what". It cannot answer
+    "what happened next", because a picture of a graph has no order in
+    it. The owner asked for the other thing in these words: "I want
+    every decision with justification in order from what is researched
+    to find to placing a trade."
+
+    Each step expands to its evidence rather than linking away, so the
+    story can be read top to bottom without losing your place. <details>
+    does that with no JavaScript, which keeps the page reproducible and
+    printable.
+    """
+    data = queries.decision_chains(db)
+    out = []
+    if not data.chains:
+        out.append(note(
+            f'<b id="{p}-quiet">No candidates yet.</b> This fills in as '
+            "discovery runs. Each one becomes a chain: what was found, what "
+            "linked to it, what the model concluded, what the risk engine "
+            "did with that, and what happened at the broker."))
+        if data.query is not None:
+            out.append(empty_block(f"{p}-q", data.query,
+                                   meaning="no candidate rows yet"))
+        return section(f"{p}-section", "Every decision, in order", "".join(out))
+
+    out.append(
+        f'<p id="{p}-intro">The newest {len(data.chains)} candidates, each '
+        "read top to bottom. <b>Every step says why it moved on, or why it "
+        "stopped.</b> Open a step to see the evidence it rested on.</p>")
+
+    for ci, chain in enumerate(data.chains):
+        pill_cls = {"traded": "good", "declined": "quiet",
+                    "in progress": "warn"}.get(chain.verdict, "quiet")
+        out.append(
+            f'<div class="chain" id="{p}-{ci}">'
+            f'<h3 class="chain-head">{esc(chain.ticker)} '
+            f'{pill(pill_cls, esc(chain.verdict))}</h3>')
+        for step in chain.steps:
+            cls = "chain-step stopped" if step.stopped else "chain-step"
+            body = "".join(
+                f'<div class="chain-fact"><span class="chain-k">{esc(k)}</span>'
+                f'<span class="chain-v">{esc(v)}</span></div>'
+                for k, v in step.detail) or "<p class='prov'>nothing recorded</p>"
+            link = (f'<a class="chain-link" href="{step.href}">the full '
+                    "record for this step &rarr;</a>" if step.href else "")
+            out.append(
+                f'<details class="{cls}" id="{p}-{ci}-{step.n}">'
+                f"<summary><span class='chain-n'>{step.n}</span>"
+                f"<span class='chain-stage'>{esc(step.stage)}</span>"
+                f"<span class='chain-text'><b>{esc(step.headline)}</b>"
+                f"<span class='chain-why'>{esc(step.why)}</span></span>"
+                "</summary>"
+                f'<div class="chain-body">{body}{link}</div></details>')
+        out.append("</div>")
+    return section(f"{p}-section", "Every decision, in order", "".join(out))
+
+
+def open_positions_panel(db: Db, p: str = "reviews") -> str:
+    """What we are holding, and what the bot has said about it since.
+
+    Owner-asked: "need a section for the bot to re-evaluate every now
+    and again for current trades". The re-evaluation runs on every
+    cycle, but until now it was only visible buried inside one trade's
+    dossier - so a feature that was working looked like one that was
+    not.
+
+    A review that said HOLD is shown beside one that acted. Listing only
+    the reviews that changed something would make the model look
+    decisive in hindsight and hide the far more common answer.
+    """
+    from catalyst.research.position_review import REVIEW_INTERVAL_HOURS
+
+    rows = db.q(
+        "SELECT p.id, p.ticker, p.opened_at, p.planned_exit_date "
+        "FROM positions p WHERE p.status = 'open' ORDER BY p.opened_at")
+    out = []
+    if not rows.rows:
+        out.append(note(
+            f'<b id="{p}-none">Nothing is open right now.</b> When a '
+            "position is open, the bot re-reads its thesis about every "
+            f"{REVIEW_INTERVAL_HOURS} hours and says whether it still "
+            "holds. A review can only ever bring the exit date FORWARD, "
+            "never push it out."))
+        out.append(empty_block(f"{p}-q", rows,
+                               meaning="no open positions"))
+        return section(f"{p}-section", "Open positions, re-checked",
+                       "".join(out))
+
+    out.append(
+        f'<p id="{p}-intro">The bot re-reads each open thesis about every '
+        f"{REVIEW_INTERVAL_HOURS} hours. <b>A review can only bring the exit "
+        "date forward, never push it out</b> - 'hold' is the absence of a "
+        "reason to leave early, not permission to stay longer.</p>")
+    for i, pos in enumerate(rows.rows):
+        revs = db.q(
+            "SELECT action, invalidation_triggered, reasoning, "
+            "       what_changed_json, skipped_reason, reviewed_at "
+            "FROM position_reviews WHERE position_id = ? "
+            "ORDER BY reviewed_at DESC", (pos["id"],))
+        out.append(
+            f'<div class="chain" id="{p}-{i}">'
+            f'<h3 class="chain-head">{esc(pos["ticker"])} '
+            f'<span class="prov">opened {esc(pos["opened_at"])[:10]}, '
+            f'closes {esc(pos["planned_exit_date"])}</span></h3>')
+        if not revs.rows:
+            out.append(empty_block(
+                f"{p}-{i}-none", revs,
+                meaning="not re-checked yet. Expected for a position opened "
+                        "today or closing tomorrow - both skip the review "
+                        "deliberately - and a defect for anything held longer"))
+        for r in revs.rows:
+            changed = jload(r["what_changed_json"], []) or []
+            answer = r["skipped_reason"] and "not obtained" or str(r["action"])
+            cls = ("chain-step stopped" if answer == "exit_now"
+                   else "chain-step")
+            out.append(
+                f'<details class="{cls}">'
+                f"<summary><span class='chain-stage'>{esc(answer)}</span>"
+                f"<span class='chain-text'><b>{esc(str(r['reviewed_at'])[:16])}"
+                "</b><span class='chain-why'>"
+                f"{esc(str(r['skipped_reason'] or r['reasoning'])[:200])}"
+                "</span></span></summary>"
+                "<div class='chain-body'>"
+                f'<div class="chain-fact"><span class="chain-k">invalidation '
+                f'triggered</span><span class="chain-v">'
+                f'{"yes" if r["invalidation_triggered"] else "no"}</span></div>'
+                + "".join(
+                    f'<div class="chain-fact"><span class="chain-k">changed'
+                    f'</span><span class="chain-v">{esc(str(c))}</span></div>'
+                    for c in changed)
+                + "</div></details>")
+        out.append("</div>")
+    return section(f"{p}-section", "Open positions, re-checked", "".join(out))

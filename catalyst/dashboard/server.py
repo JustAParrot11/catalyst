@@ -189,6 +189,13 @@ def route_decision(db: Db, params: dict) -> str:
     return render_page("Decision trace", body, "/decisions", db.path, db=db)
 
 
+def route_chain(db: Db, params: dict) -> str:
+    return render_page(
+        "Every decision",
+        panels.chain_panel(db) + panels.open_positions_panel(db),
+        "/chain", db.path, db=db)
+
+
 def route_brain(db: Db, params: dict) -> str:
     def _num(key, default, lo, hi):
         """A pasted or edited URL must never 500 the page."""
@@ -389,6 +396,7 @@ HTML_ROUTES = {
     "/decisions": route_decisions,
     "/decision": route_decision,
     "/brain": route_brain,
+    "/chain": route_chain,
     "/newsmap": route_newsmap,
     "/refusals": route_refusals,
     "/logs": route_logs,

@@ -371,6 +371,7 @@ TRACE_SIMPLE = "/decision?candidate_id=cand-traded-1"
 TRACE_FULL = TRACE_SIMPLE + "&view=full"
 
 ROUTES = ["/", "/performance", "/funnel", "/costs", "/decisions", "/brain",
+          "/chain",
           TRACE_SIMPLE, TRACE_FULL,
           "/decision?candidate_id=cand-declined-1",
           "/decision?candidate_id=cand-declined-1&view=full",
@@ -517,6 +518,22 @@ def phase_traded(tmp: Path) -> None:
                 closed = len(_re.findall(rf"</{tag}>", body))
                 check(f"{route} closes every <{tag}>", opened == closed,
                       f"opened {opened}, closed {closed}")
+
+        chain = pages["/chain"]
+        for needle, label in [
+            ("Found", "the FOUND step"),
+            ("Judged", "the JUDGED step"),
+            ("Sized", "the SIZED step"),
+            ("Placed", "the PLACED step"),
+            ("Three officers bought", "the model's own words in the chain"),
+            ("<details", "steps that expand in place"),
+            ("Open positions, re-checked", "the re-evaluation section"),
+            ("never push it out", "the only-ever-shorten rule on the page"),
+        ]:
+            check(f"/chain shows {label}", needle in chain)
+        check("/chain steps are ordered", 
+              chain.index("Found") < chain.index("Judged") < chain.index("Sized"))
+        check("/chain needs no JavaScript", "<script" not in chain.lower())
 
         costs = pages["/costs"]
         for needle, label in [
