@@ -757,7 +757,11 @@ def neural_map(
     row_gap = int(row_gap * zoom)
     n_cols = len(kept)
     tallest = max((len(nodes) for _, nodes, _ in kept), default=1)
-    height = max(340, 96 + row_gap * tallest)
+    # THE BOX FITS THE DRAWING. A 340px floor put a four-node focused map
+    # in a mostly-empty frame, which reads as a chart that failed to load
+    # rather than as a small answer. The floor is now only what the
+    # header and caption need.
+    height = max(180, 96 + row_gap * tallest)
     col_w = width / n_cols
     top = 74
 
@@ -804,6 +808,7 @@ def neural_map(
     # carries strength, so a heavily-used link reads as a brighter one.
     max_e = max((w for _, _, w, _ in edges), default=1) or 1
     drawn = 0
+    records = 0
     for src, dst, weight, title in edges:
         if src not in pos or dst not in pos:
             continue        # an endpoint past the per-layer cap
@@ -836,6 +841,7 @@ def neural_map(
             f'stroke-width="14" pointer-events="stroke">'
             f"<title>{title}</title></path></g>")
         drawn += 1
+        records += max(1, int(weight or 1))
 
     # Nodes last, so no connector crosses a label.
     links = links or {}
@@ -891,7 +897,12 @@ def neural_map(
 
     out.append(
         f'<text x="{width - 10}" y="{height - 10}" font-size="{FONT_SIZE - 1}" '
-        f'text-anchor="end" fill="var(--muted)">{drawn} recorded link(s) drawn'
-        "</text>")
+        # SAY BOTH NUMBERS WHEN THEY DIFFER. Duplicate edges are drawn
+        # once and carry their count as weight, so "9 links drawn" beside
+        # a headline of "20 links" reads as an error in one of them.
+        f'text-anchor="end" fill="var(--muted)">'
+        + (f"{drawn} line(s) drawn, carrying {records} recorded link(s)"
+           if records != drawn else f"{drawn} recorded link(s) drawn")
+        + "</text>")
     out.append("</svg>")
     return "\n".join(out)

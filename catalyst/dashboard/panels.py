@@ -2552,17 +2552,20 @@ def state_line(db: Db, p: str = "state") -> str:
             + " &middot; ".join(bits) + "</p>")
 
 
-def brain_view_controls(p: str, zoom: float, nodes: int) -> str:
+def brain_view_controls(p: str, zoom: float, nodes: int,
+                        focus: str = "") -> str:
     """Zoom and expand, as LINKS. No JavaScript, by design - the map is
     documented as deterministic, and a JS pan/zoom draws a different
     picture per browser. Each control is a URL, so a view the owner
     finds useful can be bookmarked or pasted into a bug report.
     """
+    tail = f"&amp;focus={esc(focus)}" if focus else ""
+
     def opt(label, key, value, current):
         on = abs(float(current) - float(value)) < 1e-9
         other = "nodes" if key == "zoom" else "zoom"
         other_v = nodes if key == "zoom" else zoom
-        href = f"/brain?{key}={value}&amp;{other}={other_v:g}"
+        href = f"/brain?{key}={value}&amp;{other}={other_v:g}{tail}"
         cls = "viewopt on" if on else "viewopt"
         return (f'<span class="{cls}">{label}</span>' if on else
                 f'<a class="{cls}" href="{href}">{label}</a>')
@@ -2574,7 +2577,7 @@ def brain_view_controls(p: str, zoom: float, nodes: int) -> str:
                    (("fit", 1), ("1.5x", 1.5), ("2x", 2), ("3x", 3)))
         + ' <span class="viewbar-label">Show per layer</span> '
         + " ".join(opt(t, "nodes", v, nodes) for t, v in
-                   (("14", 14), ("30", 30), ("60", 60), ("all", 999)))
+                   (("8", 8), ("14", 14), ("30", 30), ("all", 999)))
         + "</p>"
         + prov("Zoom widens the drawing and the panel scrolls sideways; "
                "it never redraws the graph differently. Node labels are "
@@ -2582,8 +2585,33 @@ def brain_view_controls(p: str, zoom: float, nodes: int) -> str:
                "always on hover."))
 
 
+def brain_ways_in(b, p: str) -> str:
+    """The handful of nodes worth opening first.
+
+    OWNER-REPORTED: "its got too much data all at once and isnt easy to
+    navigate." A whole-graph picture has no entry point - every node
+    looks like every other node, so there is nowhere obvious to click
+    and the reader is left to scan a texture. These are the busiest
+    nodes, named, in order, each opening its own neighbourhood.
+    """
+    top = queries.busiest_nodes(b, limit=8)
+    if not top:
+        return ""
+    chips = "".join(
+        f'<a class="waychip" href="/brain?focus={esc(nid)}">'
+        f'{esc(nlabel)}<span class="waychip-n">{weight}</span></a>'
+        for nid, nlabel, _layer, weight in top)
+    return (f'<div class="waysin" id="{p}-waysin">'
+            "<h3>Start with one thing</h3>"
+            f"<p>{chips}</p>"
+            + prov("The most connected nodes, with how many links each "
+                   "carries. Opening one draws just that node and what "
+                   "it touches - the same recorded links, a picture you "
+                   "can read.") + "</div>")
+
+
 def brain_panel(db: Db, p: str = "brain", zoom: float = 1.0,
-                nodes: int = None) -> str:
+                nodes: int = None, focus: str = "") -> str:
     """The whole system's wiring in one picture.
 
     Not a metaphor and not an illustration: every node is a row and
@@ -2606,12 +2634,47 @@ def brain_panel(db: Db, p: str = "brain", zoom: float = 1.0,
                                    meaning="no rows behind this layer yet"))
         return section(f"{p}-section", "The brain", "".join(out))
 
-    out.append(
-        f'<p id="{p}-headline"><span class="big">{b.edge_count}</span> recorded '
-        f"link(s) across {b.node_count} node(s). Left to right is the path a "
-        "filing takes to become a trade: what the bot read, what it built from "
-        "it, what it linked, what the model made of it, what the code decided, "
-        "and what actually happened.</p>")
+    # FOCUS FIRST. A whole-graph picture answers "is anything connected"
+    # and little else; past a few dozen nodes the lines are a texture.
+    # Owner-reported: "its got too much data all at once and isnt easy
+    # to navigate." The focused view is a SUBSET of the same edges, so a
+    # line here is the same recorded row it was on the whole map.
+    whole = b
+    focus_label = ""
+    if focus:
+        b = queries.brain_focus(whole, focus)
+        focus_label = next(
+            (nlabel for _lbl, ns in whole.layers for nid, nlabel, _w in ns
+             if nid == focus), focus)
+        if not b.edge_count:
+            out.append(note(
+                f'<b id="{p}-nofocus">Nothing is recorded as connecting to '
+                f"{esc(str(focus_label))}.</b> That is a fact about the "
+                "data rather than a gap in the page - every line on this "
+                "map is a stored row. "
+                f'<a href="/brain">Show the whole map</a>.'))
+            return section(f"{p}-section", "The brain", "".join(out))
+        out.append(
+            f'<p class="crumb" id="{p}-crumb">'
+            f'<a href="/brain">The whole map</a> &rsaquo; '
+            f"<b>{esc(str(focus_label))}</b></p>")
+        out.append(
+            f'<p id="{p}-headline"><span class="big">{b.edge_count}</span> '
+            f"link(s) touching <b>{esc(str(focus_label))}</b>, across "
+            f"{b.node_count} node(s), out to "
+            f"{queries.FOCUS_HOPS} step(s). This is a slice of the "
+            f"{whole.edge_count} link(s) on the whole map, not a "
+            f"different picture. "
+            f'<a href="/node?id={esc(focus)}">What is this node?</a></p>')
+    else:
+        out.append(
+            f'<p id="{p}-headline"><span class="big">{b.edge_count}</span> '
+            f"recorded link(s) across {b.node_count} node(s). Left to right "
+            "is the path a filing takes to become a trade: what the bot "
+            "read, what it built from it, what it linked, what the model "
+            "made of it, what the code decided, and what actually "
+            "happened.</p>")
+        out.append(brain_ways_in(b, p))
     # Candidate nodes go somewhere: clicking one opens its decision.
     # EVERY node that HAS a record links to it, not just candidates.
     # The owner asked to "click to see the news"; only Candidate nodes
@@ -2646,11 +2709,12 @@ def brain_panel(db: Db, p: str = "brain", zoom: float = 1.0,
                 # empty page. A link that goes somewhere useless is worse
                 # than no link, because it costs a click to find out.
                 links[key] = f"/newsmap?ticker={esc(str(nlabel).strip())}"
-    out.append(brain_view_controls(p, zoom, cap))
+    out.append(brain_view_controls(p, zoom, cap, focus=focus))
     out.append('<div class="chart-wrap chart-scroll">' + charts.neural_map(
         [(esc(label), [(esc(nid), esc(nlabel), w) for nid, nlabel, w in nodes])
          for label, nodes in b.layers],
-        [(esc(s), esc(d), w, esc(t)) for s, d, w, t in b.edges],
+        [(esc(s), esc(d), w, esc(t))
+         for s, d, w, t in queries.collapse_edges(b.edges)],
         chart_id=f"{p}-map", links=links,
         max_per_layer=cap, zoom=zoom) + "</div>")
     out.append(prov(

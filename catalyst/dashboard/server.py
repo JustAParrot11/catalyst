@@ -203,6 +203,11 @@ def route_node(db: Db, params: dict) -> str:
                        subtitle="One node of the map, with its runbook")
 
 
+#: Nodes drawn per layer before anyone asks for more. Deliberately
+#: small: the map is for reading, and the wider views are one click.
+DEFAULT_BRAIN_NODES = 8
+
+
 def route_brain(db: Db, params: dict) -> str:
     def _num(key, default, lo, hi):
         """A pasted or edited URL must never 500 the page."""
@@ -212,10 +217,15 @@ def route_brain(db: Db, params: dict) -> str:
             return default
 
     zoom = _num("zoom", 1.0, 1.0, 3.0)
-    nodes = int(_num("nodes", panels.charts.MAX_NODES_PER_LAYER, 1, 999))
+    # A SMALLER DEFAULT. Owner-reported: "its got too much data all at
+    # once and isnt easy to navigate." Fourteen per layer across six
+    # layers is eighty-odd nodes before anyone has asked a question;
+    # eight fits without scrolling and the wider views are one click.
+    nodes = int(_num("nodes", DEFAULT_BRAIN_NODES, 1, 999))
+    focus = (params.get("focus") or [""])[0][:200]
     return render_page("The brain",
                        panels.brain_panel(db, p="brain", zoom=zoom,
-                                          nodes=nodes),
+                                          nodes=nodes, focus=focus),
                        "/brain", db.path, db=db,
                        subtitle="Every line is one recorded link")
 
