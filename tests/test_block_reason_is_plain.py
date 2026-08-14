@@ -26,7 +26,7 @@ import re
 
 import pytest
 
-from catalyst.dashboard import charts
+from catalyst.dashboard import charts, queries
 from catalyst.dashboard.queries import (
     GOVERNOR_REASONS,
     explain_governor_reason,
@@ -89,11 +89,144 @@ class TestTheIdentifierSurvives:
         faults = [f for s in queries.funnel(Db(seeded)).stages
                   for f in s.faults]
         assert faults, "the seed should produce a governor fault"
-        text = " ".join(f"{r} {d}" for r, _, d in faults)
+        text = " ".join(f"{f[0]} {f[2]}" for f in faults)
         assert "cost cross-check" in text, "no plain sentence"
         assert "reconciliation_discrepancy_unacknowledged" in text, (
             "the identifier was dropped - a log search can no longer "
             "match what the page says")
+
+
+class TestTheAdviceLeadsSOMEWHERE:
+    """OWNER-REPORTED, a second time: "still says 125 spending was
+    blocked: reconciliation_discrepancy_unacknowledged".
+
+    The advice read "Open Maintenance and acknowledge it". Verified by
+    fetching both pages:
+
+        /maintenance   acknowledge form present: NO
+        /costs         acknowledge form present: YES
+
+    So the owner did as told, found nothing to click, and reported the
+    block as unfixed. It WAS unfixed - by a sentence, not by the cost
+    code. Advice that names the wrong page is worse than no advice,
+    because it costs a trip and reads as a broken feature.
+    """
+
+    @pytest.fixture
+    def blocked(self, tmp_path):
+        """A database in exactly the state the owner's is: one paused
+        reconciliation, unacknowledged, and 125 denials citing it.
+
+        THE DENIALS BELONG IN THE FIXTURE. Without them /funnel renders
+        no fault block at all, and a test that reads the fault block then
+        passes by finding nothing. That is not hypothetical - the first
+        version of test_the_link_REACHES_THE_PAGE_as_a_link went green
+        against a deliberately broken build for exactly this reason.
+        """
+        import pathlib
+        import sqlite3
+        from datetime import datetime, timezone
+
+        p = str(tmp_path / "block.db")
+        conn = sqlite3.connect(p)
+        root = pathlib.Path(__file__).resolve().parents[1]
+        for f in ("catalyst/storage/schema.sql",
+                  "catalyst/storage/schema_graph.sql",
+                  "catalyst/dashboard/schema_logs.sql"):
+            conn.executescript((root / f).read_text())
+        conn.execute(
+            "INSERT INTO cost_reconciliation_events (id,target_date,kind,"
+            "component,local_total_cents,cost_api_total_cents,"
+            "discrepancy_cents,threshold_cents,action_taken,api_record_count,"
+            "api_raw_response,reconciled_at) VALUES ('re1','2026-08-12',"
+            "'scheduled','catalyst.research','1200','1207','7','5',"
+            "'scheduled_paused',3,'{}','2026-08-13T00:00:00+00:00')")
+        now = datetime.now(timezone.utc).isoformat()
+        conn.executemany(
+            "INSERT INTO cost_governor_events (cycle_id, requested_kind, "
+            "estimate_cents, cap_cents, decision, reason, at) VALUES "
+            "(?,'scheduled','15','500','deny',"
+            "'reconciliation_discrepancy_unacknowledged',?)",
+            [(f"cy{i}", now) for i in range(125)])
+        conn.commit()
+        conn.close()
+        return p
+
+    def test_the_fixture_really_does_render_a_fault_block(self, blocked):
+        """Guards every test below it. If this stops holding they all
+        start passing by finding nothing."""
+        assert 'class="funnel-fault"' in self._render(blocked, "/funnel")
+
+    def _render(self, db_path, path):
+        """Render a route IN PROCESS. The suite is offline by contract,
+        so this goes through the same route table the server dispatches
+        on rather than over a socket."""
+        from catalyst.dashboard.db import Db
+        from catalyst.dashboard.server import HTML_ROUTES
+
+        assert path in HTML_ROUTES, f"{path} is not a route at all"
+        return HTML_ROUTES[path](Db(db_path), {})
+
+    def test_the_page_the_advice_names_HAS_the_button(self, blocked):
+        """Follow the instruction the way the owner would, and check the
+        thing it promises is on the other end."""
+        href, label = queries.governor_reason_link(
+            "reconciliation_discrepancy_unacknowledged")
+        assert label, "the link has no words on it"
+        path = href.split("#")[0]
+        assert "/acknowledge-reconciliation" in self._render(blocked, path), (
+            f"the advice sends the owner to {path}, which has no "
+            "acknowledge form on it")
+
+    def test_the_page_it_used_to_name_still_does_NOT_have_it(self, blocked):
+        """The sabotage this pair is built around: if /maintenance ever
+        grows the form, the advice may point there again - but until it
+        does, this records WHY the old wording was wrong rather than
+        leaving it as a stale opinion."""
+        assert "/acknowledge-reconciliation" not in self._render(
+            blocked, "/maintenance")
+
+    def test_the_anchor_it_jumps_to_actually_exists(self, blocked):
+        """A link to #cost-unacked that lands nowhere drops the reader at
+        the top of a long page to hunt."""
+        href, _label = queries.governor_reason_link(
+            "reconciliation_discrepancy_unacknowledged")
+        path, _, anchor = href.partition("#")
+        assert anchor, "no anchor, so the link lands at the top"
+        assert f'id="{anchor}"' in self._render(blocked, path), (
+            f"#{anchor} is not an id on {path}")
+
+    def test_every_page_named_by_any_gate_is_a_real_route(self, blocked):
+        """The same mistake in any of the three would read identically."""
+        for reason in list(GOVERNOR_REASONS) + ["some_new_gate"]:
+            href, label = queries.governor_reason_link(reason)
+            assert label, f"{reason} offers a link with no words on it"
+            path, _, anchor = href.partition("#")
+            html_out = self._render(blocked, path)
+            assert html_out, f"{reason} points at {path}, which rendered nothing"
+            assert f'id="{anchor}"' in html_out, (
+                f"{reason} points at #{anchor} on {path}, which has no such id")
+
+    def test_the_link_REACHES_THE_PAGE_as_a_link(self, blocked):
+        """The one a text-only check cannot make. The advice goes through
+        raw(), which escapes and redacts - correctly, since stored text
+        must never become markup. An anchor written INTO the sentence
+        therefore renders as literal &lt;a href=...&gt; on screen, which
+        is how this shipped the first time and how rendering caught it."""
+        html_out = self._render(blocked, "/funnel")
+        assert "&lt;a href" not in html_out, (
+            "an anchor was escaped into visible gibberish")
+
+    def test_the_funnel_block_offers_the_way_out(self, blocked):
+        """End to end, in the owner's exact state: 125 denials on one
+        unacknowledged reconciliation."""
+        import re
+
+        html_out = self._render(blocked, "/funnel")
+        fault = re.search(r'<div class="funnel-fault".*?</div>', html_out, re.S)
+        assert fault, "no fault block rendered at all"
+        assert 'href="/costs#cost-unacked"' in fault.group(0), (
+            "the block says spending stopped and offers no way to resume it")
 
 
 class TestTheMapZoomsWithTheNetwork:

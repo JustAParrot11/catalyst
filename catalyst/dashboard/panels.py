@@ -432,12 +432,20 @@ def funnel_panel(db: Db, p: str = "funnel") -> str:
                 "that is a gap in the record.</p>")
 
         if stage.faults:
+            # A fault is (reason, n, detail) and MAY carry a fourth
+            # element, (href, label): the page that can actually clear
+            # it. The advice text itself goes through raw() and so is
+            # escaped - the link has to be built here, from code
+            # constants, or it renders as literal &lt;a&gt; on screen.
             items = "".join(
-                f'<li><span class="funnel-why-n">{esc(n)}</span>'
-                + '<span class="funnel-why-text">' + esc(reason)
-                + (f' <span class="prov">{raw(detail)}</span>' if detail else "")
+                f'<li><span class="funnel-why-n">{esc(f[1])}</span>'
+                + '<span class="funnel-why-text">' + esc(f[0])
+                + (f' <span class="prov">{raw(f[2])}</span>' if f[2] else "")
+                + (f' <a class="fault-fix" href="{esc(f[3][0])}">'
+                   f'{esc(f[3][1])}</a>'
+                   if len(f) > 3 and f[3] else "")
                 + "</span></li>"
-                for reason, n, detail in stage.faults)
+                for f in stage.faults)
             out.append(
                 f'<div class="funnel-fault" id="{p}-faults-{esc(stage.key)}">'
                 '<h3><span class="fault-chip">NEEDS ATTENTION</span> '
@@ -2043,6 +2051,45 @@ def refusals_panel(db: Db, p: str = "ref") -> str:
 # --------------------------------------------------------------------------
 
 
+def bundle_buttons(p: str) -> str:
+    """The log-collection buttons, ON EVERY PAGE SOMEONE WOULD LOOK.
+
+    ONE BUTTON PER QUESTION, plus the master. Owner-asked: "different
+    type of log collection buttons for different issues e.g. pricing or
+    logic etc. Then one master log that is all."
+
+    A scoped bundle is not a smaller master bundle for tidiness: it is
+    the difference between sending a whole-database dump and sending the
+    rows that bear on the question. Each one says what it covers, so
+    choosing between them does not require knowing the schema.
+
+    These lived only on /maintenance and the owner reported not seeing
+    them - having gone, reasonably, to Logs. A control that exists on a
+    page nobody thinks to open has not shipped.
+    """
+    from catalyst.dashboard.server import DIAGNOSTIC_SCOPES
+
+    out = [f'<h3 id="{p}-bundle">Collect logs to send on</h3>',
+           "<p>Pick the one that matches what went wrong. Each downloads "
+           "a single file. <b>Safe to send on</b>: keys and secrets are "
+           "stripped twice &mdash; once where each value is captured, "
+           "and again over the whole file before it is written.</p>"]
+    for key in ("everything", "all", "pricing", "logic", "data",
+                "execution"):
+        spec = DIAGNOSTIC_SCOPES[key]
+        master = " master" if key == "everything" else ""
+        out.append(
+            f'<p class="bundlerow"><a class="bundlebtn{master}" '
+            f'href="/diagnostics.json?scope={key}" '
+            f'download="catalyst-{key}.json">{esc(spec["label"])}</a>'
+            f'<span class="bundlewhy">{esc(spec["why"])}</span></p>')
+    out.append(prov(
+        "If the page itself will not load, the same file can be produced "
+        "on the server with:  sudo -u catalyst /opt/catalyst/venv/bin/python "
+        "-m catalyst.dashboard --diagnostics > catalyst-diagnostics.json"))
+    return "".join(out)
+
+
 def logs_panel(db: Db, params: dict, p: str = "log") -> str:
     lg = queries.logs(
         db,
@@ -2076,8 +2123,7 @@ def logs_panel(db: Db, params: dict, p: str = "log") -> str:
         f'value="{esc(lg.filters["until"])}" placeholder="2026-08-31"></label> '
         f'<label>limit <input id="{p}-limit" name="limit" size="4" '
         f'value="{esc(lg.filters["limit"])}"></label> '
-        '<button type="submit">search</button> '
-        '<a href="/diagnostics.json">download diagnostic bundle (redacted)</a>'
+        '<button type="submit">search</button>'
         "</form>"
     )
     out = [form]
@@ -2085,6 +2131,9 @@ def logs_panel(db: Db, params: dict, p: str = "log") -> str:
         out.append(f'<div class="empty" id="{p}-missing">{esc(lg.reason)}</div>')
         out.append(empty_block(f"{p}-empty-nolabel", lg.query,
                                meaning="the logs table itself is absent"))
+        # ...and the buttons especially here: a missing logs table is
+        # precisely when someone needs to send the evidence on.
+        out.append(bundle_buttons(p))
         return section(f"{p}-section", "Logs", "".join(out))
     if lg.query.is_empty:
         out.append(empty_block(
@@ -2113,6 +2162,7 @@ def logs_panel(db: Db, params: dict, p: str = "log") -> str:
             f"{lg.filters['limit']}. Every message, traceback and context blob on "
             "this page passes through the same redactor the diagnostic bundle uses."
         ))
+    out.append(bundle_buttons(p))
     return section(f"{p}-section", "Logs", "".join(out))
 
 
@@ -2206,27 +2256,7 @@ def maintenance_panel(report, p: str = "maint") -> str:
     # the difference between sending a whole-database dump and sending
     # the rows that bear on the question. Each one says what it covers,
     # so choosing between them does not require knowing the schema.
-    from catalyst.dashboard.server import DIAGNOSTIC_SCOPES
-
-    out.append(f'<h3 id="{p}-bundle">Collect logs to send on</h3>')
-    out.append(
-        "<p>Pick the one that matches what went wrong. Each downloads a "
-        "single file. <b>Safe to send on</b>: keys and secrets are "
-        "stripped twice &mdash; once where each value is captured, and "
-        "again over the whole file before it is written.</p>")
-    for key in ("everything", "all", "pricing", "logic", "data",
-                "execution"):
-        spec = DIAGNOSTIC_SCOPES[key]
-        master = " master" if key == "everything" else ""
-        out.append(
-            f'<p class="bundlerow"><a class="bundlebtn{master}" '
-            f'href="/diagnostics.json?scope={key}" '
-            f'download="catalyst-{key}.json">{esc(spec["label"])}</a>'
-            f'<span class="bundlewhy">{esc(spec["why"])}</span></p>')
-    out.append(prov(
-        "If the page itself will not load, the same file can be produced "
-        "on the server with:  sudo -u catalyst /opt/catalyst/venv/bin/python "
-        "-m catalyst.dashboard --diagnostics > catalyst-diagnostics.json"))
+    out.append(bundle_buttons(p))
 
     for group in ("The bot itself", "Outside services"):
         checks = report.by_group(group)

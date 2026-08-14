@@ -335,18 +335,24 @@ DIAGNOSTIC_SCOPES = {
                "figure, a surprise charge, or spending that stopped.",
         "tables": ("cost_events", "cost_governor_events",
                    "cost_reconciliation_events", "cost_reprice_events",
-                   "token_prices"),
+                   "pricing_overrides"),
         "sections": ("cost",),
         "log_components": ("catalyst.cost", "catalyst.research"),
     },
     "logic": {
         "label": "Decisions & logic",
-        "why": "the funnel, candidates, what the model concluded and "
-               "what the risk engine did. Send this when it traded "
-               "something odd, or refused something it should not have.",
-        "tables": ("candidates", "research_calls", "research_views",
-                   "risk_decisions", "refusals", "adaptive_params",
-                   "position_reviews"),
+        "why": "the funnel, candidates, the prompt the model saw, its "
+               "reply verbatim, what it concluded and what the risk "
+               "engine then did. Send this when it traded something odd, "
+               "or refused something it should not have.",
+        # research_call_turns is the MODEL'S SIDE OF THE CONVERSATION.
+        # Without it this scope carries what the bot decided but not what
+        # it was told, which is exactly the half you need to tell a wrong
+        # thesis from an unlucky one. limit_applications is the same
+        # story for the risk engine: which rule bound, and by how much.
+        "tables": ("candidates", "research_calls", "research_call_turns",
+                   "research_views", "risk_decisions", "limit_applications",
+                   "refusals", "adaptive_param_log", "position_reviews"),
         "sections": ("funnel",),
         "log_components": ("catalyst.research", "catalyst.risk",
                            "catalyst.orchestrator"),
@@ -356,8 +362,8 @@ DIAGNOSTIC_SCOPES = {
         "why": "what was read, what failed to read, and the evidence "
                "graph. Send this when a feed looks stuck or a source is "
                "missing.",
-        "tables": ("raw_events", "raw_events_errors", "edgar_filings_seen",
-                   "graph_nodes", "graph_edges"),
+        "tables": ("raw_events", "raw_events_errors", "edgar_filings",
+                   "graph_entities", "graph_assertions"),
         "sections": (),
         "log_components": ("catalyst.data", "catalyst.scheduler"),
     },
@@ -366,8 +372,8 @@ DIAGNOSTIC_SCOPES = {
         "why": "orders, fills, positions, stops and closed trades. Send "
                "this for anything about what the broker actually did.",
         "tables": ("orders", "fills", "positions", "closed_trades",
-                   "stop_confirmations", "kill_switch_events",
-                   "equity_snapshots"),
+                   "stop_replacements", "stop_confirmations",
+                   "kill_switch_events", "equity_snapshots"),
         "sections": (),
         "log_components": ("catalyst.execution", "catalyst.orchestrator"),
     },
@@ -411,9 +417,10 @@ def diagnostics_bundle(db: Db, scope: str = "all") -> dict:
     bundle["scope_note"] = (
         "This is the MASTER bundle - nothing is filtered out."
         if spec["tables"] is None else
-        "This bundle is SCOPED. Tables and log components outside the "
-        "scope are omitted on purpose, not missing. Use "
-        "/diagnostics.json?scope=all for everything.")
+        "This bundle is SCOPED. Every row of the tables below is here "
+        "verbatim; tables and log components outside the scope are "
+        "omitted on purpose, not missing. Use "
+        "/diagnostics.json?scope=everything for the whole database.")
     # EVERY ROW, VERBATIM, when asked for. The overview bundle carries
     # counts; a count cannot be dissected. The owner asked for "a log
     # that is literally every and anything so you can dissect it, i dont
@@ -422,10 +429,32 @@ def diagnostics_bundle(db: Db, scope: str = "all") -> dict:
     # if any table had to be truncated rather than silently shortening
     # it (a bundle that quietly drops rows is worse than one that says
     # it could not carry them).
-    if spec.get("full_rows"):
+    #
+    # A SCOPED BUNDLE CARRIES ITS ROWS TOO. Verified by running before
+    # this changed: scope=logic - labelled "what the model concluded and
+    # what the risk engine did" - contained neither the prompt, the
+    # model's reply, nor the thesis. Only counts. "research_views: 1"
+    # answers no question anyone would send a bundle to ask.
+    # The Overview keeps its counts; that is what it is for.
+    row_tables = spec["tables"]
+    if spec.get("full_rows") or row_tables is not None:
         bundle["rows"] = {}
         bundle["rows_truncated"] = {}
-        for name in sorted(db.tables()):
+        present = set(db.tables())
+        if row_tables is not None:
+            # A NAMED TABLE THAT IS NOT HERE IS SAID OUT LOUD. A scope
+            # naming a table this database does not have used to produce
+            # a silently smaller file - a renamed table would empty a
+            # bundle and nothing would say so. (Five of them did: the
+            # rate table, the adaptive log and the whole evidence graph
+            # were all named wrongly and all silently absent.)
+            absent = [t for t in row_tables if t not in present]
+            if absent:
+                bundle["scope_tables_absent"] = {
+                    t: "named by this scope but not a table in this "
+                       "database - it is missing, not empty" for t in absent}
+        for name in sorted(present if row_tables is None
+                           else present & set(row_tables)):
             res = db.q(f"SELECT * FROM {name} LIMIT ?",
                        (FULL_DUMP_ROWS_PER_TABLE + 1,))
             if res.error:
