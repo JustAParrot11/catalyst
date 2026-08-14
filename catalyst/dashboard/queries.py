@@ -334,6 +334,24 @@ SKIP_LABELS = {
         "no stop could be placed, so the downside was unbounded",
     "catalyst_date_passed":
         "the catalyst had already happened by the time it was sized",
+    # The two halves of the priced-in gate, which need different
+    # responses and so must not read alike. A candidate held to the
+    # RAISED floor missed a higher bar than the ordinary one, and saying
+    # "not confident enough" about it would point at the wrong number.
+    "priced_in_below_raised_floor":
+        "the model said the move was already priced in, and it was not "
+        "confident enough to clear the higher bar that then applies",
+    "model_judged_priced_in":
+        "the model judged the move already priced in (this was an "
+        "outright veto until 2026-08-14; it is now a higher conviction "
+        "bar, so this reason only appears on older decisions)",
+    "model_no_trade":
+        "the model saw no tradeable edge and said so",
+    "short_unavailable_cash_account":
+        "it wanted to go short, and a cash account cannot",
+    "unknown_catalyst_type":
+        "no risk parameters are defined for this kind of catalyst, so it "
+        "could not be sized safely",
 }
 
 
@@ -345,6 +363,34 @@ def _plain_skip(code: str) -> str:
     if key in SKIP_LABELS:
         return SKIP_LABELS[key]
     return key.replace("_", " ") or "no reason recorded"
+
+
+def _market_data_note(db: Db, candidate_id: str) -> str:
+    """Whether the model was actually shown price when it judged price.
+
+    Read from the PROMPT THAT WAS SENT, stored verbatim on the research
+    call, rather than from what the code would send today. A decision
+    made last week must still explain itself in the terms it was made
+    in - re-deriving it from current code would quietly relabel every
+    old decision as well-informed.
+    """
+    res = db.q("SELECT prompt_rendered FROM research_calls "
+               "WHERE candidate_id = ? AND skipped_reason IS NULL "
+               "ORDER BY called_at DESC LIMIT 1", (candidate_id,))
+    if not res.rows:
+        return "no research prompt recorded"
+    prompt = str(res.rows[0]["prompt_rendered"] or "")
+    if "MARKET DATA, measured at decision time" in prompt:
+        lines = [ln.strip(" -") for ln in prompt.splitlines()
+                 if ln.strip().startswith("- ") and (
+                     "last close" in ln or "half-spread" in ln
+                     or "dollar volume" in ln)]
+        return "; ".join(lines) if lines else "market section was present"
+    if "MARKET DATA" in prompt:
+        return ("the snapshot was unavailable and the prompt said so")
+    return ("NONE - this decision was made before the market snapshot "
+            "reached the prompt, so any priced-in call in it rests on "
+            "the model's own knowledge rather than on measured price")
 
 
 def _grouped(db: Db, sql: str, params: tuple = ()) -> QueryResult:
@@ -1882,6 +1928,15 @@ def decision_chains(db: Db, limit: int = 12) -> Chains:
                         ("already priced in?",
                          ("yes - " if v["priced_in"] else "no - ")
                          + str(v["priced_in_reasoning"])),
+                        # WAS IT GIVEN THE NUMBERS? A priced-in call made
+                        # without price data is a guess, and until
+                        # 2026-08-14 every one of them was: the prompt
+                        # asked what price and volume had done and
+                        # carried neither. Reading the prompt that was
+                        # actually sent is the only way to tell the two
+                        # apart after the fact.
+                        ("market data it was shown",
+                         _market_data_note(db, cid)),
                         ("expected hold", f"{v['expected_holding_days']} days")],
                 href=f"/decision?candidate_id={cid}&view=full",
                 stopped=str(v["direction"]) == "no_trade"))

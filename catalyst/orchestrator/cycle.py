@@ -692,7 +692,11 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
                            cycle_id=cycle_id, kind=kind,
                            owner_monthly_cap_cents=owner_monthly_cap_cents),
             transport, graph_context=_graph_context(c, conn),
-            signals=_signals_for(c, events))
+            signals=_signals_for(c, events),
+            # THE SNAPSHOT WAS ALREADY HERE, three lines up, and went
+            # only to the risk engine. The model was being asked what
+            # price and volume had done and shown neither.
+            market=market)
         if log.parsed_view is None:
             report.drop_reasons.setdefault("researched", []).append(
                 f"{c.id}: {log.skipped_reason}")

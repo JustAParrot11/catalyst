@@ -24,6 +24,21 @@ from catalyst.risk.sizing import size
 # measures what the constraint costs (STRATEGY-PROPOSALS section 2.1).
 _SHORT_SKIP = "short_unavailable_cash_account"
 
+#: Extra conviction a candidate must carry when the model says the move
+#: is already priced in. AN ESTIMATE, and labelled one: nothing has
+#: measured what the priced-in call is worth, which is exactly why it is
+#: no longer allowed to veto outright.
+#:
+#: 0.15 on a 0.60 floor puts the bar at 0.75. Against the owner's live
+#: conviction distribution (min 0.08, median 0.20, max 0.85, n=30) that
+#: admits only the strongest priced-in candidates rather than none of
+#: them. It is deliberately the smallest change that reopens the gate.
+#:
+#: This is the number to move once the refusal tracker can score
+#: priced_in refusals: if they go on to earn nothing, raise it back
+#: toward a veto; if they earn as much as the rest, take it to zero.
+PRICED_IN_CONVICTION_PREMIUM = Decimal("0.15")
+
 
 def _hold_days(view: ResearchView, params: dict,
                catalyst_type: str) -> tuple[int | None, str]:
@@ -92,16 +107,47 @@ def evaluate(
         skip_reasons.append("model_no_trade")
     elif view.direction == "short":
         skip_reasons.append(_SHORT_SKIP)
-    if view.priced_in:
-        skip_reasons.append("model_judged_priced_in")
-
+    # PRICED-IN RAISES THE BAR; IT NO LONGER CLOSES THE DOOR.
+    #
+    # It used to be an absolute veto placed AHEAD of conviction, so a
+    # 0.95-conviction candidate was discarded without conviction ever
+    # being read. On the owner's live day it accounted for 26 of 30
+    # views and 9 of 12 declines, and the strategy analyst's measurement
+    # is that refusing on an unmeasured signal is the most destructive
+    # thing that can be attached to this strategy: accepting every
+    # signal beat the index by 16.6pp, refusing three quarters of them
+    # lost by 59.5pp, and refusing all of them - the live rate - by
+    # 68.7pp. A filter needs roughly 60/40 discrimination just to break
+    # even against not filtering at all, and this one has never been
+    # measured because it is not an adaptive parameter and the refusal
+    # tracker aggregates only below_conviction_floor.
+    #
+    # So it becomes a PREMIUM on conviction. The model's judgement still
+    # counts against the trade, deterministic code still decides, the
+    # hard bounds are untouched, and a candidate the model is genuinely
+    # confident about can now be taken. Every one that clears the raised
+    # bar is recorded as having cleared it, so the refusal tracker can
+    # eventually say whether the premium should be higher or zero.
+    #
+    # Owner's instruction, 2026-08-14: "I want an agentic trading bot
+    # that can make confident trades doing its own research" and
+    # "balance it out so it can also make money confidently". This is a
+    # risk-gate change made on that instruction.
     conviction_floor = Decimal(str(params["conviction_floor"]))
-    passed_gate = (
-        not skip_reasons
-        and Decimal(str(view.conviction)) >= conviction_floor
-    )
+    effective_floor = conviction_floor
+    if view.priced_in:
+        effective_floor = conviction_floor + PRICED_IN_CONVICTION_PREMIUM
+
+    conviction = Decimal(str(view.conviction))
+    passed_gate = not skip_reasons and conviction >= effective_floor
     if not skip_reasons and not passed_gate:
-        skip_reasons.append("below_conviction_floor")
+        # NAME WHICH BAR IT MISSED. "below_conviction_floor" on a
+        # candidate held to a higher floor is true and misleading, and
+        # the two need different responses - one is the floor being too
+        # high, the other is the premium being too high.
+        skip_reasons.append(
+            "priced_in_below_raised_floor" if view.priced_in
+            else "below_conviction_floor")
 
     sized = size(
         passed_gate=passed_gate,

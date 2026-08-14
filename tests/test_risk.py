@@ -205,11 +205,61 @@ class TestEvaluate:
         assert d.action == "skip"
         assert "short_unavailable_cash_account" in d.skip_reasons
 
-    def test_priced_in_skips(self):
-        d = evaluate(candidate(), view(priced_in=True), portfolio(),
-                     PARAMS, market())
+    def test_priced_in_RAISES_THE_BAR_rather_than_closing_the_door(self):
+        """It used to be an absolute veto placed ahead of conviction, so
+        a 0.95-conviction candidate was discarded without conviction ever
+        being read. That gate accounted for 26 of 30 views and 9 of 12
+        declines on the owner's live day, and it has never been measured
+        - it is not an adaptive parameter and the refusal tracker
+        aggregates only below_conviction_floor.
+
+        Both halves are asserted here, because a premium that admits
+        everything is as wrong as a veto that admits nothing.
+        """
+        from decimal import Decimal
+
+        from catalyst.risk.evaluate import PRICED_IN_CONVICTION_PREMIUM
+
+        floor = Decimal(str(PARAMS["conviction_floor"]))
+        raised = floor + PRICED_IN_CONVICTION_PREMIUM
+
+        # Below the raised bar: still declined, and it says WHICH bar.
+        d = evaluate(candidate(),
+                     view(priced_in=True, conviction=float(raised) - 0.05),
+                     portfolio(), PARAMS, market())
         assert d.action == "skip"
-        assert "model_judged_priced_in" in d.skip_reasons
+        assert "priced_in_below_raised_floor" in d.skip_reasons
+        assert "below_conviction_floor" not in d.skip_reasons, (
+            "a candidate held to a HIGHER floor must not report the "
+            "ordinary one - the two need different responses")
+
+        # At or above it: the trade is allowed to happen.
+        d2 = evaluate(candidate(),
+                      view(priced_in=True, conviction=float(raised)),
+                      portfolio(), PARAMS, market())
+        assert d2.action == "trade", (
+            "a candidate the model is genuinely confident about is still "
+            "being vetoed on an unmeasured heuristic")
+
+    def test_the_premium_is_a_REAL_premium(self):
+        """A zero premium would make priced_in meaningless; the model's
+        judgement must still cost the candidate something."""
+        from decimal import Decimal
+
+        from catalyst.risk.evaluate import PRICED_IN_CONVICTION_PREMIUM
+
+        assert PRICED_IN_CONVICTION_PREMIUM > Decimal("0")
+        floor = Decimal(str(PARAMS["conviction_floor"]))
+        # Exactly at the ordinary floor, priced_in still declines.
+        d = evaluate(candidate(),
+                     view(priced_in=True, conviction=float(floor)),
+                     portfolio(), PARAMS, market())
+        assert d.action == "skip"
+        # ...while the same conviction WITHOUT priced_in trades.
+        d2 = evaluate(candidate(),
+                      view(priced_in=False, conviction=float(floor)),
+                      portfolio(), PARAMS, market())
+        assert d2.action == "trade"
 
     def test_no_trade_direction_skips(self):
         d = evaluate(candidate(), view(direction="no_trade"), portfolio(),
