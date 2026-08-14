@@ -362,6 +362,44 @@ def _ids(db: Db, sql: str, params: tuple = ()) -> tuple[set, QueryResult]:
     return out, res
 
 
+#: A governor reason in plain English, with what to DO about it. The
+#: raw values are code identifiers - "reconciliation_discrepancy_
+#: unacknowledged" is exact and tells the owner nothing they can act on
+#: ("Unsure what the reason for block actually is it needs to be
+#: clearer"). The identifier is kept BESIDE the sentence, never instead
+#: of it, so it stays greppable and the two can never disagree.
+GOVERNOR_REASONS = {
+    "cap_exceeded": (
+        "the monthly budget ran out",
+        "Raise it on the Settings page, or wait for the month to roll "
+        "over. The Cost page shows the cap in force and what has been "
+        "spent against it."),
+    "reconciliation_discrepancy_unacknowledged": (
+        "a cost cross-check is holding spending until someone confirms it",
+        "This is NOT out of money. The daily check compared what the bot "
+        "recorded against what Anthropic billed, they differed, and "
+        "nothing may be spent until that is acknowledged. Open "
+        "Maintenance and acknowledge it, or upgrade - recent versions "
+        "clear a difference too small to matter automatically."),
+    "unpriced_cost_rows": (
+        "a cost row could not be priced, so spending stopped",
+        "This is a code fault, not a budget one: an API response arrived "
+        "with a shape the pricing table does not know. Send the Cost & "
+        "pricing bundle from Maintenance."),
+}
+
+
+def explain_governor_reason(reason: str):
+    """(plain sentence, what to do). Unknown reasons pass through
+    unchanged rather than being guessed at - a confident wrong
+    explanation is worse than the identifier."""
+    plain, todo = GOVERNOR_REASONS.get(
+        str(reason), (str(reason), "This reason has no plain-English "
+                      "explanation recorded yet - send the Everything "
+                      "bundle from Maintenance."))
+    return plain, todo
+
+
 def funnel(db: Db) -> Funnel:
     """Where every candidate the bot has ever built ended up.
 
@@ -474,11 +512,13 @@ def funnel(db: Db) -> Funnel:
         "SELECT reason, COUNT(*) n, MIN(at) first_at, MAX(at) last_at "
         "FROM cost_governor_events WHERE decision = 'deny' "
         "GROUP BY reason ORDER BY n DESC")
-    gov_faults = [
-        (f"spending was blocked: {r['reason']}", r["n"],
-         _last_seen(r["last_at"], r["first_at"]))
-        for r in gov_q.rows
-    ]
+    gov_faults = []
+    for r in gov_q.rows:
+        plain, todo = explain_governor_reason(r["reason"])
+        gov_faults.append((
+            f"spending was blocked \u2014 {plain}", r["n"],
+            f"{todo}  [{r['reason']}]  "
+            + _last_seen(r["last_at"], r["first_at"])))
     stages.append(Stage(
         "researched", "Researched by the model", len(s_res), researched_q,
         drops=drops, faults=gov_faults, entered=len(s_cand),
