@@ -383,12 +383,20 @@ def funnel_panel(db: Db, p: str = "funnel") -> str:
             # seen for days is history and must stop wearing the colour
             # that means something is wrong right now - the owner read a
             # wall of 400s as a live fault days after the bug was fixed.
+            # ONE wrapper around the reason AND its provenance. The <li>
+            # is a two-column grid (2.4em 1fr); a bare text node becomes
+            # an anonymous THIRD grid item, which pushed the provenance
+            # onto a second row and into the 2.4em count column - it
+            # rendered one word per line (owner-reported, with a
+            # screenshot). Wrapping is structural, so the next element
+            # added here cannot fall into the same trap.
             items = "".join(
                 '<li class="'
                 + ("drop-stale" if "may be history" in str(detail) else "drop-live")
-                + f'"><span class="funnel-why-n">{esc(n)}</span> {esc(reason)}'
+                + f'"><span class="funnel-why-n">{esc(n)}</span>'
+                + '<span class="funnel-why-text">' + esc(reason)
                 + (f' <span class="prov">{raw(detail)}</span>' if detail else "")
-                + "</li>"
+                + "</span></li>"
                 for reason, n, detail in stage.drops)
             out.append(
                 f'<div class="funnel-why" id="{p}-drops-{esc(stage.key)}">'
@@ -425,9 +433,10 @@ def funnel_panel(db: Db, p: str = "funnel") -> str:
 
         if stage.faults:
             items = "".join(
-                f'<li><span class="funnel-why-n">{esc(n)}</span> {esc(reason)}'
+                f'<li><span class="funnel-why-n">{esc(n)}</span>'
+                + '<span class="funnel-why-text">' + esc(reason)
                 + (f' <span class="prov">{raw(detail)}</span>' if detail else "")
-                + "</li>"
+                + "</span></li>"
                 for reason, n, detail in stage.faults)
             out.append(
                 f'<div class="funnel-fault" id="{p}-faults-{esc(stage.key)}">'
@@ -485,13 +494,20 @@ def funnel_panel(db: Db, p: str = "funnel") -> str:
         # error is squished in dashboard"). House rule 3 still holds -
         # the raw text is kept verbatim - it just moves one click away,
         # with a readable summary in front of it.
+        # Everything after the count goes in ONE wrapper. This row had
+        # FOUR grid children - count, reason, gist, fold - so the last
+        # two wrapped into the 2.4em count column and rendered a word
+        # per line. That is the same "squished" report from 2026-08-11,
+        # still squished for a second reason after the raw body was
+        # folded away.
         items = "".join(
-            f'<li><span class="funnel-why-n">{esc(n)}</span> {esc(reason)}'
+            f'<li><span class="funnel-why-n">{esc(n)}</span>'
+            + '<span class="funnel-why-text">' + esc(reason)
             + (f'<span class="prov">{esc(_fault_gist(detail))}</span>'
                f'<details class="raw-fold"><summary>the exact response '
                f'from the server</summary><pre>{esc(str(detail)[:4000])}'
                "</pre></details>" if detail else "")
-            + "</li>"
+            + "</span></li>"
             for reason, n, detail in data.feed_faults)
         feed.append(
             f'<div class="funnel-fault" id="{p}-feed-faults">'

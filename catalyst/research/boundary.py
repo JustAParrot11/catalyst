@@ -441,6 +441,13 @@ def investigate(
     tools_offered = tuple(t.get("name", t.get("type", "?")) for t in tools)
 
     turns: list[APITurn] = []
+    # WHICH gate refused, not merely that one did. authorize() separates
+    # cap_exceeded from reconciliation_discrepancy_unacknowledged from
+    # unpriced_cost_rows, and the three have completely different fixes -
+    # raise the budget, click acknowledge, fix a pricing bug. Collapsing
+    # them to a bare "budget_denied" left a funnel of 125 refusals that
+    # could not tell the owner which problem they had (owner-reported).
+    denied_reason: str | None = None
     cost_cents = Decimal("0")
     unpriced: list[str] = []
     transport_errors: list[str] = []
@@ -460,7 +467,7 @@ def investigate(
     def run_turn(payload: dict,
                  *, continuing_pause_turn: bool = False) -> APITurn | None:
         """validate -> authorize -> call -> record -> price. None = stop."""
-        nonlocal cost_cents
+        nonlocal cost_cents, denied_reason
         # BEFORE SPENDING ANYTHING. A payload the API will certainly
         # reject must not consume a paid call and must not come back as
         # a status code the owner has to guess at - it names itself, in
@@ -497,6 +504,8 @@ def investigate(
                              owner_monthly_cap_cents=(
                                  cost_context.owner_monthly_cap_cents))
         if not decision.authorized:
+            denied_reason = ("budget_denied: " + decision.reason
+                             if decision.reason else "budget_denied")
             return None
         try:
             response = transport(payload)
@@ -550,7 +559,7 @@ def investigate(
     })
     if turn is None:
         return finish(None, transport_errors[0] if transport_errors
-                      else "budget_denied")
+                      else (denied_reason or "budget_denied"))
     if unpriced:
         return finish(None, f"usage_unpriced_governor_blocked: {unpriced[0]}")
 
@@ -570,7 +579,7 @@ def investigate(
         }, continuing_pause_turn=True)
         if turn is None:
             return finish(None, transport_errors[0] if transport_errors
-                          else "budget_denied")
+                          else (denied_reason or "budget_denied"))
         if unpriced:
             return finish(
                 None, f"usage_unpriced_governor_blocked: {unpriced[0]}")
@@ -618,7 +627,7 @@ def investigate(
         })
         if turn is None:
             return finish(None, transport_errors[0] if transport_errors
-                          else "budget_denied")
+                          else (denied_reason or "budget_denied"))
         if unpriced:
             return finish(None,
                           f"usage_unpriced_governor_blocked: {unpriced[0]}")

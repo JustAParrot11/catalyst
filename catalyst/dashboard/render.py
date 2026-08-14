@@ -526,6 +526,11 @@ button { background: var(--series-1); color: #fff; border-color: transparent;
   color: var(--muted); }
 .funnel-why-n { font-weight: 700; font-variant-numeric: tabular-nums;
                 color: var(--ink); text-align: right; }
+/* The reason and its provenance, as ONE grid child. min-width: 0 is not
+   decoration: a grid item defaults to min-width:auto and refuses to
+   wrap narrower than its longest unbroken word, so a long machine code
+   would widen the column instead of wrapping inside it. */
+.funnel-why-text { min-width: 0; overflow-wrap: anywhere; }
 /* The machine code beside the sentence: present for grep and for a
    developer, never competing with the English. */
 .funnel-why .prov, .funnel-fault .prov { display: block; margin: 1px 0 0 0;
