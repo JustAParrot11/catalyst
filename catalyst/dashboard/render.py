@@ -542,6 +542,18 @@ button { background: var(--series-1); color: #fff; border-color: transparent;
 /* A zoomed map is WIDER than the panel on purpose: it scrolls sideways
    rather than being squashed back to fit, which would undo the zoom. */
 .chart-scroll { overflow-x: auto; }
+.bundlerow { display: grid; grid-template-columns: 13em 1fr; gap: 12px;
+             align-items: baseline; margin: 6px 0; }
+.bundlebtn { display: inline-block; text-align: center; padding: 5px 10px;
+             border: 1px solid var(--accent); border-radius: 3px;
+             text-decoration: none; color: var(--accent); font-weight: 700;
+             font-size: 12.5px; }
+.bundlebtn:hover { background: var(--accent); color: #fff; }
+.bundlebtn.master { background: var(--accent); color: #fff; }
+/* min-width:0 so the description wraps inside its column rather than
+   widening it - the same grid trap the funnel hit. */
+.bundlewhy { min-width: 0; overflow-wrap: anywhere; color: var(--muted);
+             font-size: 12.5px; }
 /* The chain: one row per step, expandable in place. Reading the story
    top to bottom must not mean losing your place, so a step opens where
    it sits rather than navigating away. */

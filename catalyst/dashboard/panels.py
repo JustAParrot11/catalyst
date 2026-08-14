@@ -2198,13 +2198,30 @@ def maintenance_panel(report, p: str = "maint") -> str:
     # had no way in from the UI, so in practice it did not exist (owner
     # asked where to export logs). `download` makes the browser save it
     # as a file rather than render a wall of JSON.
+    # ONE BUTTON PER QUESTION, plus the master. Owner-asked: "different
+    # type of log collection buttons for different issues e.g. pricing
+    # or logic etc. Then one master log that is all."
+    #
+    # A scoped bundle is not a smaller master bundle for tidiness: it is
+    # the difference between sending a whole-database dump and sending
+    # the rows that bear on the question. Each one says what it covers,
+    # so choosing between them does not require knowing the schema.
+    from catalyst.dashboard.server import DIAGNOSTIC_SCOPES
+
+    out.append(f'<h3 id="{p}-bundle">Collect logs to send on</h3>')
     out.append(
-        f'<p id="{p}-bundle"><a href="/diagnostics.json" download='
-        '"catalyst-diagnostics.json"><b>Download diagnostic bundle</b></a> '
-        "&mdash; one file with the recent logs, every error, the funnel, "
-        "the cost ledger and this page's checks. Safe to send on: keys and "
-        "secrets are stripped out of it twice, once where each value is "
-        "captured and again over the whole file before it is written.</p>")
+        "<p>Pick the one that matches what went wrong. Each downloads a "
+        "single file. <b>Safe to send on</b>: keys and secrets are "
+        "stripped twice &mdash; once where each value is captured, and "
+        "again over the whole file before it is written.</p>")
+    for key in ("all", "pricing", "logic", "data", "execution"):
+        spec = DIAGNOSTIC_SCOPES[key]
+        master = " master" if key == "all" else ""
+        out.append(
+            f'<p class="bundlerow"><a class="bundlebtn{master}" '
+            f'href="/diagnostics.json?scope={key}" '
+            f'download="catalyst-{key}.json">{esc(spec["label"])}</a>'
+            f'<span class="bundlewhy">{esc(spec["why"])}</span></p>')
     out.append(prov(
         "If the page itself will not load, the same file can be produced "
         "on the server with:  sudo -u catalyst /opt/catalyst/venv/bin/python "
