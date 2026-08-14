@@ -368,6 +368,59 @@ class ReconciliationResult:
 
 RECONCILE_REL_THRESHOLD = Decimal("0.10")
 RECONCILE_FLOOR_CENTS = Decimal("5")
+#: Below this, NOTHING pauses spending, whatever the proportion. The
+#: pause test used RECONCILE_FLOOR_CENTS - five cents - against drift
+#: accumulated over a 30-day window, so a month of whole-day billing
+#: figures settling a cent or two away from a real-time local estimate
+#: halted the entire bot until a human clicked acknowledge. It did:
+#: 125 candidates refused across 2026-08-12/13, reported to the owner
+#: as "spending was blocked".
+#:
+#: OWNER DECISION, 2026-08-14 (TRAPS.md): a daily figure is fine and the
+#: budget re-bases the next day, so reconciliation is a correction, not
+#: an alarm. Asked how a discrepancy should behave, the owner chose
+#: "block only if large". This is what large means.
+RECONCILE_PAUSE_FLOOR_CENTS = Decimal("50")
+
+
+def drift_is_material(drift, conn, before, window_total=None) -> bool:
+    """Is accumulated drift big enough to stop the bot?
+
+    Two things must BOTH be true, because either alone gets it wrong:
+
+      - it clears an absolute floor, so a bot that has spent almost
+        nothing never halts on a rounding difference; and
+      - it is a real fraction of what was actually spent in the window,
+        so the same absolute number means what it should at $3/month and
+        at $30/month.
+
+    A fixed number cannot tell those apart, and that is precisely how
+    five cents became a halt condition.
+    """
+    drift = Decimal(drift).copy_abs()
+    if drift <= RECONCILE_PAUSE_FLOOR_CENTS:
+        return False
+    if window_total is None:
+        window_total = _window_spend(conn, before)
+    if window_total <= 0:
+        return True        # drift with no recorded spend to explain it
+    return drift > RECONCILE_REL_THRESHOLD * window_total
+
+
+def _window_spend(conn, before: date) -> Decimal:
+    """What the window's reconciled days actually cost, per the API -
+    the denominator the drift is judged against."""
+    if conn is None:
+        return Decimal("0")
+    try:
+        rows = conn.execute(
+            "SELECT cost_api_total_cents FROM cost_reconciliation_events "
+            "WHERE target_date < ? AND action_taken != 'check_failed' "
+            "ORDER BY target_date DESC LIMIT ?",
+            (before.isoformat(), DRIFT_WINDOW_DAYS)).fetchall()
+    except sqlite3.Error:
+        return Decimal("0")
+    return sum((Decimal(r[0]) for r in rows), Decimal("0"))
 # F1 residual: a systematic sub-floor daily divergence accumulates; the
 # trailing signed drift over this many closed days must also stay under
 # the floor or spend pauses.
@@ -446,7 +499,7 @@ def reconcile_day(
     suspicious_empty = (not page.records) and local_total > 0
     paused = (discrepancy > threshold
               or suspicious_empty
-              or drift.copy_abs() > RECONCILE_FLOOR_CENTS)
+              or drift_is_material(drift, conn, target_date))
     action = "scheduled_paused" if paused else "none"
     _insert_row(api_total, discrepancy, threshold, drift, action, auto_ack=not paused)
 

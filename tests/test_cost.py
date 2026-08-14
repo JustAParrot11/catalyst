@@ -390,21 +390,52 @@ class TestReconciliation:
             "SELECT component FROM cost_reconciliation_events").fetchone()[0])
         assert breakdown == {"scheduled": "100", "manual": "40"}
 
-    def test_cumulative_drift_pauses_even_below_daily_floor(self, tmp_db):
-        """Audit F1 residual: 3c/day divergence passes the daily floor
-        but must accumulate to a pause within the drift window."""
+    def test_cumulative_drift_pauses_when_it_is_MATERIAL(self, tmp_db):
+        """Audit F1 residual, re-scoped by owner decision 2026-08-14.
+
+        The original rule paused on 6c of cumulative drift, because the
+        bound was RECONCILE_FLOOR_CENTS (five cents) against a 30-day
+        window. Live, that halted all spending for a day and refused 125
+        candidates: whole-day billing figures settle a cent or two from
+        a real-time local estimate, so a few cents of drift across a
+        month is the expected state rather than a fault.
+
+        Asked how a discrepancy should behave, the owner chose "block
+        only if large". The guard still fires - a genuine billing fault
+        must stop the bot - but "large" is now measured against what was
+        actually spent, and never below an absolute floor. A drift of a
+        few cents is no longer a halt condition; a drift that is a real
+        fraction of a real bill still is.
+        """
         for i in range(1, 4):
             day = TODAY - timedelta(days=i)
-            insert_cost_row(tmp_db, cents="17",
+            insert_cost_row(tmp_db, cents="2000",
                             at=datetime.combine(day, datetime.min.time(), timezone.utc))
         results = []
         for i in (3, 2, 1):
             day = TODAY - timedelta(days=i)
+            # local 2000c vs api 1600c: a 20% miss, day after day
             results.append(reconcile_day(day, tmp_db,
-                                         lambda d: clean_page([{"amount": "14"}])))
-        assert results[0].action_taken == "none"                # 3c drift, under floor
-        assert results[1].action_taken == "scheduled_paused"    # 6c cumulative > 5c floor
-        assert results[1].cumulative_drift_cents == Decimal("6")
+                                         lambda d: clean_page([{"amount": "1600"}])))
+        assert any(r.action_taken == "scheduled_paused" for r in results), (
+            "a sustained 20% divergence on a real bill must still pause")
+
+    def test_a_few_cents_of_drift_does_NOT_pause(self, tmp_db):
+        """The half that changed, pinned so it cannot creep back."""
+        for i in range(1, 4):
+            day = TODAY - timedelta(days=i)
+            insert_cost_row(tmp_db, cents="2000",
+                            at=datetime.combine(day, datetime.min.time(), timezone.utc))
+        actions = []
+        for i in (3, 2, 1):
+            day = TODAY - timedelta(days=i)
+            # 2c a day against $20 a day - rounding, not a fault
+            actions.append(reconcile_day(
+                day, tmp_db,
+                lambda d: clean_page([{"amount": "1998"}])).action_taken)
+        assert "scheduled_paused" not in actions, (
+            f"{actions} - a few cents against $20/day halted the bot, "
+            "which is the defect the owner reported")
 
     def test_truncated_page_writes_paused_row_before_raising(self, tmp_db):
         """Audit F4 second gap: the refusal must be on the record."""
