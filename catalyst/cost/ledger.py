@@ -35,6 +35,34 @@ def month_to_date_cents(
     return sum((Decimal(r[0]) for r in rows), Decimal("0"))
 
 
+def day_to_date_cents(
+    kind: Literal["scheduled", "manual"],
+    conn: sqlite3.Connection,
+    as_of: date,
+) -> Decimal:
+    """The same figure for ONE day.
+
+    A monthly cap alone bounds the total and not the rate. Three
+    research calls per 15-minute cycle is 288 investigations a day, and
+    at conjunction prices that spends a month's budget in an afternoon
+    and then sits dark for thirty days. cycle.py already records this
+    class happening once ("~51c a cycle, which spends the whole $5
+    monthly cap in under an hour"); the fix applied then bounded repeat
+    attempts on ONE candidate, which does not bound the rate.
+
+    Local ledger only, same as the month: the Cost API cannot see today
+    at any price (TRAPS.md), so a daily gate that consulted it would
+    read zero and pass everything.
+    """
+    day_prefix = as_of.strftime("%Y-%m-%d")
+    rows = conn.execute(
+        "SELECT priced_cents FROM cost_events "
+        "WHERE kind = ? AND date(priced_at) = ? AND priced_cents IS NOT NULL",
+        (kind, day_prefix),
+    ).fetchall()
+    return sum((Decimal(r[0]) for r in rows), Decimal("0"))
+
+
 def lifetime_cents(kind: Literal["scheduled", "manual"], conn: sqlite3.Connection) -> Decimal:
     """All-time priced spend for `kind`. Exists so the $200 one-off build
     budget is enforceable as a LIFETIME ceiling, not a resetting monthly

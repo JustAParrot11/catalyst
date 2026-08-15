@@ -1252,7 +1252,17 @@ class TestBudgetFieldTellsTheTruth:
 
         conn = sqlite3.connect(tmp_path / "g.db")
         conn.executescript(open("catalyst/storage/schema.sql").read())
-        est = CostEstimate(estimated_cents=BASE_CAP_CENTS + Decimal("50"),
+        # UNDER THE DAILY RATE CEILING on purpose: this test is about
+        # the owner's MONTHLY figure replacing the base, and a single
+        # call larger than a whole day's allowance is refused first (and
+        # rightly). See governor.DAILY_CAP_CENTS.
+        # NOTE, because it surprised me while writing this: the daily
+        # rate ceiling ($5/day) is the same figure as the base MONTHLY
+        # cap ($5/month), so under defaults the daily gate can never
+        # bind - the month runs out first. It only starts doing work
+        # once the owner raises the monthly figure, which is exactly the
+        # case this test sets up.
+        est = CostEstimate(estimated_cents=gov.DAILY_CAP_CENTS - Decimal("50"),
                            basis="test", kind="scheduled", component="research")
         d = gov.authorize(est, conn, Decimal("0.10"),
                           owner_monthly_cap_cents=Decimal("2000"))  # $20
