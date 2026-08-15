@@ -18,6 +18,7 @@ import re
 import sys
 import traceback
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -281,8 +282,20 @@ def route_maintenance(db: Db, params: dict) -> str:
         except Exception:  # noqa: BLE001 - unconfigured is a state, not an error
             creds = None
     report = maintenance.build_report(db, creds, run_active=run_active)
+    # The result of a POST to /set-benchmark comes back as a query
+    # parameter so the redirect can be followed and refreshed without
+    # re-submitting the form. The MESSAGE itself is built here from a
+    # code constant, never from the URL - a message rendered out of a
+    # query string is a way to put words on the page from a link.
+    message, failed = "", False
+    if params.get("baseline") == ["ok"]:
+        message = ("Benchmark updated. The figures below and every "
+                   "performance number now compare against it, and the "
+                   "previous baseline is kept in the history.")
     return render_page("Maintenance",
                        panels.maintenance_panel(report, p="maint")
+                       + panels.benchmark_panel(db, p="bench",
+                                                message=message, failed=failed)
                        + panels.schedule_panel(db, p="sched"),
                        "/maintenance", db.path, db=db)
 
@@ -732,6 +745,114 @@ def set_token_price(db_file: str, form: dict) -> tuple[bool, str]:
     return True, "recorded"
 
 
+def set_benchmark(db_file: str, form: dict) -> tuple[bool, str]:
+    """Record an owner-set benchmark baseline: an amount and a date.
+
+    Owner-asked: "I can say track SPY if i were to invest $2000 on a set
+    date and calculate that against our bot."
+
+    EVERY REFUSAL IS A SENTENCE. A hostile or empty value must never
+    reach a traceback, and - the failure that actually costs something -
+    must never be quietly accepted as zero: a baseline of $0 makes every
+    percentage on the dashboard a division by nothing.
+
+    This writes a comparison, not a limit. It cannot change what the bot
+    may spend, how it sizes, or what it trades.
+    """
+    from datetime import date as _date
+
+    from catalyst import benchmark
+    from catalyst.dashboard.panels import (
+        EARLIEST_BASELINE_DATE, MAX_BASELINE_CENTS, MIN_BASELINE_CENTS,
+    )
+    from catalyst.storage import init_db
+
+    raw_amount = str(form.get("amount_usd") or "").strip()
+    if not raw_amount:
+        return False, ("Give the amount you would have put into SPY, in "
+                       "dollars - for example 2000. Nothing was changed.")
+    cleaned = raw_amount.replace("$", "").replace(",", "").replace(" ", "")
+    try:
+        dollars_in = Decimal(cleaned)
+    except (InvalidOperation, ValueError):
+        return False, (f"{raw_amount!r} is not an amount of money. Enter "
+                       "digits, for example 2000 or 2000.50. Nothing was "
+                       "changed.")
+    # Decimal accepts "NaN" and "Infinity" happily, and both would sail
+    # through a > 0 test and poison every figure downstream.
+    if not dollars_in.is_finite():
+        return False, (f"{raw_amount!r} is not a finite amount of money. "
+                       "Nothing was changed.")
+    cents = (dollars_in * 100).quantize(Decimal("1"))
+    if cents <= 0:
+        return False, ("The comparison amount must be more than zero - "
+                       "'what if I had put nothing in SPY' has no answer, "
+                       "and a zero baseline would make every percentage on "
+                       "the dashboard a division by nothing. Nothing was "
+                       "changed.")
+    if cents < MIN_BASELINE_CENTS:
+        return False, (f"${dollars_in} is below the $1 minimum this form "
+                       "accepts. Nothing was changed.")
+    if cents > MAX_BASELINE_CENTS:
+        return False, (f"${dollars_in:,} is above the $10,000,000 maximum "
+                       "this form accepts - that is a guard against a "
+                       "mistyped figure, not a view about your account. "
+                       "Nothing was changed.")
+
+    raw_date = str(form.get("start_date") or "").strip()
+    if not raw_date:
+        return False, ("Give the date you would have bought SPY, as "
+                       "YYYY-MM-DD. Nothing was changed.")
+    try:
+        start = _date.fromisoformat(raw_date)
+    except ValueError:
+        return False, (f"{raw_date!r} is not a date this form can read. Use "
+                       "YYYY-MM-DD, for example 2026-07-01. Nothing was "
+                       "changed.")
+    today = datetime.now(timezone.utc).date()
+    if start > today:
+        return False, (f"{start} is in the future. A benchmark has to start "
+                       "on a day the market has already traded, so the "
+                       f"latest date this accepts is {today}. Nothing was "
+                       "changed.")
+    earliest = _date.fromisoformat(EARLIEST_BASELINE_DATE)
+    if start < earliest:
+        return False, (f"{start} is before {EARLIEST_BASELINE_DATE}. SPY did "
+                       "not exist to buy then, and no bar cache can answer "
+                       "it. Nothing was changed.")
+
+    why = " ".join(str(form.get("reason") or "").split())[:500]
+    reason = (f"set by hand on the Maintenance page: track SPY as if "
+              f"${cents / 100:,.2f} had been invested on {start}. Closed "
+              "trades and API spend before that date are outside the "
+              "comparison.")
+    if why:
+        reason += f" Owner's note: {why}"
+
+    try:
+        # init_db is CREATE TABLE IF NOT EXISTS throughout, so this is a
+        # safe migration for a database made before benchmark_baselines
+        # existed. Without it the owner's only route to a working page
+        # would be an upgrade they cannot run from the browser.
+        conn = init_db(db_file)
+    except Exception as exc:  # noqa: BLE001 - the owner reads this
+        return False, (f"the database at {db_file} could not be opened for "
+                       f"writing: {type(exc).__name__}: {exc}")
+    try:
+        benchmark.record(conn, capital_cents=cents, start_date=start,
+                         source="owner_set", account_fingerprint="",
+                         reason=reason)
+    except Exception as exc:  # noqa: BLE001
+        return False, (f"the baseline could not be written: "
+                       f"{type(exc).__name__}: {exc}")
+    finally:
+        conn.close()
+    return True, (f"Benchmark set: SPY bought with ${cents / 100:,.2f} on "
+                  f"{start}. Every performance figure now compares against "
+                  "that, and the previous baseline is kept in the history "
+                  "below.")
+
+
 def acknowledge(db_file: str, event_id: str, acknowledged_by: str) -> tuple[bool, str]:
     """The one write the dashboard owns. Opens its OWN read-write
     connection - the page-rendering handle is mode=ro and physically
@@ -898,6 +1019,29 @@ class Handler(BaseHTTPRequestHandler):
                             f"<p>{esc(message)}</p>"
                             "<p><a href=\"/costs\">Back to the cost page</a></p>"),
                     "/costs", db.path, db=db)
+            finally:
+                db.close()
+            return self._send_html(400, body)
+
+        if parsed.path == "/set-benchmark":
+            okay, message = set_benchmark(db_file, form)
+            if okay:
+                self.send_response(303)
+                self.send_header("Location", "/maintenance?baseline=ok&check=skip")
+                _no_store_headers(self, "text/plain", 0)
+                self.end_headers()
+                return
+            db = Db(db_file)
+            try:
+                body = render_page(
+                    "Benchmark not changed",
+                    section("bench-fail", "Benchmark not changed",
+                            alarm(esc(message))
+                            + "<p>Nothing was written. The baseline in force "
+                            "is unchanged.</p>"
+                            "<p><a href='/maintenance'>back to the "
+                            "maintenance page</a></p>"),
+                    "/maintenance", db.path, db=db)
             finally:
                 db.close()
             return self._send_html(400, body)

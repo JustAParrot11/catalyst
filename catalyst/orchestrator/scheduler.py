@@ -36,6 +36,12 @@ WAITING_LOG_SECONDS = 300         # how often to repeat "still waiting for setup
 _log = logging.getLogger("catalyst.scheduler")
 _stop = threading.Event()
 
+#: Set to cut the sleep between cycles short. The signal handler sets it
+#: (so a stop is not waited out) and so does the setup page the moment
+#: credentials are saved or replaced - a swapped Alpaca key should be
+#: noticed in seconds, not on whatever quarter-hour boundary comes next.
+_wake = threading.Event()
+
 
 def configure_logging(level: str | None = None) -> None:
     """Log to stdout for the journal, with the redacting filter installed
@@ -112,6 +118,27 @@ def db_path() -> str:
     return os.environ.get("CATALYST_DB", DEFAULT_DB)
 
 
+def _credentials_changed(which: str = "all") -> None:
+    """The setup page just saved or replaced credentials.
+
+    Runs on the web server's thread, so it does the smallest possible
+    thing: it says so in the log and cuts the sleep short. The next
+    cycle - a second or two away rather than up to fifteen minutes -
+    reloads the file, reads the account those keys actually point at,
+    and strikes the benchmark baseline if it is a different account
+    (`_sync_benchmark_baseline`). Keeping the broker read on the trading
+    loop means there is exactly ONE place that decides the baseline, and
+    a browser request can never hang on Alpaca being slow.
+
+    No credential value is passed in, and none is read here.
+    """
+    _log.info(
+        "New details saved from the setup page (%s). Checking straight away "
+        "which broker account they belong to, rather than waiting for the "
+        "next scheduled pass.", which)
+    _wake.set()
+
+
 def start_setup_server() -> threading.Thread | None:
     """Serve the setup/first-run page in the background.
 
@@ -124,14 +151,25 @@ def start_setup_server() -> threading.Thread | None:
     host = os.environ.get("CATALYST_BIND", DEFAULT_BIND)
     port = int(os.environ.get("CATALYST_PORT", DEFAULT_PORT))
     try:
+        # OWNER-ASKED: "when I change the Alpaca keys i want it to
+        # register there is a new account". The cycle below reloads the
+        # credentials file every pass, so a swap is picked up anyway -
+        # but up to fifteen minutes later, during which the page still
+        # shows the old account's comparison and the owner reasonably
+        # concludes nothing happened. Waking the loop turns that into
+        # seconds. It deliberately does NO work on the web thread: no
+        # broker call, no database write, nothing that can make pressing
+        # Save hang on an unreachable Alpaca.
         # The full dashboard IS the service's web face (BUILD-BRIEF calls
         # it not optional; stress stage-8 E2 found only the setup form was
         # served). SetupApp mounts at /setup; an unconfigured system's
         # "/" redirects there so install.sh's printed link still lands on
         # the form.
         from catalyst.dashboard.server import make_server as make_dash_server
-        server = make_dash_server(host, port, db_path(),
-                                  setup_app=SetupApp(path_prefix="/setup"))
+        server = make_dash_server(
+            host, port, db_path(),
+            setup_app=SetupApp(path_prefix="/setup",
+                               on_credentials_changed=_credentials_changed))
     except OSError as exc:
         # Actionable, because the owner is not a developer (owner report
         # 2026-08-10: the old message named no command and no culprit).
@@ -160,6 +198,7 @@ def start_setup_server() -> threading.Thread | None:
 def _handle_signal(signum, _frame) -> None:
     _log.info("Received signal %s - shutting down cleanly.", signum)
     _stop.set()
+    _wake.set()      # do not sit out the rest of the sleep first
 
 
 def _anthropic_transport(api_key: str):
@@ -309,18 +348,32 @@ def _maybe_reconcile_yesterday(db_file: str) -> None:
         conn.close()
 
 
-def _maybe_refresh_benchmark(state: dict) -> None:
+def _maybe_refresh_benchmark(state: dict | None, *, force: bool = False) -> None:
     """Keep the SPY comparison series current, once a day.
 
     The dashboard's headline is performance against the S&P net of
     costs; `data/` is gitignored, so a fresh install arrives with no
     benchmark at all, and nothing else in the running bot ever writes
     the cache. Failures are logged and never reach the trading loop -
-    a stale benchmark is a reporting problem, not a trading one."""
+    a stale benchmark is a reporting problem, not a trading one.
+
+    `force=True` ignores the once-a-day guard. It is used when the
+    benchmark BASELINE changes - a new broker account restarts the
+    comparison from today, and indexing a brand-new window against bars
+    that stopped four days ago is how a restarted comparison reads as
+    "no data". Note what force does NOT do: it never clears the cache.
+    The bars are raw SPY closes on a fixed basis (feed + adjustment,
+    pinned in cache metadata), so they are true regardless of which
+    account is connected; only the day the comparison is indexed FROM
+    moves. Wiping and re-fetching a decade of history to change an
+    index base would be work for nothing, and would throw away the one
+    thing an unentitled account cannot get back.
+    """
     from datetime import datetime, timezone
 
+    state = {} if state is None else state
     today = datetime.now(timezone.utc).date()
-    if state.get("benchmark_day") == today:
+    if state.get("benchmark_day") == today and not force:
         return
     state["benchmark_day"] = today
     try:
@@ -342,6 +395,123 @@ def _maybe_refresh_benchmark(state: dict) -> None:
                 result.skipped_reason, (result.raw_response or "")[:500])
     except Exception:  # noqa: BLE001 - reporting must never stop trading
         _log.exception("The benchmark refresh failed; trading is unaffected.")
+
+
+def _dollars(cents) -> str:
+    """Cents (a Decimal, or its string form) as money the owner reads."""
+    from decimal import Decimal as _D
+    try:
+        return f"${_D(str(cents)) / 100:,.2f}"
+    except Exception:  # noqa: BLE001 - a figure we cannot format is still a fact
+        return f"{cents} cents"
+
+
+def _announce_new_baseline(before, after) -> None:
+    """Say, in plain English, that the comparison has just restarted.
+
+    The owner is not a developer. "baseline source=account_changed" is
+    an event code; what they need to read is what happened, what it
+    means for the numbers on the page, and what was NOT lost. The
+    benchmark row already carries a written reason - it is quoted here
+    rather than paraphrased, so the log line and the page agree.
+
+    The only identifier in any of this is the account FINGERPRINT: a
+    truncated one-way hash of the broker's account id. No key, no
+    secret, and nothing that can be turned back into either.
+    """
+    old_fp = before.account_fingerprint or "(none recorded yet)"
+    if after.source == "first_run":
+        _log.info(
+            "THE SPY COMPARISON IS NOW SET AGAINST YOUR REAL ACCOUNT.\n"
+            "  What happened: the bot read your broker account for the first "
+            "time, and used what that account is actually worth instead of "
+            "the placeholder figure it shows before it has ever connected.\n"
+            "  What it means: from %s, \"how would the same money have done "
+            "in the S&P 500 instead\" means buying %s of SPY on that day. "
+            "Every performance figure on the page is measured against "
+            "that.\n"
+            "  Account fingerprint: %s. That is a short one-way hash of your "
+            "account number - never a key or a password, and safe to quote "
+            "if you ask anyone for help.\n"
+            "  Recorded reason: %s",
+            after.start_date, _dollars(after.capital_cents),
+            after.account_fingerprint, after.reason)
+        return
+    _log.info(
+        "YOUR BROKER ACCOUNT HAS CHANGED, SO THE S&P COMPARISON HAS STARTED "
+        "AGAIN FROM TODAY.\n"
+        "  What happened: the Alpaca details now in use belong to a "
+        "different account from the one the comparison was set up for.\n"
+        "  Account fingerprint: %s -> %s. Those are short one-way hashes of "
+        "the account numbers - never keys or passwords, and safe to quote if "
+        "you ask anyone for help.\n"
+        "  What it means: from %s the bot is measured against buying %s of "
+        "SPY, which is what the new account is actually worth. Measuring a "
+        "new account's profit against the old account's starting money "
+        "would be arithmetic on two different things, so the comparison "
+        "starts again rather than carrying on.\n"
+        "  What is NOT lost: the old baseline stays in the history with the "
+        "reason it was replaced, and no trade, cost or log record is "
+        "touched. The SPY price history is kept as it is - it is the same "
+        "SPY either way; only the day the comparison counts from has "
+        "moved.\n"
+        "  Recorded reason: %s",
+        old_fp, after.account_fingerprint, after.start_date,
+        _dollars(after.capital_cents), after.reason)
+
+
+def _sync_benchmark_baseline(conn, broker, daily_state: dict | None = None,
+                             *, today=None) -> bool:
+    """Notice a swapped broker account, and restart the SPY tracker.
+
+    OWNER-ASKED: "when I change the Alpaca keys i want it to register
+    there is a new account and restart the SPY tracker."
+
+    Called once per cycle from `_run_one_cycle`, off its own confirmed
+    `get_account()` read. `benchmark.sync_with_account` is idempotent
+    and does nothing at all unless the account is genuinely different,
+    so calling it every pass costs one Alpaca request (free, and one
+    request against a 200/minute ceiling) and one indexed SELECT.
+
+    WHY THE READ IS HERE AND NOT IN THE CYCLE. `cycle.build_portfolio_
+    state` already has a confirmed account read, and reusing it would
+    save the request - but that is risk code under human review, and a
+    reporting feature is not a reason to touch it. The scheduler owns
+    the broker object it built, so it can ask for itself.
+
+    Never raises. A baseline is reporting: a broker that will not answer
+    means the baseline stays exactly as it was, which is the honest
+    outcome anyway - striking a new one from a read that failed would
+    invent a comparison out of nothing.
+    """
+    from catalyst import benchmark
+
+    try:
+        account = broker.get_account()
+    except Exception:  # noqa: BLE001 - any broker failure, same answer
+        _log.debug(
+            "The broker account could not be read this cycle, so the "
+            "benchmark baseline was left exactly as it was.", exc_info=True)
+        return False
+
+    try:
+        before = benchmark.current(conn)
+        after, changed = benchmark.sync_with_account(conn, account, today)
+    except Exception:  # noqa: BLE001 - reporting must never stop trading
+        _log.exception(
+            "The benchmark baseline could not be checked against the broker "
+            "account. Trading is unaffected and the baseline is unchanged.")
+        return False
+
+    if not changed:
+        return False
+
+    _announce_new_baseline(before, after)
+    # Bring the SPY bars up to date NOW rather than tomorrow: the new
+    # baseline indexes from today, and a cache that last updated four
+    # days ago has nothing in that window to index against.
+    _maybe_refresh_benchmark(daily_state, force=True)
+    return True
 
 
 def _owner_cap_cents(budget_usd):
@@ -373,9 +543,14 @@ def _owner_cap_cents(budget_usd):
     return cents
 
 
-def _run_one_cycle(db_file: str):
+def _run_one_cycle(db_file: str, daily_state: dict | None = None):
     """Wire the live dependencies and run exactly one cycle. Thin by
-    design: every piece here is constructed, none is decided."""
+    design: every piece here is constructed, none is decided.
+
+    `daily_state` is the loop's once-a-day marker dictionary. It is
+    passed in so a benchmark baseline change can force the SPY refresh
+    it invalidates, rather than waiting for tomorrow's marker to lapse.
+    """
     import sqlite3
 
     from catalyst.data.form4_adapter import flatten_form4_events
@@ -539,6 +714,11 @@ def _run_one_cycle(db_file: str):
 
     conn = sqlite3.connect(db_file)
     try:
+        # Whose account is this? Asked BEFORE the cycle trades, so the
+        # answer is recorded even if the pass later fails, and so the
+        # performance page is never quietly comparing a new account
+        # against the old account's starting money.
+        _sync_benchmark_baseline(conn, broker, daily_state)
         owner_cap = _owner_cap_cents((creds.settings or {}).get("monthly_budget_usd"))
         return run_cycle(conn, broker, transport, feed,
                          build_candidates_all, cluster,
@@ -682,10 +862,14 @@ def main(argv: list[str] | None = None) -> int:
             _log.info("Setup is complete. Trading cycles are running.")
             announced_ready = True
 
+        # Cleared BEFORE the pass, never after: credentials saved WHILE a
+        # cycle is running must still shorten the sleep that follows it,
+        # and clearing afterwards would throw that signal away.
+        _wake.clear()
         try:
             _maybe_reconcile_yesterday(path)
             _maybe_refresh_benchmark(_daily_state)
-            report = _run_one_cycle(path)
+            report = _run_one_cycle(path, _daily_state)
             if report.kill_switch.tripped:
                 _log.warning("Kill switch tripped: %s. New entries are "
                              "blocked; protective duties still ran.",
@@ -697,7 +881,13 @@ def main(argv: list[str] | None = None) -> int:
 
         if once:
             return 0
-        _stop.wait(cycle_seconds)
+        # Sleep until the next pass, OR until something wakes us: a
+        # shutdown signal, or the owner saving new credentials on the
+        # setup page. Waiting the full quarter of an hour after a key
+        # swap is how "it did not notice my new account" happens - it
+        # had noticed, fourteen minutes later, with nothing on screen
+        # in between.
+        _wake.wait(cycle_seconds)
 
     return 0
 

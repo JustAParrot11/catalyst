@@ -668,6 +668,7 @@ class SetupApp:
         credentials_path: str | None = None,
         path_prefix: str = "",
         on_saved: Callable[[], None] | None = None,
+        on_credentials_changed: Callable[[str], None] | None = None,
         alpaca_tester: Callable[..., tuple[bool, str]] | None = None,
         anthropic_tester: Callable[..., tuple[bool, str]] | None = None,
         admin_tester: Callable[..., tuple[bool, str]] | None = None,
@@ -676,12 +677,37 @@ class SetupApp:
         self.credentials_path = credentials_path
         self.path_prefix = path_prefix.rstrip("/")
         self.on_saved = on_saved
+        # Fires on EVERY write that changes a stored credential - the
+        # first save and each later replacement. `on_saved` cannot serve
+        # here: it means "setup finished" and is deliberately not called
+        # when one key is swapped on an already-configured machine,
+        # which is exactly when the broker account is most likely to
+        # have changed underneath the bot.
+        self.on_credentials_changed = on_credentials_changed
         self.alpaca_tester = alpaca_tester or creds.test_alpaca
         self.anthropic_tester = anthropic_tester or creds.test_anthropic
         self.admin_tester = admin_tester or creds.test_admin_key
         self.require_token = require_token
 
     # -- helpers ---------------------------------------------------------
+
+    def _announce_credentials_changed(self, which: str) -> None:
+        """Tell the service that a stored credential just changed.
+
+        NO VALUE IS PASSED, only which of them moved. The listener
+        re-reads the credentials file itself; a callback that carried a
+        key would put one into a stack frame - and, on any exception,
+        into a traceback - for no gain at all.
+
+        Never raises into the request: a listener that fails must not
+        turn a successful save into an error on the owner's screen.
+        """
+        if self.on_credentials_changed is None:
+            return
+        try:
+            self.on_credentials_changed(which)
+        except Exception:  # noqa: BLE001 - the save already succeeded
+            _log.exception("the credentials-changed listener failed")
 
     def _stored_token(self) -> str:
         try:
@@ -922,6 +948,11 @@ class SetupApp:
                 "message": "Nothing was changed. " + str(exc),
             }, cookie)
 
+        # New broker keys can mean a different broker ACCOUNT, and the
+        # bot's whole comparison against the S&P is struck against one
+        # specific account's money on one specific day. The listener
+        # makes it check now instead of on the next quarter-hour.
+        self._announce_credentials_changed(which)
         return _json(200, {
             "ok": True,
             "fingerprints": creds.load_credentials(
@@ -1117,6 +1148,7 @@ class SetupApp:
                 self.on_saved()
             except Exception:  # noqa: BLE001 - a callback must not break setup
                 _log.exception("post-setup callback failed")
+        self._announce_credentials_changed("all")
 
         stored = creds.load_credentials(self.credentials_path)
         fp = stored.fingerprints().get("anthropic_admin_key") or ""

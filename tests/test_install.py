@@ -1102,7 +1102,9 @@ def test_scheduler_survives_a_failing_cycle_and_says_so(tmp_path, monkeypatch, c
     monkeypatch.setenv("CATALYST_DB", str(tmp_path / "state" / "catalyst.db"))
     monkeypatch.setattr(scheduler, "start_setup_server", lambda: None)
 
-    def boom(db_file):
+    def boom(db_file, daily_state=None):
+        # daily_state: the loop's once-a-day markers, passed so a changed
+        # benchmark baseline can force the SPY refresh it invalidates.
         raise RuntimeError("wired pipeline exploded for the test")
 
     monkeypatch.setattr(scheduler, "_run_one_cycle", boom)
