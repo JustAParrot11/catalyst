@@ -88,6 +88,24 @@ CREATE TABLE IF NOT EXISTS limit_applications (
     binding         INTEGER NOT NULL
 );
 
+-- WHY A BOUND LANDED WHERE IT DID, in a sentence.
+--
+-- Its own table rather than a seventh column on limit_applications,
+-- for the same reason entry_market_context is its own table: that one
+-- is written with positional INSERTs in a great many places, and a new
+-- column silently shifts every one of them. (Learned by doing it the
+-- other way first and breaking 157 tests at once.)
+--
+-- Needed at all because a bound derived from the stock's own measured
+-- history no longer explains itself: "per_stock_stop_width 0.08 vs
+-- 0.50" is not an answer to "why is this position that size".
+CREATE TABLE IF NOT EXISTS limit_application_notes (
+    decision_id TEXT NOT NULL REFERENCES risk_decisions(id),
+    rule_name   TEXT NOT NULL,
+    note        TEXT NOT NULL,
+    PRIMARY KEY (decision_id, rule_name)
+);
+
 CREATE TABLE IF NOT EXISTS refusals (
     decision_id      TEXT NOT NULL REFERENCES risk_decisions(id),
     candidate_id     TEXT NOT NULL REFERENCES candidates(id),

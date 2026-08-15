@@ -784,7 +784,8 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
         return run_cycle(conn, broker, transport, feed,
                          build_candidates_all, cluster,
                          account_mode=account_mode,
-                         owner_monthly_cap_cents=owner_cap)
+                         owner_monthly_cap_cents=owner_cap,
+                         bars_dir=os.environ.get("CATALYST_BARS", "data/bars"))
     finally:
         conn.close()
         broker.close()

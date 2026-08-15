@@ -550,7 +550,8 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
               entry_poll_attempts: int = 5,
               entry_poll_interval_s: float = 1.0,
               account_mode: str = "paper",
-              owner_monthly_cap_cents=None) -> CycleReport:
+              owner_monthly_cap_cents=None,
+              bars_dir: str | None = None) -> CycleReport:
     now = now or datetime.now(timezone.utc)
     cycle_id = str(uuid.uuid4())
     params = current_values(conn)
@@ -800,8 +801,14 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
         researched += 1
 
         cluster_key = cluster_keys.get(c.id) or _fallback_cluster_key(c)
+        # bars_dir lets sizing read the CANDIDATE'S OWN gap and volatility
+        # history instead of only its catalyst category's assumption. It
+        # reads the local bar cache, so it costs no API call, and it
+        # falls back to the category value for any ticker not cached -
+        # which is the conservative direction, since the category value
+        # is the ceiling.
         decision = evaluate(c, log.parsed_view, portfolio, params, market,
-                            cluster_key=cluster_key)
+                            cluster_key=cluster_key, bars_dir=bars_dir)
         decision_id = _persist_decision(conn, decision, cluster_key)
         if decision.action == "skip":
             conn.execute(
@@ -1079,6 +1086,11 @@ def _persist_decision(conn, decision, cluster_key: str) -> str:
             "INSERT INTO limit_applications VALUES (?,?,?,?,?,?)",
             (decision_id, lim.rule_name, str(lim.bound_value),
              str(lim.requested_value), lim.bound_type, int(lim.binding)))
+        if getattr(lim, "note", ""):
+            conn.execute(
+                "INSERT OR REPLACE INTO limit_application_notes "
+                "(decision_id, rule_name, note) VALUES (?,?,?)",
+                (decision_id, lim.rule_name, lim.note))
     conn.commit()
     return decision_id
 
