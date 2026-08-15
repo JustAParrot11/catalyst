@@ -357,3 +357,26 @@ CREATE TABLE IF NOT EXISTS edgar_filings (
 );
 CREATE INDEX IF NOT EXISTS idx_edgar_filings_fetched
     ON edgar_filings (fetched_at);
+
+-- The benchmark BASELINE: what "the same money in SPY instead" means.
+--
+-- START_CAPITAL_CENTS was a constant, so the whole comparison assumed
+-- $1,000 forever. Change the Alpaca account and every performance
+-- figure silently compares a different account against the old base.
+--
+-- Append-only, exactly like adaptive_param_log: the current baseline is
+-- the latest row, so the audit trail and the live state cannot disagree
+-- because they ARE the same rows. Every change records WHY.
+CREATE TABLE IF NOT EXISTS benchmark_baselines (
+    id                  TEXT PRIMARY KEY,
+    capital_cents       TEXT NOT NULL,      -- what SPY is bought with
+    start_date          TEXT NOT NULL,      -- the day it is bought
+    source              TEXT NOT NULL CHECK (source IN
+                            ('first_run', 'account_changed', 'owner_set')),
+    account_fingerprint TEXT NOT NULL,      -- hash of the broker account id,
+                                            -- NEVER a key or a secret
+    reason              TEXT NOT NULL,
+    set_at              TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_benchmark_baselines_at
+    ON benchmark_baselines (set_at DESC);
