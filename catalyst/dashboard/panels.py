@@ -10,7 +10,7 @@ import re
 from decimal import Decimal
 
 from catalyst.dashboard import charts, queries
-from catalyst.dashboard.db import Db, START_CAPITAL_CENTS, jload
+from catalyst.dashboard.db import Db, jload
 from catalyst.discovery.conjunctions import sector_band
 from catalyst.dashboard.render import (
     BAKEOFF_CAVEAT,
@@ -44,8 +44,80 @@ from catalyst.dashboard.render import (
 # --------------------------------------------------------------------------
 
 
+def _baseline_words(base) -> str:
+    """Where the comparison's money and start date came from, in one
+    phrase. Never "$1,000" with no attribution: on this page a figure
+    that cannot say where it came from is not allowed to exist."""
+    return {
+        "owner_set": "you set this on the Maintenance page",
+        "first_run": "struck from the broker account's own equity the "
+                     "first time it was read",
+        "account_changed": "the connected Alpaca account changed, so the "
+                           "comparison restarted from its equity",
+        "unset": "PLACEHOLDER - nothing has been recorded, so this is the "
+                 "documented fallback rather than a decision",
+    }.get(base.source, f"recorded with source {base.source}")
+
+
+def _baseline_block(perf, p: str) -> str:
+    """What SPY is bought with, from when, and why - stated, not assumed.
+
+    This used to be a constant (START_CAPITAL_CENTS = 100_000) behind
+    every figure on this panel. A $2,000 account against a $1,000 base is
+    wrong by 100% in whichever direction flatters or damns at random, and
+    nothing on the page would have said so.
+    """
+    base = perf.baseline
+    if base is None:
+        return ""
+    body = []
+    if base.is_placeholder:
+        # Not an alarm: on a fresh install this is the correct state and
+        # it fixes itself the first time the broker is read. It is a
+        # note, because presenting a placeholder as a decision is the
+        # thing the brief forbids.
+        body.append(note(
+            f'<b id="{p}-baseline-placeholder">Every figure here is measured '
+            f"against a PLACEHOLDER of {dollars(base.capital_cents)}, not "
+            "against a real baseline.</b> No broker account has been read "
+            "and none has been set by hand, so the dashboard is using "
+            "<code>benchmark.FALLBACK_CAPITAL_CENTS</code>. It is replaced "
+            "automatically the first time the bot reads the Alpaca account, "
+            "or immediately if you set one on the "
+            '<a href="/maintenance#bench-section">Maintenance page</a>. '
+            f"Reason recorded: <code>{esc(base.reason)}</code>"))
+    else:
+        body.append(prov(
+            f"Baseline: {dollars(base.capital_cents)} from "
+            f"{base.start_date}, source '{base.source}' ({_baseline_words(base)}), "
+            f"recorded {base.set_at or 'time not recorded'}"
+            + (f", account fingerprint {base.account_fingerprint}"
+               if base.account_fingerprint else "")
+            + f". Why: {base.reason}"))
+    if perf.excluded_trades or perf.excluded_cost_cents:
+        # Money that was really made and really spent does not get to
+        # vanish because a new baseline was struck. It is outside the
+        # window, and the page says so with the numbers.
+        body.append(note(
+            f'<b id="{p}-baseline-excluded">'
+            f"{perf.excluded_trades} closed trade(s) and "
+            f"{dollars(perf.excluded_cost_cents)} of API spend are dated "
+            f"before {base.start_date} and are OUTSIDE this comparison.</b> "
+            f"Their realised P&amp;L was {dollars(perf.excluded_pnl_cents)}. "
+            "A baseline struck from a broker read already contains the "
+            "profit that account has banked, so counting those trades again "
+            "would book the same money twice. They are still on the "
+            '<a href="/chain">decisions</a> page, and the older baseline '
+            'is still in the history on the <a href="/maintenance'
+            '#bench-section">Maintenance page</a>.'))
+    return "".join(body)
+
+
 def performance_panel(db: Db, p: str = "perf") -> str:
     perf = queries.performance(db)
+    base = perf.baseline
+    start_dollars = float(perf.start_capital_cents) / 100.0
+    start_text = f"${start_dollars:,.0f}"
     out = []
 
     if perf.bot_points:
@@ -68,7 +140,8 @@ def performance_panel(db: Db, p: str = "perf") -> str:
             f"{esc(perf.start_day)}, bot line net of all API spend.</p>"
         )
         bot_text = (f"bot index {perf.bot_index:.2f} "
-                    f"(= {dollars(perf.net_equity_cents)} on a $1,000 start)")
+                    f"(= {dollars(perf.net_equity_cents)} on a {start_text} "
+                    f"start)")
         if perf.spy_index is not None:
             spy_text = f"SPY index {perf.spy_index:.2f}"
         elif perf.spy_window_too_short:
@@ -103,12 +176,18 @@ def performance_panel(db: Db, p: str = "perf") -> str:
                          f"{esc(signed_pp(excess_v))}</span>")
         headline_sub = f"{pill(state, word)} exposure-matched, net of API spend"
         equity_tile = dollars(perf.net_equity_cents)
-        equity_sub = f"from $1,000 at {esc(perf.start_day)}"
+        equity_sub = (
+            (f"{pill('idle', 'placeholder baseline')} " if perf.baseline_is_placeholder
+             else f"{pill('good', 'baseline ' + esc(base.source).replace('_', ' '))} ")
+            + f"from {start_text} at {esc(perf.start_day)}")
     else:
         headline_tile = "&mdash;"
         headline_sub = f"{pill('idle', 'no closed trades yet')} nothing to compare"
-        equity_tile = "&mdash;"
-        equity_sub = "no equity series recorded yet"
+        equity_tile = dollars(perf.net_equity_cents)
+        equity_sub = (
+            (f"{pill('idle', 'placeholder baseline')} " if perf.baseline_is_placeholder
+             else f"{pill('good', 'baseline ' + esc(base.source).replace('_', ' '))} ")
+            + f"{start_text} baseline, no equity series yet")
     sample_state = ("good" if perf.n_closed >= MIN_TRADES_FOR_MEANING
                     else ("idle" if perf.n_closed == 0 else "warn"))
     out.append(tiles(f"{p}-tiles", [
@@ -118,6 +197,9 @@ def performance_panel(db: Db, p: str = "perf") -> str:
          f"{pill(sample_state, f'{perf.n_closed} of {MIN_TRADES_FOR_MEANING}')} "
          "needed before any number here means anything"),
     ]))
+
+    # WHAT THE COMPARISON IS AGAINST, before any number is read.
+    out.append(_baseline_block(perf, p))
 
     # Sample-size honesty, first, before any number is read as a verdict.
     if perf.n_closed < MIN_TRADES_FOR_MEANING:
@@ -164,12 +246,26 @@ def performance_panel(db: Db, p: str = "perf") -> str:
         x_labels = [(xs[0].toordinal(), str(xs[0])),
                     (mid.toordinal(), str(mid)),
                     (xs[-1].toordinal(), str(xs[-1]))]
-        out.append(charts.index_chart(series, chart_id=f"{p}-chart", x_labels=x_labels))
+        out.append(charts.index_chart(
+            series, chart_id=f"{p}-chart", x_labels=x_labels,
+            start_capital_dollars=start_dollars,
+            y_axis_title=("Index (start = 100)  |  % move  |  "
+                          f"$ on a {start_text} account")))
         out.append(prov(
             "Y axis reads three ways on every tick: index (start=100), the same move "
-            "in per cent, and the dollar value on the fixed $1,000 account. "
-            "100 on this chart is $1,000, not a bug."
+            f"in per cent, and the dollar value on the {start_text} baseline. "
+            f"100 on this chart is {start_text}, not a bug. The dollar column "
+            "follows the baseline, so it changes when the baseline does."
         ))
+        if perf.flat_since_baseline:
+            out.append(note(
+                f'<b id="{p}-flat">The bot line is flat on purpose.</b> '
+                f"Nothing has closed and nothing has been billed since the "
+                f"baseline was struck on {esc(base.start_date)}, so realised "
+                "equity has not moved. SPY has. That gap is the comparison "
+                "working, not a missing series - open positions are not "
+                "marked into this line, which is why the broker's own figure "
+                "below can differ."))
     else:
         # Draw the empty chart AS a chart. A blank gap where a graph
         # belongs reads as a broken page; the frame plus a plain-English
@@ -191,8 +287,13 @@ def performance_panel(db: Db, p: str = "perf") -> str:
         ))
 
     # The arithmetic, spelled out.
+    baseline_label = (
+        "starting capital (PLACEHOLDER - no baseline recorded)"
+        if perf.baseline_is_placeholder else
+        f"starting capital, baseline of {esc(base.start_date)} "
+        f"({esc(base.source).replace('_', ' ')})")
     rows = [
-        ["starting capital (fixed, CLAUDE.md)", dollars(START_CAPITAL_CENTS)],
+        [baseline_label, dollars(perf.start_capital_cents)],
         [f"realised P&amp;L, {perf.n_closed} closed trades "
          f"({perf.n_closed_live} live / {perf.n_closed_paper} paper)",
          dollars(perf.gross_pnl_cents)],
@@ -203,7 +304,8 @@ def performance_panel(db: Db, p: str = "perf") -> str:
     out.append(table(f"{p}-arithmetic", ["component", "amount"], rows, numeric_cols={1}))
     out.append(prov(
         "Provenance: realised P&L is from closed_trades.realized_pnl_cents "
-        f"({perf.closed_q.row_count} rows, whole history). API spend is the LOCAL "
+        f"({perf.closed_q.row_count} rows read, {perf.n_closed} of them inside "
+        f"the baseline window). API spend is the LOCAL "
         f"ledger, priced by cost.tracker.price() from stored raw usage objects "
         f"({perf.costs_q.row_count} priced cost_events rows) - locally priced, not "
         "billed; the billed figure appears on the Cost page for closed days only."
@@ -580,8 +682,20 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
     c = queries.cost_panel(db)
     out = []
 
-    base_hurdle = float(c.base_cap_cents) * 12 / START_CAPITAL_CENTS * 100
-    max_hurdle = float(c.max_cap_cents) * 12 / START_CAPITAL_CENTS * 100
+    # THE HURDLE IS A FRACTION OF THE ACCOUNT, so it moves when the
+    # account does. £20/month is 30% a year on $1,000 and 15% on $2,000 -
+    # the same bill against a different account is a different bar, and
+    # the page has to say which account it divided by.
+    base = queries.baseline(db)
+    account_cents = float(base.capital_cents) or 1.0
+    account_text = f"${account_cents / 100:,.0f}"
+    account_basis = (
+        f"{account_text} account (PLACEHOLDER baseline - no account has been "
+        "read and none has been set)" if base.is_placeholder else
+        f"{account_text} account (baseline of {base.start_date}, "
+        f"{base.source.replace('_', ' ')})")
+    base_hurdle = float(c.base_cap_cents) * 12 / account_cents * 100
+    max_hurdle = float(c.max_cap_cents) * 12 / account_cents * 100
 
     # Tiles first: the three numbers that decide whether this is viable.
     total_mtd = c.scheduled_mtd_cents + c.manual_mtd_cents
@@ -594,7 +708,8 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
          f"{pill(cap_state, f'{cap_used:.0f}% of the ${c.base_cap_cents / 100:.0f} cap')} "
          "locally priced from stored raw usage"),
         ("Annual hurdle at the cap", f"{base_hurdle:.1f}%",
-         "what the strategy must beat before a trade counts as good"),
+         f"{pill('idle', 'on the ' + account_text + ' baseline')} what the "
+         "strategy must beat before a trade counts as good"),
         _daily_ceiling_tile(db, c),
         ("Spend this month, all kinds", dollars(total_mtd),
          f"scheduled {dollars(c.scheduled_mtd_cents)} + manual "
@@ -615,13 +730,12 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
             "the one you chose.</b> This is NOT the same as having entered "
             f"nothing. Raw error: <code>{esc(c.creds_error)}</code>"))
     elif c.cap_source == "_owner_set":
-        hurdle = float(c.base_cap_cents) * 12 / 100 / 1000 * 100
         out.append(ok(
             f'<span id="{p}-cap-source">The cap above is <b>your</b> figure: '
             f"{dollars(c.base_cap_cents)} a month, saved on the settings page "
-            f"and enforced by the governor. That is {hurdle:.1f}% a year on a "
-            "$1,000 account - the return the strategy has to beat before a "
-            "trade counts as good. Separately, the bot may add to its own "
+            f"and enforced by the governor. That is {base_hurdle:.1f}% a year "
+            f"on a {account_text} account - the return the strategy has to "
+            "beat before a trade counts as good. Separately, the bot may add to its own "
             f"budget out of banked profit, never past {dollars(c.max_cap_cents)} "
             "on its own.</span>"))
     elif c.cap_source == "_hard_capped":
@@ -734,7 +848,7 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
         f"Panel arithmetic cross-check: {c.ledger_crosscheck}."
     ))
     out.append(prov(
-        f"Annual hurdle on the $1,000 account, computed from the CAP (a constant, "
+        f"Annual hurdle on the {account_basis}, computed from the CAP (a constant, "
         f"not a projection): base scheduled cap {dollars(c.base_cap_cents)}/month = "
         f"{base_hurdle:.1f}%/yr; hard ceiling {dollars(c.max_cap_cents)}/month = "
         f"{max_hurdle:.1f}%/yr. Observed spend is deliberately NOT annualised from "
@@ -2462,6 +2576,179 @@ def maintenance_panel(report, p: str = "maint") -> str:
 
 
 # --------------------------------------------------------------------------
+# The benchmark baseline: what "the same money in SPY" means, and setting it
+# --------------------------------------------------------------------------
+
+
+#: Bounds on an owner-entered baseline. Not risk limits - this figure
+#: places no order and sizes nothing. They exist so a slip of the
+#: keyboard produces a sentence instead of a comparison against $0 or
+#: against a hundred million dollars.
+MIN_BASELINE_CENTS = 100                    # $1
+MAX_BASELINE_CENTS = 1_000_000_000          # $10,000,000
+#: SPY has not existed for the whole of history. A date before this
+#: cannot be answered by any bar cache, so it is refused with a reason
+#: rather than silently returning an empty window.
+EARLIEST_BASELINE_DATE = "1993-01-01"
+
+
+def _baseline_source_pill(base) -> str:
+    return {
+        "owner_set": pill("good", "you set this"),
+        "first_run": pill("good", "from the broker account"),
+        "account_changed": pill("warn", "account changed, restarted"),
+        "unset": pill("idle", "placeholder, never set"),
+    }.get(base.source, pill("idle", esc(base.source)))
+
+
+def benchmark_panel(db: Db, p: str = "bench", message: str = "",
+                    failed: bool = False) -> str:
+    """The SPY comparison, and the form that sets it.
+
+    Owner-asked, 2026-08-14: "a section so I can emulate the SPY with a
+    custom field, I want to be able to in maintainence state when I
+    wouldve invested in SPY and track from then e.g. I can say track SPY
+    if i were to invest $2000 on a set date and calculate that against
+    our bot."
+
+    THE HISTORY IS SHOWN BESIDE THE FORM on purpose. The table is
+    append-only and every row carries the reason it was written, so a
+    comparison that changed under the owner's feet - a new Alpaca
+    account restarts it automatically - is answered on screen instead of
+    looking like the numbers moved by themselves.
+    """
+    v = queries.benchmark_view(db)
+    base = v.baseline
+    out = []
+
+    if message:
+        out.append(alarm(f'<b id="{p}-result">{esc(message)}</b>') if failed
+                   else ok(f'<span id="{p}-result">{esc(message)}</span>'))
+
+    spy_value = v.spy_value_cents
+    diff = v.difference_cents
+    out.append(tiles(f"{p}-tiles", [
+        ("The comparison money", dollars(base.capital_cents),
+         f"{_baseline_source_pill(base)} bought as SPY on "
+         f"{esc(base.start_date)}"),
+        ("That money in SPY today",
+         dollars(spy_value) if spy_value is not None else "&mdash;",
+         (f"{pill('idle', 'last close ' + esc(v.spy_last_day))} from the "
+          "local bar cache" if spy_value is not None else
+          f"{pill('idle', 'no SPY series')} the raw reason is printed below")),
+        ("The bot, net of the API bill", dollars(v.bot_net_cents),
+         f"{pill('idle', f'{v.n_closed} closed trade(s)')} banked profit "
+         "only - open positions are not marked in"),
+        ("Bot minus SPY",
+         (f'<span class="{"pos" if diff >= 0 else "neg"}">{dollars(diff)}</span>'
+          if diff is not None else "&mdash;"),
+         ("same money, same start date" if diff is not None
+          else "needs a SPY series to subtract")),
+    ]))
+
+    if v.n_closed < MIN_TRADES_FOR_MEANING:
+        out.append(alarm(
+            f'<b id="{p}-small-sample">Too small a sample to read as a '
+            f"verdict.</b> {v.n_closed} closed trade(s) against the "
+            f"{MIN_TRADES_FOR_MEANING} this dashboard requires before any "
+            "comparison here counts as evidence. The difference above is a "
+            "description of what has happened, not a measurement of edge."))
+
+    if spy_value is None:
+        # House rule 3: the zero prints its raw upstream response. Here
+        # the "upstream" is the local bar cache, so its coverage and the
+        # exact failure both go on screen.
+        out.append(alarm(
+            f'<b id="{p}-spy-missing">No SPY series for this baseline.</b> '
+            f"Window asked for: {esc(base.start_date)} onwards. Source tried: "
+            f"<code>{esc(v.spy_source or 'local bar cache')}</code>. Raw "
+            f"reason: <code>{esc(v.spy_error or 'none recorded')}</code>. "
+            + (f"The cache holds {v.cache_bars} daily closes covering "
+               f"{esc(v.cache_first)} to {esc(v.cache_last)} - a start date "
+               "outside that range cannot be answered until the cache is "
+               "refreshed."
+               if v.cache_bars else
+               f"The cache could not be read at all: "
+               f"<code>{esc(v.cache_error or 'no detail')}</code>.")))
+    else:
+        out.append(prov(
+            f"SPY: {len(v.spy_points)} daily closes from {v.spy_source}. The "
+            f"baseline money is bought at the first close on or after "
+            f"{base.start_date} ({v.spy_points[0][0]}) and marked at "
+            f"{v.spy_last_day}. Cache coverage: {v.cache_first} to "
+            f"{v.cache_last}, {v.cache_bars} bars. Exposure is NOT matched - "
+            "SPY is fully invested throughout and the bot is not."
+            + (f" Feed: {v.spy_feed} rather than the consolidated tape."
+               if v.spy_feed and v.spy_feed != "sip" else "")))
+
+    out.append(prov(
+        f"Why this baseline: {base.reason}"
+        + (f" Recorded {base.set_at}." if base.set_at else "")
+        + (f" Account fingerprint {base.account_fingerprint} (a hash of the "
+           "broker account id, never a key)." if base.account_fingerprint
+           else " No account fingerprint recorded.")))
+
+    # --- the form.
+    out.append(f'<h3 id="{p}-form-heading">Track SPY from a date and amount '
+               "of your choosing</h3>")
+    out.append(
+        f'<form class="inline" id="{p}-form" method="post" '
+        'action="/set-benchmark">'
+        '<label class="prov">dollars into SPY '
+        f'<input id="{p}-amount" name="amount_usd" type="text" '
+        'inputmode="decimal" placeholder="2000" '
+        f'value="{float(base.capital_cents) / 100:.2f}"></label> '
+        '<label class="prov">bought on '
+        f'<input id="{p}-date" name="start_date" type="date" '
+        f'value="{esc(base.start_date)}" min="{EARLIEST_BASELINE_DATE}">'
+        "</label> "
+        '<label class="prov">why (optional) '
+        f'<input id="{p}-why" name="reason" type="text" maxlength="500" '
+        'placeholder="moving to the $2,000 account"></label> '
+        f'<button id="{p}-submit" type="submit">Set the comparison</button>'
+        "</form>")
+    out.append(prov(
+        f"The amount must be between $1 and $10,000,000 and the date must "
+        f"not be in the future or before {EARLIEST_BASELINE_DATE}; anything "
+        "else comes back as a sentence saying what was wrong, and nothing is "
+        "written. This figure changes what the bot is COMPARED against - it "
+        "never changes what the bot may spend, size or trade. Closed trades "
+        "and API spend dated before the start date fall outside the "
+        "comparison and the Performance page says how many. Nothing is "
+        "overwritten: this appends a row and the previous ones stay below "
+        "forever. A later change of Alpaca account overrides an owner-set "
+        "baseline - a new account is a new experiment - and that override "
+        "appears in the history with its own reason."))
+
+    # --- the history.
+    rows = []
+    for r in v.history_q.rows:
+        d = dict(r)
+        rows.append([
+            dollars(d.get("capital_cents")), esc(d.get("start_date")),
+            esc(str(d.get("source") or "").replace("_", " ")),
+            esc(d.get("set_at")),
+            esc(d.get("account_fingerprint") or "none"),
+            f'<span class="prov">{raw(d.get("reason"))}</span>',
+        ])
+    if rows:
+        out.append(table(
+            f"{p}-history",
+            ["amount", "from", "set by", "recorded at", "account", "why"],
+            rows, numeric_cols={0}))
+    else:
+        out.append(empty_block(
+            f"{p}-empty-history", v.history_q,
+            meaning="no baseline has ever been recorded. The figures above "
+                    "are the documented fallback, and the first broker read "
+                    "or the form above replaces them.",
+        ))
+    return section(f"{p}-section",
+                   "The SPY comparison: how much, from when, and why",
+                   "".join(out))
+
+
+# --------------------------------------------------------------------------
 # Broker value vs net value - two different numbers, on purpose
 # --------------------------------------------------------------------------
 
@@ -2487,7 +2774,7 @@ def value_reconciliation_panel(db: Db, p: str = "val") -> str:
         r = dict(brok.rows[0])
         broker_cents = (Decimal(str(r["equity_usd"])) * 100).quantize(Decimal("1"))
         as_of = str(r["taken_at"])
-        banked = Decimal(START_CAPITAL_CENTS) + perf.gross_pnl_cents
+        banked = perf.start_capital_cents + perf.gross_pnl_cents
         unrealised = broker_cents - banked      # broker marks minus banked
         costs = perf.scheduled_cost_cents + perf.manual_cost_cents
         gap = broker_cents - net_cents

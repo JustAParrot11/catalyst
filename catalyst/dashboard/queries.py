@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
+from catalyst import benchmark
 from catalyst.dashboard.db import Db, QueryResult, START_CAPITAL_CENTS, bars_path, jload
 
 
@@ -35,6 +36,39 @@ def _dec(text, default=Decimal("0")) -> Decimal:
 # --------------------------------------------------------------------------
 # 1. Performance against the S&P 500, net of all costs
 # --------------------------------------------------------------------------
+
+
+def baseline(db: Db) -> benchmark.Baseline:
+    """The benchmark baseline in force: how much money, from what date,
+    and why.
+
+    Read through the dashboard's own read-only handle so the page and the
+    bot can never be looking at two different baselines. Never raises -
+    `benchmark.current` degrades to a labelled placeholder, and an
+    unopenable database does the same here, naming the open error in the
+    reason so the page can print it rather than a bare $1,000.
+    """
+    conn = db.conn
+    if conn is None:
+        return benchmark.Baseline(
+            capital_cents=benchmark.FALLBACK_CAPITAL_CENTS,
+            start_date=datetime.now(timezone.utc).date(),
+            source="unset", account_fingerprint="", set_at="",
+            reason=("the database could not be opened, so no baseline could "
+                    f"be read ({db.open_error or 'no connection'}). The "
+                    "figure shown is the documented fallback, not a "
+                    "decision."))
+    return benchmark.current(conn)
+
+
+def baseline_history(db: Db) -> QueryResult:
+    """Every baseline ever struck, newest first. Append-only, so this IS
+    the audit trail - there is no separate current-value table that could
+    disagree with it."""
+    return db.q(
+        "SELECT capital_cents, start_date, source, account_fingerprint, "
+        "reason, set_at FROM benchmark_baselines "
+        "ORDER BY set_at DESC, rowid DESC LIMIT 50")
 
 
 @dataclass
@@ -64,10 +98,36 @@ class Performance:
     spy_feed: str = ""
     start_day: date | None = None
     end_day: date | None = None
+    #: The baseline these figures are measured against - how much money,
+    #: from what date, and why. Never None after performance() runs; the
+    #: default keeps the dataclass constructible in a test.
+    baseline: benchmark.Baseline | None = None
+    #: Closed trades and priced cost rows dated BEFORE the baseline, and
+    #: therefore outside this comparison. Counted rather than dropped
+    #: silently: money that was really spent must not simply vanish from
+    #: the page when a new baseline is struck.
+    excluded_trades: int = 0
+    excluded_pnl_cents: Decimal = Decimal("0")
+    excluded_cost_cents: Decimal = Decimal("0")
+    #: True when the equity line is flat because nothing has happened
+    #: since the baseline - not because there is no line.
+    flat_since_baseline: bool = False
+
+    @property
+    def start_capital_cents(self) -> Decimal:
+        """What the comparison starts from. From the stored baseline, or
+        the documented fallback when nothing has ever been recorded."""
+        if self.baseline is None:
+            return Decimal(START_CAPITAL_CENTS)
+        return Decimal(self.baseline.capital_cents)
+
+    @property
+    def baseline_is_placeholder(self) -> bool:
+        return self.baseline is None or self.baseline.is_placeholder
 
     @property
     def net_equity_cents(self) -> Decimal:
-        return (Decimal(START_CAPITAL_CENTS) + self.gross_pnl_cents
+        return (self.start_capital_cents + self.gross_pnl_cents
                 - self.scheduled_cost_cents - self.manual_cost_cents)
 
     @property
@@ -91,10 +151,18 @@ class Performance:
         return self.n_closed >= MIN_TRADES_FOR_MEANING
 
 
-def _load_spy(start: date, end: date):
+def _load_spy(start: date, end: date, capital_cents=None):
     """SPY closes from the local bar cache. Returns (points, source, error,
     row_count). Never touches the network — the dashboard reads what
-    scripts/fetch_history.py already cached."""
+    scripts/fetch_history.py already cached.
+
+    `capital_cents` is the money the benchmark is bought with, from the
+    stored baseline. It is what turns an index into "your $2,000 would be
+    worth this", and it is a parameter rather than a constant because the
+    account it compares against is not fixed.
+    """
+    capital = Decimal(str(capital_cents if capital_cents is not None
+                          else START_CAPITAL_CENTS))
     root = bars_path()
     try:
         from catalyst.backtest.data import BarCache
@@ -115,7 +183,8 @@ def _load_spy(start: date, end: date):
         )
     base = window[0].close
     points = [
-        (b.day, float(b.close / base * 100), int(b.close / base * START_CAPITAL_CENTS))
+        (b.day, float(b.close / base * 100),
+         int(Decimal(str(b.close)) / Decimal(str(base)) * capital))
         for b in window
     ]
     # Read the basis from the cache metadata rather than asserting it.
@@ -145,13 +214,31 @@ def performance(db: Db) -> Performance:
         "SELECT kind, priced_cents, priced_at FROM cost_events "
         "WHERE priced_cents IS NOT NULL ORDER BY priced_at"
     )
-    perf = Performance(closed_q=closed_q, costs_q=costs_q)
+    base = baseline(db)
+    perf = Performance(closed_q=closed_q, costs_q=costs_q, baseline=base)
+    capital = Decimal(base.capital_cents)
+
+    # THE BASELINE IS THE START OF THE COMPARISON, so anything before it
+    # is outside the window rather than part of it. This is not tidiness:
+    # a baseline struck from a broker read carries that account's equity,
+    # which ALREADY contains every trade it has closed. Counting those
+    # trades again on top of it would book the same profit twice.
+    #
+    # A placeholder baseline is not a date anybody chose, so it cuts
+    # nothing off - the window stays exactly what it was before baselines
+    # existed, and the page says it is running on a placeholder.
+    cutoff = None if base.is_placeholder else base.start_date
 
     trades = [
         (_as_date(r["closed_at"]), _dec(r["realized_pnl_cents"]), r["account_mode"])
         for r in closed_q.rows
     ]
     trades = [t for t in trades if t[0] is not None]
+    if cutoff is not None:
+        before = [t for t in trades if t[0] < cutoff]
+        trades = [t for t in trades if t[0] >= cutoff]
+        perf.excluded_trades = len(before)
+        perf.excluded_pnl_cents = sum((t[1] for t in before), Decimal("0"))
     perf.n_closed = len(trades)
     perf.n_closed_live = sum(1 for t in trades if t[2] == "live")
     perf.n_closed_paper = perf.n_closed - perf.n_closed_live
@@ -162,16 +249,21 @@ def performance(db: Db) -> Performance:
         for r in costs_q.rows
     ]
     costs = [c for c in costs if c[0] is not None]
+    if cutoff is not None:
+        perf.excluded_cost_cents = sum(
+            (c[1] for c in costs if c[0] < cutoff), Decimal("0"))
+        costs = [c for c in costs if c[0] >= cutoff]
     perf.scheduled_cost_cents = sum((c[1] for c in costs if c[2] == "scheduled"), Decimal("0"))
     perf.manual_cost_cents = sum((c[1] for c in costs if c[2] == "manual"), Decimal("0"))
 
+    today = datetime.now(timezone.utc).date()
     days = sorted({t[0] for t in trades} | {c[0] for c in costs})
-    if not days:
+    if not days and (cutoff is None or cutoff >= today):
         # No equity series to index against - but still SAY what state the
         # benchmark cache is in, so "the bot has done nothing" and "the SPY
         # cache is missing" are two different sentences on the page.
-        today = datetime.now(timezone.utc).date()
-        _, source, error, rows, feed = _load_spy(today - timedelta(days=30), today)
+        _, source, error, rows, feed = _load_spy(
+            today - timedelta(days=30), today, capital)
         perf.spy_source, perf.spy_rows, perf.spy_feed = source, rows, feed
         perf.spy_error = error or (
             f"SPY cache is readable ({rows} bars in a 30-day probe window), but the "
@@ -180,18 +272,33 @@ def performance(db: Db) -> Performance:
         )
         return perf
 
-    perf.start_day = days[0] - timedelta(days=1)
-    perf.end_day = days[-1]
-    points = [(perf.start_day, 100.0, START_CAPITAL_CENTS)]
-    running = Decimal(START_CAPITAL_CENTS)
+    if cutoff is not None:
+        # A REAL BASELINE DRAWS THE LINE FROM THE DAY IT WAS STRUCK, and
+        # carries it to today even when nothing has happened. "$2,000 in
+        # SPY on 1 July against the bot" is a question with an answer on
+        # a day the bot did nothing: SPY moved and the bot did not, and a
+        # page that draws no line at all cannot say so.
+        perf.start_day = cutoff
+        perf.end_day = max(days[-1], today) if days else today
+        perf.flat_since_baseline = not days
+    else:
+        perf.start_day = days[0] - timedelta(days=1)
+        perf.end_day = days[-1]
+    points = [(perf.start_day, 100.0, int(capital))]
+    running = capital
     for day in days:
         running += sum((t[1] for t in trades if t[0] == day), Decimal("0"))
         running -= sum((c[1] for c in costs if c[0] == day), Decimal("0"))
-        index = float(running / Decimal(START_CAPITAL_CENTS) * 100)
+        index = float(running / capital * 100) if capital else 100.0
         points.append((day, index, int(running)))
+    if perf.end_day > points[-1][0]:
+        # Flat to today, so the comparison is against SPY NOW rather than
+        # against SPY on the last day something happened.
+        points.append((perf.end_day, points[-1][1], points[-1][2]))
     perf.bot_points = points
 
-    spy_points, source, error, rows, feed = _load_spy(perf.start_day, perf.end_day)
+    spy_points, source, error, rows, feed = _load_spy(
+        perf.start_day, perf.end_day, capital)
     (perf.spy_points, perf.spy_source, perf.spy_error, perf.spy_rows,
      perf.spy_feed) = (spy_points, source, error, rows, feed)
     # A cache full of bars with none in a two-day window that happens to
@@ -200,6 +307,94 @@ def performance(db: Db) -> Performance:
     perf.spy_window_too_short = bool(
         not spy_points and rows > 0 and error and "none inside" in error)
     return perf
+
+
+# --------------------------------------------------------------------------
+# 1b. The benchmark itself: what SPY is bought with, from when, and why
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class BenchmarkView:
+    """Everything the Maintenance page needs to explain - and change -
+    the comparison the bot is judged against."""
+
+    baseline: benchmark.Baseline
+    history_q: QueryResult
+    #: SPY from the baseline date to today, bought with the baseline's
+    #: own money. Empty is a state to explain, never a blank panel.
+    spy_points: list = field(default_factory=list)
+    spy_source: str = ""
+    spy_error: str | None = None
+    spy_rows: int = 0
+    spy_feed: str = ""
+    #: What the bar cache actually covers, so a date outside it is
+    #: answered with the range rather than with an empty chart.
+    cache_first: date | None = None
+    cache_last: date | None = None
+    cache_bars: int = 0
+    cache_error: str | None = None
+    #: The bot's own net equity over the same window, for the side by
+    #: side the owner asked for.
+    bot_net_cents: Decimal = Decimal("0")
+    n_closed: int = 0
+
+    @property
+    def spy_value_cents(self) -> Decimal | None:
+        """What the baseline money in SPY would be worth on the last
+        cached close. None when there is no SPY to read - never 0."""
+        if not self.spy_points:
+            return None
+        return Decimal(self.spy_points[-1][2])
+
+    @property
+    def spy_last_day(self) -> date | None:
+        return self.spy_points[-1][0] if self.spy_points else None
+
+    @property
+    def difference_cents(self) -> Decimal | None:
+        if self.spy_value_cents is None:
+            return None
+        return self.bot_net_cents - self.spy_value_cents
+
+
+def _spy_cache_span():
+    """(first_day, last_day, n_bars, error) for the local SPY cache.
+
+    Read separately from the window load so the page can say "the cache
+    covers 2025-08-15 to 2026-08-14" beside a date that falls outside it.
+    A window that returns nothing then reads as a date out of range
+    rather than as a broken benchmark.
+    """
+    root = bars_path()
+    try:
+        from catalyst.backtest.data import BarCache
+
+        bars = BarCache(root).load_bars("SPY")
+    except Exception as exc:  # noqa: BLE001 - shown, never swallowed
+        return None, None, 0, f"{type(exc).__name__}: {exc}"
+    if not bars:
+        return None, None, 0, f"{root}/SPY.csv holds no bars"
+    return bars[0].day, bars[-1].day, len(bars), None
+
+
+def benchmark_view(db: Db) -> BenchmarkView:
+    """The baseline in force, its whole history, and what that money in
+    SPY would be worth today."""
+    base = baseline(db)
+    view = BenchmarkView(baseline=base, history_q=baseline_history(db))
+    view.cache_first, view.cache_last, view.cache_bars, view.cache_error = (
+        _spy_cache_span())
+
+    today = datetime.now(timezone.utc).date()
+    end = max(view.cache_last or today, today)
+    (view.spy_points, view.spy_source, view.spy_error, view.spy_rows,
+     view.spy_feed) = _load_spy(base.start_date, end, base.capital_cents)
+
+    perf = performance(db)
+    view.bot_net_cents = perf.net_equity_cents
+    view.n_closed = perf.n_closed
+    return view
 
 
 # --------------------------------------------------------------------------

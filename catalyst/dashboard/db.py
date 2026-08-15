@@ -18,12 +18,23 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 
+from catalyst.benchmark import FALLBACK_CAPITAL_CENTS
+
 DEFAULT_DB = "data/catalyst.db"
 DEFAULT_BARS = "data/bars"
 
-#: Fixed trading capital (CLAUDE.md). Every index chart is labeled in
-#: dollars against this number so "100" never reads as a bug.
-START_CAPITAL_CENTS = 100_000
+#: THE FALLBACK, AND ONLY THE FALLBACK. This was a hardcoded $1,000 that
+#: drove net equity, the SPY index, the performance curve and the annual
+#: hurdle, so pointing the bot at a $2,000 account silently compared the
+#: new account against the old base.
+#:
+#: The live figure is now DATA - `catalyst.benchmark.current(conn)` reads
+#: the latest `benchmark_baselines` row, which carries how much, from
+#: when, and why. This constant is that module's documented placeholder,
+#: re-exported here so the name keeps working and cannot drift from it.
+#: Anything rendering a figure must read the baseline, and must say so
+#: when `Baseline.is_placeholder` is true.
+START_CAPITAL_CENTS = int(FALLBACK_CAPITAL_CENTS)
 
 
 def db_path() -> str:
