@@ -1149,7 +1149,68 @@ def alerts_panel(db: Db, p: str = "alerts") -> str:
                     "scored outcomes and a minimum sample per parameter "
                     "(ARCHITECTURE section 6.1).",
         ))
+    out.append(catalyst_coverage_block(p))
     return section(f"{p}-section", "Operational alerts and adaptation", "".join(out))
+
+
+def catalyst_coverage_block(p: str) -> str:
+    """What the bot can trade, and which of it rests on evidence.
+
+    THE TABLE THAT WAS NEVER FILLED IN. Discovery produced eleven kinds
+    of catalyst and the risk engine had parameters for one, so 23 of the
+    owner's 36 candidates - 64% - died on `unknown_catalyst_type` before
+    conviction was read. Some had already been paid for. Nothing on the
+    dashboard said so: the funnel showed candidates arriving and leaving,
+    and the reason looked like ordinary attrition.
+
+    So the coverage is now stated, and every row says whether its numbers
+    were GRADED or are an ESTIMATE. That distinction is the whole lesson
+    of the previous build - the defect was not wrong numbers, it was
+    wrong numbers that looked measured.
+    """
+    from catalyst.risk.adaptive_params import (
+        DEFAULT_PARAMS, GRADED_CATALYST_TYPES, catalyst_shape_reason,
+    )
+
+    gaps = DEFAULT_PARAMS["adverse_gap_assumption"]
+    stops = DEFAULT_PARAMS["stop_width"]
+    holds = DEFAULT_PARAMS["holding_period_estimate"]
+    rows = []
+    for ct in sorted(gaps, key=lambda c: (c not in GRADED_CATALYST_TYPES, c)):
+        graded = ct in GRADED_CATALYST_TYPES
+        rows.append([
+            esc(ct.replace("_", " ")),
+            pill("good", "graded") if graded else pill("warn", "estimate"),
+            f"{float(gaps[ct]) * 100:.0f}%",
+            f"{float(stops[ct]) * 100:.0f}%",
+            f"{int(holds[ct])}d",
+            f'<span class="prov">{esc(catalyst_shape_reason(ct))}</span>',
+        ])
+    n_graded = len(GRADED_CATALYST_TYPES & set(gaps))
+    # FOLDED, not removed. Eighteen rows of reasoning is exactly the
+    # "essay with numbers in it" the owner objected to and a test now
+    # guards against - it fired on this table. The headline count stays
+    # visible because it is the fact worth seeing at a glance; the
+    # per-type reasoning is one click away for when it matters.
+    return (
+        f'<h3 id="{p}-coverage">What it is allowed to trade</h3>'
+        + f'<p id="{p}-coverage-line"><b>{len(gaps)}</b> catalyst type(s) '
+        f'can reach the risk engine &mdash; <b>{n_graded}</b> backtested, '
+        f'<b>{len(gaps) - n_graded}</b> estimated.</p>'
+        + details(f"{p}-coverage-detail",
+                  "the assumptions behind each one",
+                  table(f"{p}-coverage-table",
+                ["catalyst type", "basis", "assumed gap", "stop", "hold",
+                 "why this shape"], rows)
+        + prov(
+            "A type NOT on this list is discovered, possibly "
+            "researched at cost, and then discarded as "
+            "unknown_catalyst_type before conviction is read - which is "
+            "what 64% of candidates hit until 2026-08-14. The estimates "
+            "are deliberately generous: a larger assumed gap means a "
+            "smaller position, so being wrong this way costs opportunity "
+            "rather than money, and the refusal tracker is what moves "
+            "them.")))
 
 
 # --------------------------------------------------------------------------
