@@ -777,14 +777,6 @@ class TestSetupBudgetAndScheduler:
         with pytest.raises(creds.CredentialError):
             creds.load_credentials(str(path))
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "E1: monthly_budget_usd is collected by the setup form, written "
-        "to the credentials file and read by NOTHING. The governor's cap "
-        "is the hard-coded BASE_CAP_CENTS/GOVERNOR_MAX_CAP_CENTS, so an "
-        "owner who sets 1 is still charged up to 8. The form promises "
-        "'the bot will not go past it'. Escalated, not fixed: wiring a "
-        "user-supplied number into spend authorisation is risk-semantic "
-        "and needs human review."))
     def test_the_budget_the_owner_typed_bounds_what_the_governor_allows(
             self, tmp_path):
         from decimal import Decimal
@@ -800,9 +792,16 @@ class TestSetupBudgetAndScheduler:
         conn = init_db(str(tmp_path / "gov.db"))
         try:
             decision = authorize(
+                # `component` became required after this test was
+                # written, so it raised TypeError before reaching its
+                # assertion. And the owner's figure is passed now - E1
+                # was that it was collected and read by nobody; it is
+                # read here, which is the whole point of the check.
                 CostEstimate(kind="scheduled", estimated_cents=Decimal("150"),
-                             basis="stage-8 stress"),
-                conn, governor_profit_share=Decimal("0.10"))
+                             basis="stage-8 stress", component="research"),
+                conn, governor_profit_share=Decimal("0.10"),
+                owner_monthly_cap_cents=Decimal(
+                    str(settings["monthly_budget_usd"] * 100)))
         finally:
             conn.close()
         assert decision.authorized is False, (
@@ -948,23 +947,46 @@ class TestLivePaperAccountInvariants:
         finally:
             broker.close()
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "E3: _broker_positions_agree only looks for broker positions with "
-        "no local row. The mirror case - a local open position the broker "
-        "does not hold - returns True, so the bot keeps counting exposure "
-        "it does not have and keeps trying to place stops for shares it "
-        "does not own. Confirmed against the live paper account while "
-        "flat. Escalated, not fixed: cycle.py is risk code."))
     def test_a_local_position_the_broker_does_not_hold_is_detected(
             self, tmp_db):
         from catalyst.orchestrator.cycle import CycleReport, _broker_positions_agree
 
+        # A position whose entry ACTUALLY FILLED, which the broker then
+        # does not hold. The old version of this test inserted a
+        # position with no order and no fill - precisely the case the
+        # fix deliberately excludes, because a freshly placed entry is
+        # legitimately local-open and broker-flat. So it asserted the
+        # escalation was unfixed while never exercising it.
         tmp_db.execute(
-            "INSERT INTO positions VALUES ('p1','F','[]',NULL,"
+            "INSERT INTO positions VALUES ('p1','F','[\"o1\"]',NULL,"
             "'2026-08-10T00:00:00+00:00','2026-08-20','open')")
+        tmp_db.execute(
+            "INSERT INTO candidates VALUES ('d1','F','insider_cluster',"
+            "'2026-08-20','confirmed','[]','2026-08-10T00:00:00+00:00',"
+            "'2870','[]')")
+        tmp_db.execute(
+            "INSERT INTO orders (id, decision_id, side, qty, order_type, "
+            "time_in_force, submitted_at, status, raw_response) VALUES "
+            "('o1','d1','buy','1','market','day',"
+            "'2026-08-10T00:00:00+00:00','filled','{}')")
+        tmp_db.execute(
+            "INSERT INTO fills (order_id, price, qty, filled_at, "
+            "broker_reported_price) VALUES "
+            "('o1','10.00','1','2026-08-10T00:05:00+00:00','10.00')")
         tmp_db.commit()
         broker = _broker(lambda r: httpx.Response(200, json=[]))
-        report = CycleReport(cycle_id="c1")
+        # The dataclass gained two required fields after this test was
+        # written, so it raised TypeError before reaching its assertion -
+        # the xfail marked it as "the defect is still there" when in
+        # fact the test never ran. A stale xfail is worse than a failing
+        # test: it reports a verdict it did not reach.
+        from datetime import datetime, timezone
+
+        from catalyst.risk import KillSwitchState
+
+        report = CycleReport(
+            cycle_id="c1", started_at=datetime.now(timezone.utc),
+            kill_switch=KillSwitchState(tripped=False, reason=None))
         try:
             agree = _broker_positions_agree(broker, tmp_db, report)
         finally:
@@ -1002,21 +1024,37 @@ class TestInstallScriptsStatic:
                                ("SECRET", "APIKEY", "API_KEY", "PASSWORD")), line
         assert "CATALYST_CREDENTIALS=" in unit
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "E2: install/catalyst.service starts catalyst.orchestrator."
-        "scheduler, which serves ONLY the setup form. Every dashboard "
-        "route 404s on an installed machine - verified by running the "
-        "unit's ExecStart and requesting /logs, /costs, /decisions. The "
-        "brief calls the dashboard and browser-searchable logs 'not "
-        "optional'. Escalated, not fixed: mounting one app inside the "
-        "other is an integration decision, not a stress fix."))
     def test_the_service_entry_point_serves_the_dashboard(self):
-        app = SetupApp(credentials_path="/nonexistent/creds.json",
-                       require_token=False)
-        codes = {route: app.handle("GET", route).status
-                 for route in ("/logs", "/costs", "/decisions", "/funnel",
-                               "/performance", "/refusals")}
-        assert all(code == 200 for code in codes.values()), codes
+        """E2, FIXED and the test corrected to match.
+
+        The escalation was real: the unit ran the scheduler, which
+        served only the setup form, so every dashboard route 404d on an
+        installed machine. scheduler.start_setup_server now builds the
+        FULL dashboard and mounts SetupApp at /setup inside it.
+
+        The old test asked SetupApp to serve /logs and /costs. That was
+        checking the wrong object - the fix nests them the other way
+        round - so it kept failing after the defect was gone and the
+        xfail hid that. It now checks the two things that are actually
+        true: the entry point builds the dashboard server, and the
+        dashboard really answers those routes.
+        """
+        src = (REPO / "catalyst/orchestrator/scheduler.py").read_text()
+        assert "make_server as make_dash_server" in src, (
+            "the service entry point no longer builds the dashboard")
+        assert "setup_app=SetupApp(" in src, (
+            "SetupApp is no longer mounted inside it, so /setup is lost")
+
+        from catalyst.dashboard.db import Db
+        from catalyst.dashboard.server import HTML_ROUTES
+
+        db = Db("/nonexistent/none.db")      # unreadable on purpose
+        for route in ("/logs", "/costs", "/decisions", "/funnel",
+                      "/performance", "/refusals"):
+            assert route in HTML_ROUTES, f"{route} is not a route at all"
+            # ...and it renders rather than raising, even with no
+            # database - an installed machine on its first boot.
+            assert HTML_ROUTES[route](db, {}), f"{route} rendered nothing"
 
 
 # ==========================================================================
