@@ -49,14 +49,118 @@ _PER_CATALYST = {
 # build's lesson (BUILD-BRIEF): these being wrong is survivable; them
 # being wrong SILENTLY is not - which is what the refusal tracker and
 # this module exist to fix.
+# ONE CATALYST TYPE WAS TRADEABLE. MEASURED on the owner's live day:
+# discovery can produce 18 kinds and the risk engine had parameters for
+# `insider_cluster` alone, so 23 of 36 candidates - 64% - died on
+# `unknown_catalyst_type` in evaluate.py before conviction was read.
+# Some had already been paid for.
+#
+# That is not a strategy choice, it is a table that was never filled in,
+# and it is why the bot has "a broad range of investment areas" in
+# discovery and one of them in practice.
+#
+# EVERY NUMBER BELOW IS AN ESTIMATE AND NONE IS BACKTESTED. Only
+# insider_cluster has been graded (bake-off winner, 2016-2026,
+# HOLD_DAYS=12). The rest are reasoned from the SHAPE of the event -
+# how far a name can gap when the news lands - and they exist to be
+# moved by the refusal tracker, not to be believed. The brief's rule
+# holds: being wrong is survivable, being wrong SILENTLY is not, which
+# is why each carries its reasoning and why the dashboard now shows
+# which of them has evidence behind it.
+#
+# SEARCH SHARES SUM TO EXACTLY 1.0. They are a share of one budget
+# across catalyst types, not a per-type multiplier - a joint
+# invariant in _refusal_reason() enforces it, and my first attempt
+# at this table totalled 9.6 and was correctly refused. The graded
+# type gets the largest share; the fastest and shallowest events get
+# the least.
+#
+# Gap assumptions are deliberately GENEROUS on the unproven types: a
+# larger assumed gap means a smaller position, so an estimate that is
+# too high costs opportunity while one that is too low costs money.
+_GAP = "adverse_gap_assumption"
+_STOP = "stop_width"
+_HOLD = "holding_period_estimate"
+_SEARCH = "search_budget_allocation"
+
+#: (gap, stop, hold days, search share, why this shape)
+_CATALYST_SHAPES = {
+    # GRADED. The bake-off winner; hold is measured, not assumed.
+    "insider_cluster":   ("0.08", "0.10", "12", "0.12",
+                          "graded 2016-2026; the only measured row here"),
+    # TRUE BINARIES. The brief's own evidence: the previous build
+    # measured a 60% adverse gap on these, and concluded that "edge and
+    # un-sizeable risk were the same property of the same trades". A 60%
+    # gap sizes the position at 0.02/0.60 = 3.3% of the account, about
+    # $33 - deliberately tiny rather than excluded, because a small
+    # position in a real edge accumulates a sample and a zero position
+    # never does.
+    "fda_decision":      ("0.60", "0.50", "5", "0.09",
+                          "a true binary; the previous build MEASURED "
+                          "~60% adverse gaps here"),
+    "clinical_readout":  ("0.60", "0.50", "5", "0.09",
+                          "a true binary, and the readout date is not "
+                          "the announcement date (TRAPS.md)"),
+    "distress":          ("0.25", "0.25", "10", "0.06",
+                          "going-concern language; fat left tail"),
+    # Scheduled, binary-ish, and the whole move lands in one print.
+    "earnings":          ("0.14", "0.16", "5", "0.06",
+                          "a scheduled binary; the gap IS the event"),
+    "earnings_result":   ("0.12", "0.14", "5", "0.05",
+                          "the print has landed - drift, not the gap"),
+    "guidance":          ("0.12", "0.14", "8", "0.06",
+                          "re-rates the forward multiple, often violently"),
+    # Deal situations: outcome is known-ish, so the gap is smaller.
+    "merger":            ("0.05", "0.08", "20", "0.05",
+                          "a fixed ratio is mostly priced; the risk is "
+                          "the deal breaking"),
+    "merger_vote":       ("0.06", "0.08", "10", "0.05",
+                          "the vote is usually a formality - the tail is "
+                          "when it is not"),
+    "asset_deal":        ("0.10", "0.12", "12", "0.05",
+                          "re-rates the remaining business"),
+    "contract_award":    ("0.09", "0.12", "10", "0.04",
+                          "size relative to revenue is what matters"),
+    # Dilution is directionally known and usually gaps DOWN.
+    "dilution":          ("0.12", "0.14", "8", "0.05",
+                          "offerings price at a discount; direction is "
+                          "known, size is not"),
+    "financing":         ("0.10", "0.12", "10", "0.05",
+                          "terms decide it, and terms are in the filing"),
+    # Slower re-ratings: the market takes days to agree.
+    "restructuring":     ("0.12", "0.14", "15", "0.05",
+                          "a slow re-rating, not a single print"),
+    "strategic_review":  ("0.14", "0.16", "15", "0.06",
+                          "optionality on a sale; fat tails both ways"),
+    "buyback":           ("0.07", "0.10", "15", "0.03",
+                          "a floor under the price rather than a jump"),
+    "leadership_change": ("0.09", "0.12", "12", "0.02",
+                          "sentiment, and slower than it feels"),
+    "analyst_action":    ("0.07", "0.10", "5", "0.02",
+                          "smallest and fastest; often already in the "
+                          "price by the time it is public"),
+}
+
 DEFAULT_PARAMS: dict = {
     "conviction_floor": Decimal("0.60"),
-    "adverse_gap_assumption": {"insider_cluster": Decimal("0.08")},
-    "stop_width": {"insider_cluster": Decimal("0.10")},
-    "holding_period_estimate": {"insider_cluster": Decimal("12")},
-    "search_budget_allocation": {"insider_cluster": Decimal("1.0")},
+    _GAP: {k: Decimal(v[0]) for k, v in _CATALYST_SHAPES.items()},
+    _STOP: {k: Decimal(v[1]) for k, v in _CATALYST_SHAPES.items()},
+    _HOLD: {k: Decimal(v[2]) for k, v in _CATALYST_SHAPES.items()},
+    _SEARCH: {k: Decimal(v[3]) for k, v in _CATALYST_SHAPES.items()},
     "governor_profit_share": Decimal("0.10"),
 }
+
+#: Which catalyst types rest on a backtest rather than on reasoning.
+#: The dashboard reads this so an estimate is never presented as
+#: evidence - the previous build's defect was not wrong numbers, it was
+#: wrong numbers that looked measured.
+GRADED_CATALYST_TYPES = frozenset({"insider_cluster"})
+
+
+def catalyst_shape_reason(catalyst_type: str) -> str:
+    """Why this type carries the gap and hold it does, in one line."""
+    shape = _CATALYST_SHAPES.get(str(catalyst_type))
+    return shape[4] if shape else "no parameters recorded for this type"
 
 # Placeholder floors pending power analysis (ARCHITECTURE.md section 6.1;
 # STRATEGY-PROPOSALS.md section 3.2 argues these are too SMALL, so they
@@ -283,8 +387,20 @@ def _joint_check(candidate_snapshot: dict, changed: str,
         worst_case = max(gap, stop)
         if worst_case <= 0:
             return f"worst_case_nonpositive:{ct}"
+        # ROUND THE POSITION DOWN, and do it here rather than trusting
+        # the division to land clean. 0.02 / 0.08 is exact; 0.02 / 0.14
+        # repeats, and multiplying it back overshoots the bound by 1E-29
+        # - enough to refuse a proposal that is algebraically fine. That
+        # is not a hypothetical: filling in the catalyst table with gaps
+        # that do not divide 0.02 evenly hit it immediately.
+        #
+        # Rounding DOWN is the safe direction by construction: a smaller
+        # position cannot lose more. The bound is unchanged and still
+        # binds - this only stops a rounding tail being read as a breach.
         notional_frac = min(
-            hard_bounds.max_loss_per_position_pct / worst_case, slot_frac)
+            (hard_bounds.max_loss_per_position_pct / worst_case).quantize(
+                Decimal("0.00000001"), rounding=ROUND_DOWN),
+            slot_frac)
         joint_loss = notional_frac * worst_case
         if joint_loss > hard_bounds.max_loss_per_position_pct:
             return (f"max_loss_per_position:{ct}: joint worst-case loss "
