@@ -501,8 +501,21 @@ class TestOwnerSetsTheCap:
                                  if owner_cents is not None else None))
 
     def test_owner_can_raise_the_cap_above_the_base(self, tmp_db):
-        from catalyst.cost.governor import BASE_CAP_CENTS
-        d = self._authorize(tmp_db, BASE_CAP_CENTS + 100, owner_cents=1200)
+        """The estimate is kept under DAILY_CAP_CENTS on purpose.
+
+        This test is about the MONTHLY cap being replaced by the owner's
+        figure. It used to authorise a single 600c call, which the daily
+        rate ceiling now refuses first and correctly - no one research
+        call should cost more than a whole day's allowance. Using a
+        realistic estimate keeps the test on its own subject; the daily
+        gate has its own tests below.
+        """
+        from catalyst.cost.governor import BASE_CAP_CENTS, DAILY_CAP_CENTS
+
+        estimate = BASE_CAP_CENTS + 100
+        assert estimate > BASE_CAP_CENTS, "must exceed the base to be a test"
+        estimate = min(estimate, DAILY_CAP_CENTS - 100)
+        d = self._authorize(tmp_db, estimate, owner_cents=1200)
         assert d.cap_cents == Decimal("1200")
         assert d.authorized is True, (
             "spend inside the owner's own, higher, cap must be allowed")

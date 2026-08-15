@@ -462,6 +462,15 @@ GOVERNOR_REASONS = {
         "pricing bundle.",
         ("/logs#log-bundle", "Collect the Cost & pricing log"),
         "a cost row could not be priced"),
+    "daily_cap_exceeded": (
+        "today's spending allowance is used up",
+        "This is a CEILING ON THE RATE, not the monthly budget - it "
+        "exists so a fault cannot spend the month in an afternoon. It "
+        "resets at midnight UTC and the bot carries on by itself; "
+        "nothing needs doing. If it fires most days, the allowance is "
+        "too tight for the cadence and is worth raising.",
+        ("/costs#cost-section", "See today's spend on the Cost page"),
+        "today's spending allowance was used up"),
     "lifetime_build_budget_exceeded": (
         "the one-off build budget is spent",
         "This is the $200 lifetime allowance for MANUAL testing, not the "

@@ -595,6 +595,7 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
          "locally priced from stored raw usage"),
         ("Annual hurdle at the cap", f"{base_hurdle:.1f}%",
          "what the strategy must beat before a trade counts as good"),
+        _daily_ceiling_tile(db, c),
         ("Spend this month, all kinds", dollars(total_mtd),
          f"scheduled {dollars(c.scheduled_mtd_cents)} + manual "
          f"{dollars(c.manual_mtd_cents)}, never pooled"),
@@ -1151,6 +1152,46 @@ def alerts_panel(db: Db, p: str = "alerts") -> str:
         ))
     out.append(catalyst_coverage_block(p))
     return section(f"{p}-section", "Operational alerts and adaptation", "".join(out))
+
+
+def _daily_ceiling_tile(db: Db, c) -> tuple:
+    """Today's spend against the rate ceiling, and WHICH limit binds first.
+
+    The owner set two numbers that can disagree: "$5 a day usage is ok"
+    and a $25/month budget. $5 a day for 30 days is $150, so on a busy
+    month the MONTHLY cap runs out long before the daily one ever fires.
+    Saying which one will stop the bot, and roughly when, is the
+    difference between a limit the owner chose and a limit that
+    surprises them mid-month.
+    """
+    from datetime import datetime, timezone
+
+    from catalyst.cost.governor import DAILY_CAP_CENTS
+
+    today = datetime.now(timezone.utc).date()
+    res = db.q("SELECT COALESCE(SUM(CAST(priced_cents AS REAL)), 0) FROM "
+               "cost_events WHERE kind = 'scheduled' AND date(priced_at) = ? "
+               "AND priced_cents IS NOT NULL", (today.isoformat(),))
+    spent_today = Decimal(str(res.rows[0][0])) if res.rows else Decimal(0)
+    used = (spent_today / DAILY_CAP_CENTS * 100) if DAILY_CAP_CENTS else 0
+    state = "crit" if used >= 100 else "warn" if used >= 75 else "good"
+
+    # WHICH ONE BINDS FIRST, at today's rate.
+    left_this_month = c.base_cap_cents - c.scheduled_mtd_cents
+    note = ""
+    if spent_today > 0 and left_this_month > 0:
+        days_left = left_this_month / spent_today
+        if days_left < 20:
+            note = (f" At today's rate the MONTHLY budget runs out in about "
+                    f"{days_left:.0f} day(s) - that is the limit that will "
+                    "stop the bot, not this one.")
+        else:
+            note = " The monthly budget is not close at this rate."
+    label = f"{used:.0f}% of the ${DAILY_CAP_CENTS / 100:.0f} daily ceiling"
+    return ("Spent today", dollars(spent_today),
+            pill(state, label)
+            + " a guard against a runaway, not a throttle - it resets at "
+              "midnight UTC and needs no acknowledgement." + note)
 
 
 def catalyst_coverage_block(p: str) -> str:

@@ -23,6 +23,7 @@ from decimal import Decimal
 from catalyst.cost import CostEstimate, GovernorDecision
 from catalyst.cost.ledger import (
     lifetime_cents,
+    day_to_date_cents,
     month_to_date_cents,
     net_realized_profit_cents_prior_month,
 )
@@ -36,6 +37,22 @@ BASE_CAP_CENTS = Decimal("500")                     # $5/month, hard (BUILD-BRIE
 # table calls $36/month "not viable", and without this clamp one strong
 # month walks the cap toward that line (audit F5).
 GOVERNOR_MAX_CAP_CENTS = Decimal("800")
+
+#: A CEILING ON THE RATE, not a throttle. Owner-set 2026-08-14: "$5 a
+#: day usage is ok ... the limit is so that it doesnt go far beyond".
+#:
+#: Measured against what the bot actually does, this does not bind: the
+#: owner's live day cost 193.30c across 20 scheduled calls. 500c is
+#: about 2.6x that, so ordinary operation never touches it and a
+#: runaway stops within one day instead of one month.
+#:
+#: WHY IT IS NEEDED AT ALL. The monthly cap bounds the TOTAL and not
+#: the RATE. MAX_RESEARCH_PER_CYCLE=3 against a 900-second cycle
+#: permits 288 investigations a day; at conjunction prices that is a
+#: month's budget in an afternoon followed by thirty dark days, and a
+#: strategy that only trades the first days of a month cannot be
+#: compared to a backtest that trades all of it.
+DAILY_CAP_CENTS = Decimal("500")
 
 # The owner sets their own budget, and there is deliberately NO fixed
 # ceiling on it. The two limits do different jobs and only one of them
@@ -147,6 +164,29 @@ def authorize(
                 authorized=False, kind=estimate.kind, estimate=estimate,
                 cap_cents=Decimal("0"), period_to_date_cents=spent,
                 shortfall_cents=None, reason=reason,
+            )
+            _log(decision, conn, cycle_id)
+            return decision
+
+    # THE RATE, BEFORE THE TOTAL. Checked first because it is the more
+    # specific limit and the owner needs to know WHICH one stopped it:
+    # "today's allowance is gone, it resumes at midnight" and "the
+    # month's budget is gone, it resumes on the 1st" need completely
+    # different responses, and a shared reason would give neither.
+    #
+    # Scheduled only. Manual spend is a human at a keyboard, already
+    # bounded monthly and for the lifetime of the build, and rate-
+    # limiting a person who is deliberately testing something helps
+    # nobody.
+    if estimate.kind == "scheduled":
+        today = day_to_date_cents(estimate.kind, conn, as_of)
+        if today + estimate.estimated_cents > DAILY_CAP_CENTS:
+            decision = GovernorDecision(
+                authorized=False, kind=estimate.kind, estimate=estimate,
+                cap_cents=DAILY_CAP_CENTS, period_to_date_cents=today,
+                shortfall_cents=today + estimate.estimated_cents
+                - DAILY_CAP_CENTS,
+                reason="daily_cap_exceeded",
             )
             _log(decision, conn, cycle_id)
             return decision
