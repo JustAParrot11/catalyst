@@ -397,6 +397,49 @@ def _maybe_refresh_benchmark(state: dict | None, *, force: bool = False) -> None
         _log.exception("The benchmark refresh failed; trading is unaffected.")
 
 
+def _maybe_adapt(db_file: str, state: dict | None) -> None:
+    """Run the adaptation loop once a day.
+
+    IT HAD NEVER RUN. propose_adjustment, apply, maybe_auto_revert and
+    conviction_floor_evidence were all built and tested, and nothing in
+    the live path called any of them - so the refusal tracker scored
+    refusals into evidence that was then discarded, and every threshold
+    stayed frozen at the estimate it shipped with. The brief calls this
+    "the single most important feedback loop in the system"; it was the
+    one loop that was not connected.
+
+    Once a day, not once a cycle: the inputs only change when a refusal
+    is scored or a trade closes, so ninety-six passes a day would be
+    ninety-five reads of the same numbers. It is also pure database
+    work - no broker, no model, no cost.
+    """
+    from datetime import datetime as _dt
+
+    state = {} if state is None else state
+    today = _dt.now(timezone.utc).date()
+    if state.get("adaptation_day") == today:
+        return
+    state["adaptation_day"] = today
+
+    import sqlite3
+
+    conn = sqlite3.connect(db_file)
+    try:
+        from catalyst.risk.adaptation import run_adaptation_pass
+
+        report = run_adaptation_pass(conn, _dt.now(timezone.utc))
+        for parameter, old, new in report.applied:
+            _log.info("Parameter %s is now %s (was %s).", parameter, new, old)
+        for err in report.errors:
+            _log.warning("Adaptation problem: %s", err)
+    except Exception:  # noqa: BLE001 - learning must never stop trading
+        _log.exception(
+            "The adaptation pass failed. Trading is unaffected and every "
+            "parameter keeps the value it already had.")
+    finally:
+        conn.close()
+
+
 def _dollars(cents) -> str:
     """Cents (a Decimal, or its string form) as money the owner reads."""
     from decimal import Decimal as _D
@@ -710,7 +753,25 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
             _log.exception(
                 "Conjunction discovery failed; the Form 4 candidates from "
                 "this pass are unaffected.")
-        return out
+
+        # THE UNIVERSE RULE, APPLIED WHERE NOTHING CAN GO ROUND IT
+        # (ESCALATION-4). Each builder already applies it, but this is
+        # the one place every candidate from every source passes
+        # through, so a source added later inherits the rule instead of
+        # having to remember it. Excluded names are logged by name -
+        # a symbol the bot will never trade is exactly the kind of
+        # silent refusal the brief was written against.
+        from catalyst.discovery.universe import excluded_reason
+
+        kept = []
+        for cand in out:
+            why = excluded_reason(cand.ticker)
+            if why is None:
+                kept.append(cand)
+            else:
+                _log.info("Candidate %s excluded from the universe: %s",
+                          cand.ticker, why)
+        return kept
 
     conn = sqlite3.connect(db_file)
     try:
@@ -869,6 +930,9 @@ def main(argv: list[str] | None = None) -> int:
         try:
             _maybe_reconcile_yesterday(path)
             _maybe_refresh_benchmark(_daily_state)
+            # Learn from yesterday BEFORE trading today, so any
+            # parameter that moved is the one this cycle uses.
+            _maybe_adapt(path, _daily_state)
             report = _run_one_cycle(path, _daily_state)
             if report.kill_switch.tripped:
                 _log.warning("Kill switch tripped: %s. New entries are "

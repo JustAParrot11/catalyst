@@ -33,6 +33,37 @@ def _number(value) -> Decimal | None:
     return dec if dec.is_finite() else None
 
 
+def _modeled_slippage(conn, order_id: str, price, qty) -> str | None:
+    """What crossing the spread would have cost, in dollars.
+
+    TRAPS.md: "Paper fills pay no spread. Model the cost, but record it
+    BESIDE the broker's price, not instead of it." A paper account fills
+    at the mid, so paper P&L is optimistic by roughly the half-spread on
+    entry and again on exit - on the small caps this strategy trades,
+    tens of basis points a side. Left unmodelled it is exactly the sort
+    of quiet overstatement that makes a losing strategy look like a
+    winner against the S&P.
+
+    Returns None rather than 0 where the spread was never measured. A
+    zero here would read as "crossing this spread was free", which is
+    never true; None reads as "not measured", which is the fact.
+    """
+    row = conn.execute(
+        "SELECT half_spread_bp FROM entry_market_context WHERE order_id = ?",
+        (order_id,)).fetchone()
+    if row is None or row[0] is None:
+        return None
+    try:
+        half_spread_bp = Decimal(str(row[0]))
+        cost = (Decimal(str(price)) * Decimal(str(qty))
+                * half_spread_bp / Decimal("10000"))
+    except (ArithmeticError, TypeError, ValueError):
+        return None
+    if not cost.is_finite():
+        return None
+    return str(cost.quantize(Decimal("0.0001")))
+
+
 def reconcile(broker: Broker, conn) -> list[Fill]:
     """Walk every locally-recorded order not yet terminal, ask the broker
     what actually happened, update local status, and record any fill at
@@ -122,10 +153,12 @@ def reconcile(broker: Broker, conn) -> list[Fill]:
                     """INSERT INTO fills (order_id, price, qty, filled_at,
                                           broker_reported_price,
                                           modeled_slippage)
-                       VALUES (?,?,?,?,?,NULL)""",
+                       VALUES (?,?,?,?,?,?)""",
                     (order_id, str(fill.price), str(fill.qty),
                      fill.filled_at.isoformat(),
-                     str(fill.broker_reported_price)))
+                     str(fill.broker_reported_price),
+                     _modeled_slippage(conn, order_id, avg_price,
+                                       filled_qty)))
                 fills.append(fill)
             elif Decimal(prev[0]) < filled_qty:
                 # a partial fill grew: the broker's cumulative avg price

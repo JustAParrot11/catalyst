@@ -43,6 +43,7 @@ from statistics import median
 
 from catalyst.backtest.data import PointInTimeView
 from catalyst.discovery import Candidate
+from catalyst.discovery.universe import is_tradeable
 from catalyst.research.schema import ResearchView
 
 CLUSTER_WINDOW_DAYS = 10
@@ -76,6 +77,14 @@ def build_cluster_events(purchases_csv: str | Path) -> list[ClusterEvent]:
                 continue
             sym = row["symbol"].strip().upper()
             if not _valid_symbol(sym):
+                continue
+            # The SAME universe rule the live arm applies (ESCALATION-4).
+            # It is here as well as there because this function is the
+            # backtest arm, and an edge measured over a different set of
+            # symbols than the one actually traded is not a measurement
+            # of anything. On real Form 4 data it excludes nothing - no
+            # fund has insiders - so the graded result is unchanged.
+            if not is_tradeable(sym):
                 continue
             try:
                 fd = date.fromisoformat(row["filing_date"])

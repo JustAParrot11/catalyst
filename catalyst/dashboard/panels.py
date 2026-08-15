@@ -1868,13 +1868,38 @@ def _cents(dollars_value) -> Decimal | None:
         return None
 
 
-def _conviction_gauge(value: float, p: str) -> str:
+def _decision_floor(decision: dict) -> tuple[float, str]:
+    """The conviction floor THIS decision actually faced, and where the
+    number came from.
+
+    Read from the decision's own `adaptive_params_snapshot`, which is
+    written when the decision is made. It used to be hardcoded at 0.60,
+    which was harmless only for as long as the floor never moved - the
+    adaptation loop had never been wired up, so it never did. Now that
+    it runs, a fixed marker would put the threshold line in the wrong
+    place on the one chart whose entire job is showing whether the model
+    cleared it.
+    """
+    try:
+        snap = jload(decision.get("adaptive_params_snapshot"), {}) or {}
+        raw = snap.get("conviction_floor")
+        if raw is not None:
+            return float(raw), "the value in force when this was decided"
+    except (TypeError, ValueError, ArithmeticError):
+        pass
+    from catalyst.risk.adaptive_params import DEFAULT_PARAMS
+
+    return (float(DEFAULT_PARAMS["conviction_floor"]),
+            "the shipped default - this decision recorded no snapshot")
+
+
+def _conviction_gauge(value: float, p: str, decision: dict | None = None) -> str:
     """Where the model's conviction sat, and where the floor was.
 
     The number alone ("0.71") means nothing without the threshold it had
     to clear, which is the entire reason a trade happened or did not.
     """
-    floor = 0.60          # display only - the live floor is adaptive
+    floor, floor_source = _decision_floor(decision or {})
     pct = max(0.0, min(1.0, value)) * 100
     return (
         f'<div class="gauge" id="{p}-conviction">'
@@ -1883,10 +1908,11 @@ def _conviction_gauge(value: float, p: str) -> str:
         f'<span class="gauge-fill" style="width:{pct:.1f}%"></span>'
         f'<span class="gauge-mark" style="left:{floor * 100:.0f}%"></span>'
         "</div>"
-        f'<p class="prov">The marker is the conviction floor the candidate had '
-        f"to clear ({floor:.2f} at the time of writing; it is an adaptive "
-        "parameter and moves on scored outcomes). Left of the marker means "
-        "the model was not confident enough for the code to size anything.</p>"
+        f'<p class="prov">The marker is the conviction floor this candidate '
+        f"had to clear: {floor:.2f}, {esc(floor_source)}. It is an adaptive "
+        "parameter and moves on scored outcomes, so older decisions can show "
+        "a different marker. Left of the marker means the model was not "
+        "confident enough for the code to size anything.</p>"
         "</div>")
 
 
@@ -2107,7 +2133,7 @@ def trace_page(db: Db, candidate_id: str, p: str = "tr") -> str:
          esc(str(closed.get("exit_reason") or "no exit recorded"))),
     ])]
     if conviction_f is not None:
-        header.append(_conviction_gauge(conviction_f, p))
+        header.append(_conviction_gauge(conviction_f, p, decision))
 
     body = [
         _view_switch(candidate_id, "full", p),

@@ -31,7 +31,8 @@ from catalyst.execution.broker import Broker, BrokerError
 from catalyst.execution.orders import confirm_stops_resting
 from catalyst.execution.reconcile import close_filled_positions, reconcile
 from catalyst.orchestrator.cycle import (
-    build_market_snapshot, build_portfolio_state, run_cycle,
+    CycleReport, _protective_duties, build_market_snapshot,
+    build_portfolio_state, run_cycle,
 )
 from catalyst.research import prompts
 from catalyst.research.boundary import CostContext, investigate
@@ -130,7 +131,7 @@ def model_transport(view=None, usage=None, extraction=None):
 
 def broker_for(*, fill_qty=None, on_post=None, market_open=True,
                account=None, quote=None, clock=None, clock_status=200,
-               open_orders=None, buy_status=None):
+               open_orders=None, buy_status=None, held=None):
     """Healthy paper broker, with hooks for each hostile response.
 
     Buys fill immediately at 50; SELL orders (stops) stay resting until
@@ -195,10 +196,15 @@ def broker_for(*, fill_qty=None, on_post=None, market_open=True,
             broker_id = url.rsplit("/", 1)[1]
             return httpx.Response(200, json=order_state(broker_id, broker_id))
         if "/v2/positions" in url:
-            # the positions-level reconciliation runs every cycle; an
-            # empty book is the honest answer for this mock (positions
-            # held here are all locally recorded by the same tests)
-            return httpx.Response(200, json=[])
+            # WHAT THE BROKER SAYS IT HOLDS. Defaults to empty, which is
+            # the honest answer for most tests here (their positions are
+            # locally recorded and the broker mock never really bought
+            # anything). Tests that need the broker to CONFIRM a holding
+            # pass `held` - since ESCALATION-7, a stop is only armed for
+            # shares the broker agrees exist, so "the fill is unreadable
+            # but the stock is really held" has to be sayable.
+            resolved = held(state) if callable(held) else held
+            return httpx.Response(200, json=list(resolved or []))
         if "/v2/orders" in url:
             return httpx.Response(200, json=(state["resting"]
                                              if open_orders is None
@@ -483,24 +489,83 @@ class TestStopConfirmation:
         confs = confirm_stops_resting([{"id": "p1", "ticker": "T"}], b, db)
         assert confs[0].status == "duplicate_stops"
 
-    @pytest.mark.xfail(reason="ESCALATION-3: duplicate_stops is recorded but "
-                              "never resolved - two live stops on one "
-                              "position can sell it twice, leaving a short "
-                              "in a cash account. Cancelling one is stop "
-                              "semantics: human review.", strict=False)
-    def test_duplicate_stops_are_reduced_to_one(self, db):
+    def test_duplicate_stops_are_reduced_to_one_BY_THE_CYCLE(self, db):
+        """ESCALATION-3, resolved - but NOT here, and the distinction is
+        the point.
+
+        `confirm_stops_resting` only ever reports. It is called from
+        several places and it is the function every other check trusts
+        to tell it the truth; a reporting function that quietly cancels
+        live orders at the broker as a side effect is the kind of thing
+        nobody expects to have happened when they read the call site.
+
+        The cancellation lives in `cycle._protective_duties`, which is
+        the one place that owns the book and already decides what to
+        arm, replace and neutralise. Its `duplicate_stops` branch keeps
+        exactly one live stop - preferring the id already recorded
+        locally - and cancels the rest.
+
+        The detailed cases live in test_stage5_gaps.py
+        (TestDuplicateStopReduction), including the subtle one: when the
+        recorded id is the SECOND the broker lists, it must still be the
+        one kept, or the position ends up recorded as protected by an
+        order that was just cancelled. This test pins the headline
+        property so the escalation cannot silently come back.
+        """
+        seed_decision(db, "c1", "T")
+        db.execute("INSERT INTO orders VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   ("ord-buy", "c1", "b1", "buy", "2", "market", "day",
+                    "2026-08-01T14:00:00+00:00", "filled", "{}"))
+        db.execute("INSERT INTO fills VALUES (?,?,?,?,?,NULL)",
+                   ("ord-buy", "50.00", "2", "2026-08-01T14:00:00+00:00",
+                    "50.00"))
+        db.execute("INSERT INTO positions VALUES (?,?,?,?,?,?,?)",
+                   ("p1", "T", json.dumps(["ord-buy"]), "s1",
+                    "2026-08-01T14:00:00+00:00", "2026-08-20", "open"))
+        db.commit()
+
+        two_stops = [
+            {"id": "s1", "symbol": "T", "side": "sell", "type": "stop",
+             "qty": "2"},
+            {"id": "s2", "symbol": "T", "side": "sell", "type": "stop",
+             "qty": "2"}]
         cancelled = []
 
         def handler(request):
+            url = str(request.url)
             if request.method == "DELETE":
-                cancelled.append(str(request.url).rsplit("/", 1)[1])
+                cancelled.append(url.rsplit("/", 1)[1])
                 return httpx.Response(204)
-            return httpx.Response(200, json=[
-                {"id": "s1", "symbol": "T", "side": "sell", "type": "stop"},
-                {"id": "s2", "symbol": "T", "side": "sell", "type": "stop"}])
+            if "/v2/account" in url:
+                return httpx.Response(200, json=dict(ACCOUNT))
+            if "/v2/clock" in url:
+                return httpx.Response(200, json={"is_open": True})
+            if "/v2/positions" in url:
+                return httpx.Response(200, json=[{"symbol": "T", "qty": "2"}])
+            if "by_client_order_id" in url or "/v2/orders/" in url:
+                # every stop still live until it is cancelled
+                oid = url.rsplit("/", 1)[1].split("?")[0]
+                if oid in cancelled:
+                    return httpx.Response(200, json={"id": oid,
+                                                     "status": "canceled"})
+                return httpx.Response(200, json={"id": oid,
+                                                 "status": "accepted",
+                                                 "filled_qty": "0"})
+            if "/v2/orders" in url:
+                return httpx.Response(
+                    200, json=[o for o in two_stops
+                               if o["id"] not in cancelled])
+            return httpx.Response(404, json={})
 
-        confirm_stops_resting([{"id": "p1", "ticker": "T"}], brk(handler), db)
-        assert len(cancelled) == 1
+        report = CycleReport(cycle_id="c", started_at=NOW, kill_switch=None)
+        protected, _ = _protective_duties(db, brk(handler), report, NOW)
+
+        assert cancelled == ["s2"], (
+            f"expected exactly the extra stop to be cancelled, got "
+            f"{cancelled!r} - two live stops can sell one position twice")
+        assert db.execute("SELECT stop_order_id FROM positions"
+                          ).fetchone()[0] == "s1"
+        assert protected is True
 
     def test_unprotected_position_blocks_new_entries(self, db):
         """SURVIVED: no resting stop -> no new entries this cycle."""
@@ -663,7 +728,19 @@ class TestEntryPollAndOverfill:
         # this one. Here the broker still knows the order but keeps
         # reporting garbage filled_qty; the position must be re-armed
         # from the ordered qty on the next cycle.
-        broker, state = broker_for(fill_qty="1,000")
+        # The broker CONFIRMS it holds the stock - which is what a real
+        # broker does when it has reported the order filled. That is the
+        # whole difference between this and a phantom: the shares exist,
+        # so they must be protected even though filled_qty is garbage.
+        broker, state = broker_for(
+            fill_qty="1,000",
+            # Held only AFTER the buy is sent, as a real broker reports
+            # it. A static holding would make the broker claim the stock
+            # before it was bought, which correctly blocks entries as
+            # unaccounted exposure and would test nothing.
+            held=lambda st: ([{"symbol": "TEST", "qty": "1"}]
+                             if any(o["side"] == "buy" for o in st["posts"])
+                             else []))
         run(db, broker, model_transport(), [candidate()])
         run(db, broker, model_transport(), [], events=[])
         assert db.execute("SELECT stop_order_id FROM positions"
@@ -722,15 +799,6 @@ class TestPhantomPositions:
         assert db.execute("SELECT stop_order_id FROM positions"
                           ).fetchone()[0] is None
 
-    @pytest.mark.xfail(reason="ESCALATION-7: an entry that is accepted but "
-                              "NEVER fills leaves a positions row with no "
-                              "fill. _open_position_dicts then falls back to "
-                              "the ORDERED qty, so every session re-arms a "
-                              "protective sell stop for shares the account "
-                              "does not hold, and the unprotected phantom "
-                              "blocks all new entries. Changing the qty "
-                              "fallback is stop sizing: human review.",
-                       strict=False)
     def test_never_filled_position_does_not_arm_a_stop(self, db):
         def handler(request):
             url = str(request.url)
@@ -1074,12 +1142,6 @@ class TestFeedPayloads:
             [filing_event("s" + symbol, ["1", "2"], "60000", ticker=symbol)])
         assert len(build_candidates(flat, NOW)) == expected
 
-    @pytest.mark.xfail(reason="ESCALATION-4: a filing whose ticker field "
-                              "says SPY (or any ETF/index symbol) produces a "
-                              "tradeable candidate - nothing cross-checks the "
-                              "issuer CIK against the symbol, and no universe "
-                              "rule excludes funds. A universe rule is a "
-                              "strategy decision: human review.", strict=False)
     def test_form4_claiming_an_etf_ticker_is_refused(self):
         flat = flatten_form4_events(
             [filing_event("etf", ["1", "2"], "60000", ticker="SPY")])

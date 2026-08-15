@@ -625,7 +625,14 @@ _LEAF = "insider_cluster"
 # holding_period_estimate's ceiling of 21 is "the brief's days to about
 # three weeks requirement, not a tunable" per the module's own comment.
 _EXPECTED_PARAM_RANGE = {
-    "conviction_floor": (Decimal("0.30"), Decimal("0.95")),
+    # CHANGED 2026-08-15, 0.95 -> 0.75, deliberately. The floor does not
+    # act alone: evaluate.py adds PRICED_IN_CONVICTION_PREMIUM (0.15) for
+    # a candidate judged already priced in, and conviction is bounded at
+    # 1.0. A floor of 0.95 puts that bar at 1.10 - unreachable, so every
+    # priced-in candidate is refused forever by arithmetic, silently.
+    # The invariant tying the two together lives in
+    # tests/test_adaptation_runs.py::TestTheFloorCanAlwaysBeReached.
+    "conviction_floor": (Decimal("0.30"), Decimal("0.75")),
     "adverse_gap_assumption": (Decimal("0.02"), Decimal("0.80")),
     "stop_width": (Decimal("0.02"), Decimal("0.50")),
     "holding_period_estimate": (Decimal("1"), Decimal("21")),

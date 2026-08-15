@@ -207,8 +207,30 @@ _CONSERVATIVE_VALUE_DIRECTION = {
 # Absolute ranges a parameter may never leave, however the evidence
 # reads. holding_period_estimate's ceiling of 21 days is the brief's
 # "days to about three weeks" requirement, not a tunable.
+#: THE CEILING ON THE CONVICTION FLOOR, and why it is 0.75 rather than
+#: the 0.95 it used to be.
+#:
+#: The floor does not act alone. evaluate.py adds
+#: PRICED_IN_CONVICTION_PREMIUM (0.15) for a candidate the model judged
+#: already priced in, so the bar that candidate actually faces is
+#: floor + premium. At a floor of 0.95 that bar is 1.10 - and conviction
+#: is bounded at 1.0, so EVERY priced-in candidate is refused forever, by
+#: arithmetic, no matter how good it is. The system would have been
+#: incapable of the trade and nothing on the page would have said so.
+#:
+#: OWNER-ASKED, 2026-08-14: "i dont want it to learn and make a hard
+#: limit that stops all future trades. that data may of lost a trade
+#: that one time but may win another trade in the future."
+#:
+#: 0.75 keeps a demanding bar (the model must be clearly confident) while
+#: leaving the priced-in bar at 0.90 - reachable, so the parameter can
+#: still be wrong without being permanently self-sealing. The invariant
+#: tying this to the premium is enforced in tests/test_conviction_ceiling.py,
+#: because importing evaluate here would be circular.
+CONVICTION_FLOOR_CEILING = Decimal("0.75")
+
 PARAM_RANGE = {
-    "conviction_floor": (Decimal("0.30"), Decimal("0.95")),
+    "conviction_floor": (Decimal("0.30"), CONVICTION_FLOOR_CEILING),
     "adverse_gap_assumption": (Decimal("0.02"), Decimal("0.80")),
     "stop_width": (Decimal("0.02"), Decimal("0.50")),
     "holding_period_estimate": (Decimal("1"), Decimal("21")),

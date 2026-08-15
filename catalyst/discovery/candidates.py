@@ -54,6 +54,7 @@ from datetime import date, datetime, timedelta
 
 from catalyst.data import RawEvent
 from catalyst.discovery import Candidate
+from catalyst.discovery.universe import is_tradeable
 from catalyst.strategies.insider_cluster import (
     CLUSTER_WINDOW_DAYS,
     DEDUPE_DAYS,
@@ -91,6 +92,12 @@ def _parse_purchase(event: RawEvent) -> dict | None:
             return None  # feed normally pre-filters; belt and braces
         symbol = str(p["symbol"]).strip().upper()
         if not _valid_symbol(symbol):
+            return None
+        # ESCALATION-4: a filing whose ticker field says SPY used to
+        # produce an ordinary insider-cluster candidate. An index fund
+        # has no officers or directors, so "insiders bought SPY" is bad
+        # data every time - never the signal it looks like.
+        if not is_tradeable(symbol):
             return None
         filing_date = _parse_date(p["filing_date"])
         if filing_date is None:
