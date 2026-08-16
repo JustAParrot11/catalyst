@@ -95,4 +95,8 @@ class MarketSnapshot:
     #: Optional so every existing construction stays valid, and None
     #: means NOT MEASURED rather than nothing happened.
     price_action: object = None
+    #: What the cached history says about this live quote. Every traded
+    #: number descends from one Alpaca reading; this is the only thing
+    #: that ever disagrees with it.
+    quote_check: object = None
 

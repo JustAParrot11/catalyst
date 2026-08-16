@@ -203,6 +203,34 @@ CREATE TABLE IF NOT EXISTS entry_market_context (
     recorded_at    TEXT NOT NULL
 );
 
+-- THE SECOND OPINION ON THE ONE NUMBER EVERYTHING DESCENDS FROM.
+--
+-- Every traded figure - qty, stop, exposure - is derived from a single
+-- live Alpaca quote. `data/quote_check` compares that quote against the
+-- newest cached daily close before the risk engine runs: a deviation no
+-- market produces is the shape of a decimal error, a wrong symbol or an
+-- unadjusted corporate action, and it stops the candidate.
+--
+-- It is recorded here rather than only in the cycle report because a
+-- FLAGGED quote (large, but real) is passed through deliberately, and a
+-- pass-through that exists only in a process that has since exited is
+-- indistinguishable from never having looked. One row per candidate;
+-- the primary key keeps a candidate re-checked every cycle to a single
+-- current row rather than an unbounded log.
+CREATE TABLE IF NOT EXISTS quote_cross_checks (
+    candidate_id    TEXT PRIMARY KEY REFERENCES candidates(id),
+    ticker          TEXT NOT NULL,
+    live_price      TEXT NOT NULL,
+    reference_close TEXT,               -- NULL when there was no history
+    reference_day   TEXT,
+    deviation       TEXT,               -- signed fraction, e.g. "-0.9010"
+    checked         INTEGER NOT NULL,   -- 0 = no history, NOT "passed"
+    flagged         INTEGER NOT NULL,
+    refused         INTEGER NOT NULL,
+    note            TEXT NOT NULL,      -- the sentence shown to the owner
+    checked_at      TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS positions (
     id                TEXT PRIMARY KEY,
     ticker            TEXT NOT NULL,

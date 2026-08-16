@@ -1330,6 +1330,11 @@ class Trace:
     stops_q: QueryResult
     reviews_q: QueryResult
     evidence: "EvidenceChain"
+    #: What the cached bars said about the live quote this price was
+    #: taken from. Optional so an older database, or a candidate priced
+    #: before this table existed, renders as "not recorded" rather than
+    #: as silence.
+    quote_check_q: QueryResult | None = None
 
 
 @dataclass
@@ -1524,6 +1529,11 @@ def decision_trace(db: Db, candidate_id: str) -> Trace:
         positions=positions, closed_q=closed_q, stops_q=stops_q,
         reviews_q=reviews_q,
         evidence=evidence_chain(db, candidate_id),
+        quote_check_q=db.q(
+            "SELECT ticker, live_price, reference_close, reference_day, "
+            "       deviation, checked, flagged, refused, note, checked_at "
+            "FROM quote_cross_checks WHERE candidate_id = ?",
+            (candidate_id,)),
     )
 
 
@@ -1979,6 +1989,129 @@ class StoryDetail:
     corroboration: list = field(default_factory=list)
     story_q: QueryResult | None = None
     cand_q: QueryResult | None = None
+
+
+@dataclass
+class DataIntegrity:
+    """Where every number came from, and whether anything disagreed."""
+
+    #: [(order_id, ticker, intended, filled, slippage_pct, modelled)]
+    fills: list = field(default_factory=list)
+    n_fills: int = 0
+    worst_slippage_pct: Decimal | None = None
+    median_slippage_pct: Decimal | None = None
+    modelled_total_cents: Decimal = Decimal("0")
+    #: How many tickers have cached daily history, which is what
+    #: per-stock sizing and the price-action block both read.
+    cached_tickers: int = 0
+    cache_dir: str = ""
+    fills_q: QueryResult | None = None
+
+    #: The live quote's second opinion, from the cached daily bars.
+    #: [(ticker, live, reference, day, deviation, verdict, note, when)]
+    quote_checks: list = field(default_factory=list)
+    n_quote_checks: int = 0
+    n_quote_flagged: int = 0
+    n_quote_refused: int = 0
+    #: Checked at all. A quote with no cached history to compare against
+    #: is NOT a quote that passed, and the difference is the point.
+    n_quote_unchecked: int = 0
+    quotes_q: QueryResult | None = None
+
+
+def data_integrity(db: Db) -> DataIntegrity:
+    """Fill against intended, and the state of the evidence behind it.
+
+    BUILD-BRIEF requires "fill price against intended" on every trade and
+    nothing displayed it. The intended price was being recorded at entry
+    (entry_market_context.last_close, the live mid the order was sized
+    from) and the broker's own fill beside it, and the two were never
+    compared anywhere a person could see.
+
+    That comparison is the ONLY measurement of what this bot actually
+    pays to trade. Paper fills pay no spread, so it will read as
+    approximately zero on a paper account - which is itself the finding,
+    and the page says so rather than presenting it as a good result.
+    """
+    d = DataIntegrity()
+    d.fills_q = db.q(
+        "SELECT f.order_id, o.decision_id, c.ticker, "
+        "       e.last_close AS intended, f.broker_reported_price AS filled, "
+        "       f.qty, f.modeled_slippage, f.filled_at "
+        "FROM fills f "
+        "JOIN orders o ON o.id = f.order_id "
+        "LEFT JOIN candidates c ON c.id = o.decision_id "
+        "LEFT JOIN entry_market_context e ON e.order_id = f.order_id "
+        "WHERE o.side = 'buy' ORDER BY f.filled_at DESC LIMIT 50")
+
+    slippages: list = []
+    for row in d.fills_q.rows:
+        r = dict(row)
+        intended = filled = pct = None
+        try:
+            if r.get("intended") is not None:
+                intended = Decimal(str(r["intended"]))
+            filled = Decimal(str(r["filled"]))
+            if intended and intended > 0:
+                pct = ((filled - intended) / intended * 100).quantize(
+                    Decimal("0.001"))
+                slippages.append(pct)
+        except (ArithmeticError, TypeError, ValueError):
+            pct = None
+        try:
+            if r.get("modeled_slippage"):
+                d.modelled_total_cents += Decimal(str(r["modeled_slippage"]))
+        except (ArithmeticError, TypeError, ValueError):
+            pass
+        d.fills.append((r.get("order_id"), r.get("ticker"), intended, filled,
+                        pct, r.get("modeled_slippage"),
+                        str(r.get("filled_at") or "")[:19]))
+
+    d.n_fills = len(d.fills)
+    if slippages:
+        ordered = sorted(slippages)
+        d.median_slippage_pct = ordered[len(ordered) // 2]
+        d.worst_slippage_pct = max(slippages, key=abs)
+
+    # THE SECOND OPINION ON THE PRICE, which is upstream of every figure
+    # in the table above. A refused quote never reaches an order at all,
+    # so it appears nowhere else on this page - and a FLAGGED one was
+    # passed through deliberately, which is precisely the thing that has
+    # to be visible rather than merely true.
+    d.quotes_q = db.q(
+        "SELECT ticker, live_price, reference_close, reference_day, "
+        "       deviation, checked, flagged, refused, note, checked_at "
+        "FROM quote_cross_checks ORDER BY checked_at DESC LIMIT 50")
+    for row in d.quotes_q.rows:
+        r = dict(row)
+        checked = bool(r.get("checked"))
+        refused, flagged = bool(r.get("refused")), bool(r.get("flagged"))
+        if not checked:
+            verdict = "not checked"
+            d.n_quote_unchecked += 1
+        elif refused:
+            verdict = "REFUSED"
+            d.n_quote_refused += 1
+        elif flagged:
+            verdict = "flagged"
+            d.n_quote_flagged += 1
+        else:
+            verdict = "consistent"
+        d.quote_checks.append((
+            r.get("ticker"), r.get("live_price"), r.get("reference_close"),
+            r.get("reference_day"), r.get("deviation"), verdict,
+            r.get("note") or "", str(r.get("checked_at") or "")[:19]))
+    d.n_quote_checks = len(d.quote_checks)
+
+    import os
+
+    d.cache_dir = os.environ.get("CATALYST_SIZING_BARS", "data/bars_sizing")
+    try:
+        d.cached_tickers = len(
+            [f for f in os.listdir(d.cache_dir) if f.endswith(".csv")])
+    except OSError:
+        d.cached_tickers = 0
+    return d
 
 
 def story_detail(db: Db, source_id: str) -> StoryDetail:

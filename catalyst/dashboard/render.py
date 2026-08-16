@@ -700,6 +700,8 @@ NAV_GROUPS = [
         ("/decisions", "Decisions", "Why each trade was taken or declined"),
         ("/refusals", "Learning",
          "What declined candidates did, and what moved because of it"),
+        ("/integrity", "Data integrity",
+         "Fill against intended, and where every price came from"),
         ("/logs", "Logs", "Searchable event log"),
     ]),
     ("Operate", [

@@ -238,6 +238,15 @@ def route_newsmap(db: Db, params: dict) -> str:
                        subtitle="Every line is one stored story")
 
 
+def route_integrity(db: Db, params: dict) -> str:
+    """Where every number came from, and whether anything disagreed."""
+    return render_page("Data integrity",
+                       panels.data_integrity_panel(db, p="integ"),
+                       "/integrity", db.path, db=db,
+                       subtitle="Fill against intended, and the evidence "
+                                "behind every price")
+
+
 def route_story(db: Db, params: dict) -> str:
     """One news story and what the bot made of it.
 
@@ -722,6 +731,7 @@ HTML_ROUTES = {
     # it stays highlighted as that tab rather than adding a navigation
     # entry nobody could click without a story in mind.
     "/story": route_story,
+    "/integrity": route_integrity,
     "/refusals": route_refusals,
     "/logs": route_logs,
     "/maintenance": route_maintenance,

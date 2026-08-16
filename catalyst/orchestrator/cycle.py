@@ -829,6 +829,39 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
                                               c.catalyst_date))
             except Exception:  # noqa: BLE001 - research must not die here
                 pass
+
+            # A SECOND OPINION ON THE ONE NUMBER EVERYTHING DESCENDS
+            # FROM. Every traded figure comes from this single live
+            # quote; if it is wrong - wrong symbol, misplaced decimal,
+            # an unadjusted corporate action - nothing would notice,
+            # because there is one source and it is believed. The cached
+            # bars cannot confirm today's price but can refuse to
+            # believe a hundredfold one.
+            try:
+                from catalyst.data.quote_check import cross_check
+
+                check = cross_check(market.last_close, bars_dir, c.ticker)
+                market = replace(market, quote_check=check)
+                # Recorded whatever the verdict, including "not checked".
+                # A flagged quote is passed through DELIBERATELY, and a
+                # pass-through that lives only in a process which has
+                # since exited cannot be told apart from never having
+                # looked - which is the failure this whole check exists
+                # to remove, not to reproduce one layer up.
+                _record_quote_check(conn, c, market.last_close, check, now)
+                if check.refused:
+                    report.drop_reasons.setdefault(
+                        "researched", []).append(
+                        f"{c.id}: quote_failed_cross_check")
+                    report.errors.append(
+                        f"{c.ticker}: {check.sentence}")
+                    _note_not_attempted(conn, c.id,
+                                        "quote_failed_cross_check", now)
+                    continue
+                if check.flagged:
+                    report.errors.append(f"{c.ticker}: {check.sentence}")
+            except Exception:  # noqa: BLE001 - a check must not stop a cycle
+                pass
         # bars_dir lets sizing read the CANDIDATE'S OWN gap and volatility
         # history instead of only its catalyst category's assumption. It
         # reads the local bar cache, so it costs no API call, and it
@@ -963,6 +996,36 @@ MAX_RESEARCH_ATTEMPTS = 2
 #: budget_denied (the governor refused a real attempt) and from a failed
 #: call (the API was reached and something went wrong).
 NOT_ATTEMPTED = "not_attempted: "
+
+
+def _record_quote_check(conn, candidate, live_price, check,
+                        now: datetime) -> None:
+    """Persist what the cached history said about the live quote.
+
+    INSERT OR REPLACE: a candidate re-checked every cycle keeps one
+    current row rather than growing a log nobody reads.
+
+    Never raises. A failure to record an observation must not stop a
+    trade, and must not stop a refusal either - the refusal itself is
+    decided above this call, not by it.
+    """
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO quote_cross_checks "
+            "(candidate_id, ticker, live_price, reference_close, "
+            " reference_day, deviation, checked, flagged, refused, note, "
+            " checked_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (candidate.id, candidate.ticker, str(live_price),
+             str(check.reference_close) if check.reference_close is not None
+             else None,
+             str(check.reference_day) if check.reference_day is not None
+             else None,
+             str(check.deviation) if check.deviation is not None else None,
+             int(bool(check.checked)), int(bool(check.flagged)),
+             int(bool(check.refused)), check.sentence, now.isoformat()))
+        conn.commit()
+    except sqlite3.Error:
+        pass          # observability must never break the cycle
 
 
 def _note_not_attempted(conn, candidate_id: str, reason: str,

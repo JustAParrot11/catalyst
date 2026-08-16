@@ -44,6 +44,11 @@ from catalyst.dashboard.render import (
 # --------------------------------------------------------------------------
 
 
+#: The em dash, as a LITERAL character. Passing "&mdash;" through esc()
+#: renders "&AMP;MDASH;" as visible text - a real owner-reported bug.
+DASH = "\u2014"
+
+
 def _baseline_words(base) -> str:
     """Where the comparison's money and start date came from, in one
     phrase. Never "$1,000" with no attribution: on this page a figure
@@ -1613,8 +1618,42 @@ def _narrative_what_it_concluded(t: queries.Trace, p: str) -> str:
     return "".join(out)
 
 
+def _price_provenance(t: queries.Trace, p: str) -> str:
+    """WHERE THE PRICE CAME FROM, on the page that has to explain the
+    trade afterwards.
+
+    Every figure in the section below - the size, the stop, the notional
+    - is that price times something. BUILD-BRIEF's test is that someone
+    who was not there can read one trade and understand it, and a size
+    is not explained by a number whose origin is not stated.
+    """
+    q = t.quote_check_q
+    lead = ("<p class='prov'>The price under everything below is the "
+            "<b>mid of the live Alpaca bid and ask</b> at decision time, "
+            "refused outright if it was over ten minutes old, non-positive "
+            "or crossed. The model supplies no price: it has no field to "
+            "return one in.</p>")
+    if q is None or not q.rows:
+        return lead + ("<p class='prov'>No cross-check against cached bars "
+                       "is recorded for this candidate. That means the "
+                       "check did not run or predates this record, "
+                       "<b>not</b> that it passed.</p>")
+    r = dict(q.rows[0])
+    if r.get("refused"):
+        state, word = "crit", "REFUSED"
+    elif r.get("flagged"):
+        state, word = "warn", "flagged, traded anyway"
+    elif r.get("checked"):
+        state, word = "good", "consistent"
+    else:
+        state, word = "idle", "not checked"
+    return lead + (f"<p class='prov' id='{p}-quotecheck'>"
+                   f"{pill(state, word)} {esc(str(r.get('note') or ''))}</p>")
+
+
 def _narrative_what_risk_did(t: queries.Trace, p: str) -> str:
-    out = ["<h3>3. What the deterministic risk engine did with it</h3>"]
+    out = ["<h3>3. What the deterministic risk engine did with it</h3>",
+           _price_provenance(t, p)]
     if not t.decisions_q.rows:
         out.append(empty_block(
             f"{p}-empty-decisions", t.decisions_q,
@@ -3552,6 +3591,176 @@ def news_map_panel(db: Db, params: dict | None = None, p: str = "newsmap") -> st
             "bot treats as more than coincidence."))
     return section(f"{p}-section", "News map: what was said, about whom",
                    "".join(out))
+
+
+def data_integrity_panel(db: Db, p: str = "integ") -> str:
+    """Where every number came from, and whether anything disagreed.
+
+    OWNER-ASKED: "I want to ensure all data is correct and validated so
+    we arent trading under false pretenses."
+
+    Three things nothing on this dashboard showed before:
+
+      - FILL AGAINST INTENDED. BUILD-BRIEF requires it on every trade.
+        Both halves were being stored - the live mid the order was sized
+        from, and the broker's own fill - and never compared anywhere a
+        person could see. It is the only measurement of what this bot
+        actually pays to trade.
+      - THE MODELLED SPREAD, beside the real fill rather than instead of
+        it, because a paper account pays no spread and paper P&L is
+        optimistic by exactly that amount.
+      - HOW MUCH EVIDENCE THERE IS. Per-stock sizing and the price-action
+        block both read cached daily bars; with none cached both fall
+        back to the catalyst category, correctly and silently. The count
+        is the difference between a bot sizing on this stock's own
+        history and one sizing on a category average.
+    """
+    d = queries.data_integrity(db)
+    out: list[str] = []
+
+    out.append(note(
+        "<b>Every number that touches money comes from Alpaca, never from "
+        "the model.</b> The research model has no price, target or "
+        "quantity field it could return &mdash; a figure it reads in an "
+        "article can only reach the thesis text, which no arithmetic "
+        "reads. The price below is the mid of the live bid and ask at "
+        "decision time, refused outright if it is more than ten minutes "
+        "old, non-positive or crossed."))
+
+    med = (f"{d.median_slippage_pct:+.3f}%"
+           if d.median_slippage_pct is not None else DASH)
+    worst = (f"{d.worst_slippage_pct:+.3f}%"
+             if d.worst_slippage_pct is not None else DASH)
+    out.append(tiles(f"{p}-tiles", [
+        ("Fills measured", f"{d.n_fills}",
+         "buy fills with both an intended and a filled price"),
+        ("Median slippage", med, "filled against the mid it was sized from"),
+        ("Worst slippage", worst, "the largest gap either way"),
+        ("Tickers with history", f"{d.cached_tickers:,}",
+         "cached daily bars, which per-stock sizing reads"),
+    ]))
+
+    if d.n_fills:
+        rows = [[esc(t or DASH),
+                 dollars(_cents(intended)) if intended is not None else DASH,
+                 dollars(_cents(filled)) if filled is not None else DASH,
+                 f"{pct:+.3f}%" if pct is not None else DASH,
+                 esc(modelled or DASH), esc(when)]
+                for _oid, t, intended, filled, pct, modelled, when in d.fills]
+        out.append(table(
+            f"{p}-fills",
+            ["ticker", "intended (live mid)", "filled (broker)",
+             "slippage", "modelled spread $", "when"],
+            rows, numeric_cols={1, 2, 3, 4}))
+        out.append(caveat(
+            "On a PAPER account slippage reads near zero because paper "
+            "fills pay no spread. That is not a good result, it is the "
+            # DASH, not "&mdash;": caveat() escapes its argument, so the
+            # entity would reach the browser as a visible "&mdash;".
+            f"absence of a measurement {DASH} the modelled column is what "
+            "the same trade would have cost in real money, which is why it "
+            "is recorded beside the broker's price and never instead of "
+            "it."))
+    else:
+        out.append(zero_block(
+            f"{p}-nofills", d.fills_q,
+            meaning=("no buy fill has both an intended and a filled price "
+                     "yet. The intended price is recorded when an order is "
+                     "sent, so this fills in with the first trade.")))
+
+    if not d.cached_tickers:
+        out.append(note(
+            f'<b id="{p}-nobars">No cached price history yet.</b> '
+            "Per-stock sizing and the price-action evidence both read "
+            f"daily bars from <code>{esc(d.cache_dir)}</code>. With none "
+            "cached, every position is sized against its catalyst "
+            "category's assumption instead of against what that stock has "
+            "actually done &mdash; correct and conservative, but it is the "
+            "weaker of the two. The bot fetches a candidate's history when "
+            "it researches it, so this fills in on its own."))
+
+    out.append(_quote_cross_check_block(d, p))
+
+    return section(f"{p}-section",
+                   "Data integrity: where every number came from",
+                   "".join(out))
+
+
+def _quote_cross_check_block(d, p: str) -> str:
+    """Did anything DISAGREE with the live quote?
+
+    This sits below the fill table because it is upstream of it: every
+    figure in that table descends from one live Alpaca quote, and a
+    refused quote never becomes an order at all, so it appears nowhere
+    else on this page.
+
+    THE THREE VERDICTS MEAN DIFFERENT THINGS and the page has to keep
+    them apart:
+
+      consistent   the cached close agrees; nothing to see
+      flagged      a large move, PASSED THROUGH on purpose - large moves
+                   are what this bot trades, and refusing them would
+                   throw away its whole reason for existing
+      REFUSED      a deviation no session produces; the shape of a
+                   decimal error, a wrong symbol or an unadjusted
+                   corporate action. No order was placed.
+      not checked  there was no cached history to compare against. NOT
+                   the same as passing, and shown as its own count for
+                   exactly that reason.
+    """
+    out = [
+        f'<h3 id="{p}-quotes-h">Did anything disagree with the price?</h3>',
+        note("Every figure above descends from <b>one</b> live Alpaca "
+             "quote. Before the risk engine runs, that quote is compared "
+             "against the newest daily close already cached for the same "
+             "ticker. Yesterday's close cannot confirm today's price, but "
+             "it can refuse to believe a hundredfold one."),
+    ]
+    if not d.n_quote_checks:
+        out.append(zero_block(
+            f"{p}-noquotes", d.quotes_q,
+            meaning=("no quote has been cross-checked yet. A row is "
+                     "written every time a researched candidate is priced, "
+                     "so this fills in with the first research pass.")))
+        return "".join(out)
+
+    out.append(tiles(f"{p}-quote-tiles", [
+        ("Quotes cross-checked", f"{d.n_quote_checks:,}",
+         "researched candidates priced since records began"),
+        ("Refused", f"{d.n_quote_refused:,}",
+         "no order placed - the quote failed its own check"),
+        ("Flagged, traded anyway", f"{d.n_quote_flagged:,}",
+         "a large but believable move, passed through on purpose"),
+        ("Not checked", f"{d.n_quote_unchecked:,}",
+         "no cached history to compare against - not the same as passing"),
+    ]))
+    rows = [[esc(t or DASH), esc(live or DASH), esc(ref or DASH),
+             esc(day or DASH),
+             (f"{Decimal(dev) * 100:+.1f}%" if dev else DASH),
+             esc(verdict), esc(when)]
+            for t, live, ref, day, dev, verdict, _note, when
+            in d.quote_checks]
+    out.append(table(
+        f"{p}-quotes",
+        ["ticker", "live quote", "cached close", "as of", "deviation",
+         "verdict", "when"],
+        rows, numeric_cols={1, 2, 4}))
+    # THE SENTENCE, for the rows that need one. A verdict with no
+    # figures behind it is the thing this project refuses to accept
+    # anywhere else, and "REFUSED" in a table cell is exactly that.
+    said = [(t, sentence) for t, _l, _r, _d, _dev, verdict, sentence, _w
+            in d.quote_checks if verdict in ("REFUSED", "flagged")]
+    if said:
+        out.append(f'<div class="note" id="{p}-quote-why"><b>Why:</b><ul>' +
+                   "".join(f"<li><b>{esc(t or DASH)}</b> {esc(s)}</li>"
+                           for t, s in said) + "</ul></div>")
+    out.append(caveat(
+        "A flag is an observation, not a fault. A stock can genuinely "
+        f"gap 40% on a readout {DASH} that is the trade, and refusing it "
+        "would quietly discard exactly the candidates this bot exists to "
+        "take. Only a deviation beyond fivefold is refused, because no "
+        "single session produces one."))
+    return "".join(out)
 
 
 def story_panel(db: Db, params: dict | None = None, p: str = "story") -> str:

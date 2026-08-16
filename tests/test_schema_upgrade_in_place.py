@@ -30,7 +30,7 @@ from catalyst.storage import init_db
 BASELINE_COMMIT = "3a897d4"
 
 NEW_TABLES = ("entry_market_context", "limit_application_notes",
-              "benchmark_baselines")
+              "benchmark_baselines", "quote_cross_checks")
 
 
 def _old_schema() -> str:
