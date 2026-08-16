@@ -263,6 +263,45 @@ class Broker:
         return self._request_object(
             "GET", f"{self._data_url}/v2/stocks/{symbol}/quotes/latest")
 
+    def get_daily_bars(self, symbol: str, start: str, end: str,
+                       *, limit: int = 10000, max_pages: int = 6) -> list[dict]:
+        """Daily bars for one symbol, oldest first.
+
+        WHY THIS EXISTS. Position sizing reads a stock's own gap and
+        volatility history (risk/stock_gap.py) instead of applying one
+        number to every name in a catalyst category. That only works if
+        the history is actually available, and `data/` is gitignored -
+        so on the owner's machine nothing but SPY was ever cached and
+        the whole mechanism fell back to the category value for every
+        candidate. Measured, not assumed: 125 symbols in the live cache
+        against 4,861 in the development one.
+
+        PAGED, because a multi-year daily request exceeds one page and
+        Alpaca signals the rest with `next_page_token`. Silently taking
+        page one would quietly shorten every history - and a shorter
+        history means a smaller measured worst-case gap, which means a
+        LARGER position. That is the one direction an error here must
+        never go, so paging is followed rather than hoped about.
+
+        `max_pages` bounds it: ~10k daily bars a page is already 40
+        years, so six pages is a ceiling that cannot bind in practice
+        while still refusing to loop forever on a malformed token.
+        """
+        out: list[dict] = []
+        params = {"timeframe": "1Day", "start": start, "end": end,
+                  "limit": limit, "adjustment": "split"}
+        url = f"{self._data_url}/v2/stocks/{symbol}/bars"
+        for _ in range(max_pages):
+            payload = self._request_object("GET", url, params=dict(params))
+            bars = payload.get("bars")
+            if isinstance(bars, list):
+                out.extend(b for b in bars if isinstance(b, dict))
+            token = payload.get("next_page_token")
+            if not token:
+                break
+            params["page_token"] = token
+        return out
+
 
 def _safe_json(resp: httpx.Response):
     try:

@@ -788,6 +788,26 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
                 f"{c.days_elapsed} of {days_in_month} - fill left of it is "
                 f"under pace, right of it is over.")))
 
+    # WHEN DOES IT STOP? The pace marker answers "am I ahead of pace"
+    # for someone reading the page. This answers the question that
+    # decides whether the month produces anything: on this burn rate,
+    # what DATE does research stop, and is that before the month ends.
+    # On the shipped $5/month default and the owner's own measured
+    # $1.93/day it is day three - the funnel then empties with nothing
+    # anywhere saying why.
+    from catalyst.cost.forecast import forecast as _forecast
+
+    _f = _forecast(c.scheduled_mtd_cents, c.base_cap_cents, c.as_of)
+    out.append((alarm if _f.will_stop_early else note)(
+        f'<b id="{p}-forecast">' + esc(_f.sentence()) + "</b>"
+        + (' <a href="/setup">Change the monthly budget</a>.'
+           if _f.will_stop_early else "")))
+    out.append(prov(
+        "A straight-line projection from month-to-date scheduled spend, "
+        "not a promise: cost per day follows how many candidates appear, "
+        "which nothing can know in advance. It forecasts spending only "
+        "and never authorises any."))
+
     # Daily billed spend, charted. Same rows as the table below - this
     # is the same data drawn, not a second source of truth.
     daily = [(str(r["target_date"])[5:], float(r["cost_api_total_cents"] or 0),

@@ -397,6 +397,64 @@ def _maybe_refresh_benchmark(state: dict | None, *, force: bool = False) -> None
         _log.exception("The benchmark refresh failed; trading is unaffected.")
 
 
+def _maybe_forecast_budget(db_file: str, state: dict | None) -> None:
+    """Say, once a day, when the month's budget is expected to run out.
+
+    THE QUIETEST FAILURE IN THE SYSTEM. The bot spends its cap early,
+    the governor correctly refuses every further call, and it researches
+    nothing for the rest of the month. Nothing errors; the funnel just
+    empties. On the shipped $5/month default and the owner's own
+    measured rate of $1.93/day that happens on day THREE.
+
+    The dashboard had a pace marker, which serves someone looking at it.
+    This is for the owner who is not looking: it goes in the journal and
+    the searchable log, where an unattended bot's owner actually reads.
+    """
+    from datetime import datetime as _dt
+
+    state = {} if state is None else state
+    today = _dt.now(timezone.utc).date()
+    if state.get("forecast_day") == today:
+        return
+    state["forecast_day"] = today
+
+    import sqlite3
+
+    conn = sqlite3.connect(db_file)
+    try:
+        from decimal import Decimal
+
+        from catalyst.cost.forecast import forecast
+        from catalyst.cost.governor import scheduled_cap_cents
+        from catalyst.cost.ledger import month_to_date_cents
+        from catalyst.risk.adaptive_params import current_values
+        from catalyst.setup.credentials import load_credentials
+
+        try:
+            settings = (load_credentials().settings or {})
+        except Exception:  # noqa: BLE001 - unconfigured is not an error
+            settings = {}
+        owner_cap = _owner_cap_cents(settings.get("monthly_budget_usd"))
+        share = current_values(conn).get("governor_profit_share",
+                                         Decimal("0.10"))
+        # The SAME function the governor enforces with, so the forecast
+        # cannot quietly project against a different cap than the one
+        # that will actually stop the bot.
+        cap, _bound = scheduled_cap_cents(conn, share, today,
+                                          owner_monthly_cap_cents=owner_cap)
+        spent = month_to_date_cents("scheduled", conn, today)
+        f = forecast(spent, cap, today)
+        if f.will_stop_early:
+            _log.warning("%s", f.sentence())
+        else:
+            _log.info("%s", f.sentence())
+    except Exception:  # noqa: BLE001 - a forecast must never stop trading
+        _log.exception("The budget forecast could not be computed. Trading "
+                       "and the spending cap itself are unaffected.")
+    finally:
+        conn.close()
+
+
 def _maybe_adapt(db_file: str, state: dict | None) -> None:
     """Run the adaptation loop once a day.
 
@@ -785,7 +843,12 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
                          build_candidates_all, cluster,
                          account_mode=account_mode,
                          owner_monthly_cap_cents=owner_cap,
-                         bars_dir=os.environ.get("CATALYST_BARS", "data/bars"))
+                         # ITS OWN DIRECTORY, not the benchmark's. The SPY
+                         # cache pins a feed and adjustment basis in its
+                         # metadata; writing candidate bars beside it would
+                         # make that claim untrue for the directory.
+                         bars_dir=os.environ.get("CATALYST_SIZING_BARS",
+                                                 "data/bars_sizing"))
     finally:
         conn.close()
         broker.close()
@@ -934,6 +997,7 @@ def main(argv: list[str] | None = None) -> int:
             # Learn from yesterday BEFORE trading today, so any
             # parameter that moved is the one this cycle uses.
             _maybe_adapt(path, _daily_state)
+            _maybe_forecast_budget(path, _daily_state)
             report = _run_one_cycle(path, _daily_state)
             if report.kill_switch.tripped:
                 _log.warning("Kill switch tripped: %s. New entries are "
