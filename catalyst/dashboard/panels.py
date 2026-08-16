@@ -499,7 +499,7 @@ def funnel_panel(db: Db, p: str = "funnel") -> str:
             f"{flow}"
             f'<p class="funnel-plain">{esc(stage.plain)}</p>')
 
-        if stage.drops:
+        if stage.drops or getattr(stage, "stale_drops", None):
             # COLOUR STILL FOLLOWS "IS THIS STILL HAPPENING". A reason not
             # seen for days is history and must stop wearing the colour
             # that means something is wrong right now - the owner read a
@@ -536,11 +536,52 @@ def funnel_panel(db: Db, p: str = "funnel") -> str:
                     + (f' <span class="prov">{raw(detail)}</span>'
                        if detail else "")
                     + "</span></li>")
-            out.append(
-                f'<div class="funnel-why" id="{p}-drops-{esc(stage.key)}">'
-                f"<h3>Why they stopped here</h3>"
-                "<p class='prov'>Tagged <b>routine</b> where nothing went wrong and the bot was working as designed, <b>a limit you set</b> where a bound did its job, and <b>fault</b> where something actually broke. Only the last kind is worth your attention.</p>"
-                f"<ul>{items}</ul>")
+            if stage.drops:
+                out.append(
+                    f'<div class="funnel-why" id="{p}-drops-{esc(stage.key)}">'
+                    f"<h3>Why they stopped here</h3>"
+                    "<p class='prov'>Tagged <b>routine</b> where nothing went "
+                    "wrong and the bot was working as designed, <b>a limit "
+                    "you set</b> where a bound did its job, and <b>fault</b> "
+                    "where something actually broke. Only the last kind is "
+                    "worth your attention.</p>"
+                    f"<ul>{items}</ul>")
+            else:
+                # NOTHING CURRENT IS NOT NOTHING AT ALL. Everything here
+                # has settled, and saying so is the reassuring half of
+                # this panel - a silent gap reads as a broken query.
+                out.append(
+                    f'<div class="funnel-why" id="{p}-drops-{esc(stage.key)}">'
+                    f"<h3>Why they stopped here</h3>"
+                    "<p class='prov'>Nothing is currently stopping candidates "
+                    "here. Everything recorded at this step has settled and "
+                    "is filed below.</p><ul></ul>")
+            # LEGACY, OUT OF THE WAY BUT NOT GONE. Owner-reported: "If
+            # these errors are legacy why are they still visible taking
+            # space? I want them if relevant not legacy." Settled
+            # reasons outside the fault window collapse into a
+            # disclosure: the page shows what is current, and the record
+            # stays one click away.
+            stale = getattr(stage, "stale_drops", None) or []
+            if stale:
+                older = "".join(
+                    f'<li class="drop-routine">'
+                    f'<span class="funnel-why-n">{esc(n)}</span>'
+                    '<span class="funnel-why-text">' + esc(reason)
+                    + (f' <span class="prov">{raw(detail)}</span>'
+                       if detail else "")
+                    + "</span></li>"
+                    for reason, n, detail in stale)
+                out.append(
+                    f'<details id="{p}-drops-old-{esc(stage.key)}">'
+                    f"<summary>{len(stale)} older reason(s), settled and "
+                    f"not seen for over {queries.FEED_FAULT_WINDOW_DAYS} "
+                    "day(s) - kept for the record</summary>"
+                    f"<ul class='funnel-why-list'>{older}</ul>"
+                    "<p class='prov'>Each of these stopped happening and "
+                    "the bot has worked past it. They are here because a "
+                    "fault that disappears silently cannot be told apart "
+                    "from one that never happened.</p></details>")
             explained = 0
             for _r, n, _d in stage.drops:
                 try:

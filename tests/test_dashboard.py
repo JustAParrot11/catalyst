@@ -2114,20 +2114,34 @@ class TestTheFourOwnerItems:
         conn.commit()
         conn.close()
         html_out = panels.funnel_panel(Db(path))
-        li = next(x for x in html_out.split("<li")
-                  if "research skipped" in x and 'class="drop-' in x)
         # WAS: a five-day-old `transport_error: 400` with nothing
         # successful after it, asserted to render muted. That is the
         # exact inference the fix commit for that 400 recorded as wrong -
         # it had not recurred because nothing had run, and the defect was
         # still in the code. An untested fault is not a stale one, so it
-        # now renders live and this test uses a reason that really is
-        # routine. The requirement it was written for - normal attrition
-        # must not wear the colour of a live error - is unchanged.
-        assert "drop-routine" in li
-        assert "drop-live" not in li, (
-            "routine attrition still wears the colour that means "
-            "something is wrong right now")
+        # renders live now, and this test uses a reason that really is
+        # routine.
+        #
+        # The requirement is unchanged and is now met more strongly: a
+        # settled reason this old does not merely lose its colour, it
+        # leaves the current list altogether and collapses into the
+        # "older reasons" disclosure. So the assertion is that it is NOT
+        # among the live rows, and that where it does still appear it is
+        # not styled as a live fault.
+        main = re.search(r'<div class="funnel-why" '
+                         r'id="funnel-drops-researched">.*?</ul>',
+                         html_out, re.S)
+        assert main, "the current drop list did not render at all"
+        live_rows = re.findall(r'<li class="drop-live"', main.group(0))
+        assert not live_rows, (
+            "routine attrition from five days ago is still in the live "
+            "list wearing the colour that means something is wrong now")
+        older = re.search(
+            r'<details id="funnel-drops-old-researched">.*?</details>',
+            html_out, re.S)
+        assert older, "the stale reason was deleted rather than collapsed"
+        assert "market_closed" in older.group(0)
+        assert 'class="drop-live"' not in older.group(0)
 
     def test_a_todays_funnel_reason_stays_loud(self, tmp_path):
         from catalyst.storage import init_db

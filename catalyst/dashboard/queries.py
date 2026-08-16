@@ -577,6 +577,11 @@ class Stage:
     count: int
     query: QueryResult
     drops: list = field(default_factory=list)   # [(reason, n, detail)]
+    #: Same shape, but settled and outside the fault window. Kept so the
+    #: page can put them behind a disclosure rather than delete them: a
+    #: fault that vanishes silently is indistinguishable from one that
+    #: never happened, and the owner still has to be able to find it.
+    stale_drops: list = field(default_factory=list)
     note: str = ""
     #: What this step DOES, in a sentence a non-developer can read. The
     #: stage labels are pipeline nouns; on their own they told the owner
@@ -1023,11 +1028,35 @@ def funnel(db: Db) -> Funnel:
 
     drops = [(k, len(v), _date_drop(k, v))
              for k, v in sorted(res_reasons.items(), key=lambda kv: -len(kv[1]))]
+    # WHICH ROWS ARE STILL NEWS. Owner-reported: "If these errors are
+    # legacy why are they still visible taking space? I want them if
+    # relevant not legacy."
+    #
+    # A reason last seen outside the fault window, that the bot has
+    # worked past, is history. It is NOT deleted - "a fault that
+    # vanishes silently is indistinguishable from one that never
+    # happened" - it moves behind a disclosure so the page shows what is
+    # current and keeps the rest one click away.
+    cutoff = (datetime.now(timezone.utc).date()
+              - timedelta(days=FEED_FAULT_WINDOW_DAYS))
+    stale_drops = []
+    current_drops = []
+    for reason, n, detail in drops:
+        whens = res_reasons[reason]
+        last = _as_date(max(whens))
+        settled = ("have succeeded since" in str(detail)
+                   or skip_kind(reason) != "FAULT")
+        if last is not None and last < cutoff and settled:
+            stale_drops.append((reason, n, detail))
+        else:
+            current_drops.append((reason, n, detail))
+    drops = current_drops
     # FAULTS FIRST, routine last. Sorting by count alone buried a real
     # HTTP 400 under "the market was closed", which is the ordering that
     # made the page unreadable.
     _ORDER = {"FAULT": 0, "LIMIT": 1, "ROUTINE": 2}
     drops.sort(key=lambda d: (_ORDER[skip_kind(d[0])], -d[1]))
+    stale_drops.sort(key=lambda d: (_ORDER[skip_kind(d[0])], -d[1]))
     # A governor denial is a FAULT, not attrition: the bot wanted to
     # research and was not allowed to spend. It is also not attributable
     # to a candidate, so it can never sit in the drop column.
@@ -1062,7 +1091,8 @@ def funnel(db: Db) -> Funnel:
                 + f".  [{r['reason']}]  " + seen))
     stages.append(Stage(
         "researched", "Researched by the model", len(s_res), researched_q,
-        drops=drops, faults=gov_faults, healed=gov_healed,
+        drops=drops, stale_drops=stale_drops,
+        faults=gov_faults, healed=gov_healed,
         entered=len(s_cand),
         plain="Claude read the candidate and everything the feeds hold on "
               "it. This is the only step that costs money, so it is also "
