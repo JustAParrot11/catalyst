@@ -785,7 +785,12 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
                          build_candidates_all, cluster,
                          account_mode=account_mode,
                          owner_monthly_cap_cents=owner_cap,
-                         bars_dir=os.environ.get("CATALYST_BARS", "data/bars"))
+                         # ITS OWN DIRECTORY, not the benchmark's. The SPY
+                         # cache pins a feed and adjustment basis in its
+                         # metadata; writing candidate bars beside it would
+                         # make that claim untrue for the directory.
+                         bars_dir=os.environ.get("CATALYST_SIZING_BARS",
+                                                 "data/bars_sizing"))
     finally:
         conn.close()
         broker.close()

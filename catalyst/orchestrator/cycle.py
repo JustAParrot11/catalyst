@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+from catalyst.data.bar_history import ensure_history
 from catalyst.discovery import Candidate
 from catalyst.execution.broker import Broker, BrokerError
 from catalyst.execution.exits import _neutralize_stop, manage_exits, reopen_stops
@@ -801,6 +802,18 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
         researched += 1
 
         cluster_key = cluster_keys.get(c.id) or _fallback_cluster_key(c)
+        # THE HISTORY HAS TO BE THERE BEFORE IT CAN BE READ. `data/` is
+        # gitignored, so nothing on the owner's machine had ever cached a
+        # candidate's bars and per-stock sizing fell back to the catalyst
+        # category for every single name - correct, tested and inert.
+        # One request per researched candidate fixes that; bars are
+        # inside the Alpaca subscription and cost nothing.
+        #
+        # It cannot fail the cycle: ensure_history never raises, and a
+        # ticker without history simply keeps its category value, which
+        # is the conservative direction.
+        if bars_dir:
+            ensure_history(broker, bars_dir, c.ticker, now=now)
         # bars_dir lets sizing read the CANDIDATE'S OWN gap and volatility
         # history instead of only its catalyst category's assumption. It
         # reads the local bar cache, so it costs no API call, and it
