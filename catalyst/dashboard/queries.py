@@ -93,6 +93,10 @@ class Performance:
     #: fault. Kept as a flag rather than sniffed out of spy_error, so the
     #: page can stop calling a normal Monday morning "unavailable".
     spy_window_too_short: bool = False
+    #: The cache itself is behind - the daily Alpaca refresh is failing.
+    #: A DIFFERENT problem from a short window, and the only one of the
+    #: two that anybody can act on.
+    spy_stale: bool = False
     #: Which Alpaca feed the cached bars came from. "iex" is one
     #: exchange's prints rather than the consolidated tape - a fine daily
     #: benchmark for an instrument as liquid as SPY, but the page has to
@@ -153,6 +157,12 @@ class Performance:
         return self.n_closed >= MIN_TRADES_FOR_MEANING
 
 
+#: A SPY cache newer than this is simply a short window; older than it,
+#: the once-a-day refresh has been failing. Four days clears an ordinary
+#: long weekend without hiding a refresh that stopped working.
+SPY_STALE_AFTER_DAYS = 4
+
+
 def _load_spy(start: date, end: date, capital_cents=None):
     """SPY closes from the local bar cache. Returns (points, source, error,
     row_count). Never touches the network — the dashboard reads what
@@ -177,12 +187,36 @@ def _load_spy(start: date, end: date, capital_cents=None):
     window = [b for b in bars if start <= b.day <= end]
     if not window:
         span = f"{bars[0].day}..{bars[-1].day}" if bars else "empty file"
-        return (
-            [], f"local bar cache {root}/SPY.csv",
-            f"cache holds {len(bars)} bars ({span}) but none inside the bot's "
-            f"window {start}..{end}",
-            len(bars), "",
-        )
+        # TWO DIFFERENT SITUATIONS WEAR THIS ONE SYMPTOM, and they need
+        # opposite responses. One needs Tuesday; the other needs
+        # somebody to look at why Alpaca is not answering.
+        #
+        #   A NEW COMPARISON. The baseline is struck the first time the
+        #   broker account is read, so on day one the window is a single
+        #   day and there is nothing to index yet. Entirely normal, and
+        #   it fixes itself as sessions accumulate.
+        #
+        #   A STALE CACHE. The bot refreshes SPY once a day; if the
+        #   newest bar is well behind the window, that refresh has been
+        #   failing and no amount of waiting will help.
+        newest = bars[-1].day if bars else None
+        stale_days = (start - newest).days if newest else None
+        if stale_days is not None and stale_days > SPY_STALE_AFTER_DAYS:
+            why = (
+                f"the SPY cache has not been updated since {newest} - "
+                f"{stale_days} days before this comparison even starts. The "
+                "bot refreshes it once a day from Alpaca, so this is the "
+                "daily refresh failing rather than a window that is merely "
+                "short. The Maintenance page shows whether Alpaca is "
+                f"reachable. Cache holds {len(bars)} bars ({span}).")
+        else:
+            why = (
+                f"the comparison starts on {start} and there is not yet a "
+                f"full session inside it, so there is nothing to index "
+                "against. This is what a brand-new baseline or a weekend "
+                "looks like, not a fault - a figure appears once a session "
+                f"or two has closed. Cache holds {len(bars)} bars ({span}).")
+        return ([], f"local bar cache {root}/SPY.csv", why, len(bars), "")
     base = window[0].close
     points = [
         (b.day, float(b.close / base * 100),
@@ -267,6 +301,26 @@ def performance(db: Db) -> Performance:
         _, source, error, rows, feed = _load_spy(
             today - timedelta(days=30), today, capital)
         perf.spy_source, perf.spy_rows, perf.spy_feed = source, rows, feed
+        # A REAL BASELINE THAT STARTS TODAY has nothing to index yet,
+        # and the generic message never mentions the baseline at all -
+        # so the owner reads "no equity series" as a fault on the very
+        # first day after connecting an account, which is exactly when
+        # it is most normal. Say which day the comparison starts from.
+        if not base.is_placeholder:
+            perf.spy_source, perf.spy_rows, perf.spy_feed = source, rows, feed
+            perf.spy_error = (
+                f"the comparison against the S&P starts on "
+                f"{base.start_date} and no session has closed inside it "
+                "yet, so there is nothing to index against. This is what "
+                "a freshly connected account looks like, not a fault - a "
+                "figure appears once the market has closed on a day the "
+                + (f"The SPY cache itself is readable ({rows} bars in a "
+                   "30-day probe window)."
+                   if rows else
+                   "The SPY cache is also empty, which is normal on a fresh "
+                   "install - the bot fills it on its first daily refresh."))
+            perf.spy_window_too_short = rows > 0
+            return perf
         perf.spy_error = error or (
             f"SPY cache is readable ({rows} bars in a 30-day probe window), but the "
             "bot has no closed trades and no priced cost rows, so there is no equity "
@@ -306,8 +360,14 @@ def performance(db: Db) -> Performance:
     # A cache full of bars with none in a two-day window that happens to
     # be a weekend is not a broken benchmark. Distinguishing the two is
     # the whole point: one needs fixing, the other needs Tuesday.
+    # "Needs Tuesday" versus "needs looking at". The stale case is NOT
+    # window_too_short: calling a failing daily refresh "too short" is
+    # how a real outage gets read as normal and left for a week.
+    perf.spy_stale = bool(
+        not spy_points and rows > 0 and error and "has not been updated" in error)
     perf.spy_window_too_short = bool(
-        not spy_points and rows > 0 and error and "none inside" in error)
+        not spy_points and rows > 0 and error
+        and "not yet a full session" in error)
     return perf
 
 

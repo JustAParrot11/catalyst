@@ -328,6 +328,19 @@ def performance_panel(db: Db, p: str = "perf") -> str:
             "not - a like-for-like exposure-matched comparison needs a daily "
             "position-value series the schema does not record yet."
         ))
+    elif perf.spy_stale:
+        # A DIFFERENT PROBLEM, and the only one of the two anybody can
+        # act on: the once-a-day Alpaca refresh has stopped working, so
+        # the cache is behind the comparison window and no amount of
+        # waiting fixes it. Rendered as an alarm precisely because the
+        # short-window case below is deliberately NOT one - if both read
+        # the same, a real outage gets left for a week.
+        out.append(alarm(
+            f'<b id="{p}-spy-stale">The SPY benchmark cache is out of '
+            "date, and this one does need looking at.</b> "
+            f"{perf.spy_error or ''} Until it refreshes there is no S&amp;P "
+            "comparison, though nothing about trading is affected - the "
+            "benchmark is reporting only."))
     elif perf.spy_window_too_short:
         # Healthy cache, window shorter than one trading day. An alarm
         # here taught the owner to distrust a working benchmark.

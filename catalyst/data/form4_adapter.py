@@ -35,7 +35,16 @@ def flatten_form4_events(feed_events: list[RawEvent]) -> list[RawEvent]:
     purchases.csv schema. Non-purchase filings flatten to nothing."""
     flat: list[RawEvent] = []
     for ev in feed_events:
-        parsed = (ev.payload_raw or {}).get("parsed") or {}
+        # A PAYLOAD THAT IS NOT AN OBJECT used to raise
+        # "'str' object has no attribute 'get'" and take the ENTIRE
+        # batch of filings with it, not just the malformed one - the
+        # same shape as the defect already recorded here for a non-object
+        # entry in `owners`. Found by pushing every upstream shape
+        # through, not by reading.
+        raw = ev.payload_raw
+        if not isinstance(raw, dict):
+            continue
+        parsed = raw.get("parsed") or {}
         if not isinstance(parsed, dict):
             continue
         # A malformed entry drops ITSELF, never the rest of the batch: a
