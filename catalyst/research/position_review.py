@@ -46,6 +46,7 @@ exit is tomorrow anyway - neither can change what happens.
 from __future__ import annotations
 
 import json
+import sqlite3
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
@@ -281,6 +282,12 @@ def render_prompt(position: dict, view: dict, market: dict) -> str:
 #: precisely so a changed news picture is noticed - "incase the news
 #: changes" - and a check that runs weekly cannot do that.
 REVIEW_INTERVAL_HOURS = 24
+
+#: However much news breaks, a position is not re-read more often than
+#: this. Without it a company in the headlines all day is reviewed every
+#: cycle - 96 times - which is how a rule meant to be responsive becomes
+#: the largest line on the bill.
+MIN_REVIEW_GAP_HOURS = 4
 #: A review asks a narrow question about a named company, so more
 #: searching does not sharpen it the way it does for a conjunction.
 REVIEW_SEARCHES = 2
@@ -303,6 +310,44 @@ def last_reviewed_at(conn, position_id: str):
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+def news_since(conn, ticker: str, since: datetime) -> tuple[int, str]:
+    """Stored news naming this company since `since`, and the newest
+    headline. Pure database - no broker call and no model call, so
+    asking is free.
+
+    THE POINT OF ASKING. A 24-hour clock spends the same money whether
+    the world moved or not: five quiet positions cost exactly as much
+    to re-read as five where the thesis just broke. News is the cheapest
+    available signal that something changed, and it is already being
+    stored for discovery.
+    """
+    if not ticker:
+        return 0, ""
+    try:
+        rows = conn.execute(
+            "SELECT payload_raw FROM raw_events "
+            "WHERE source = 'alpaca_news' AND fetched_at > ? "
+            "ORDER BY fetched_at DESC LIMIT 200",
+            (since.isoformat(),)).fetchall()
+    except sqlite3.Error:
+        return 0, ""
+    hits, newest = 0, ""
+    want = str(ticker).strip().upper()
+    for (payload,) in rows:
+        try:
+            parsed = json.loads(payload) if payload else {}
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        if str(parsed.get("ticker") or "").strip().upper() != want:
+            continue
+        hits += 1
+        if not newest:
+            newest = str(parsed.get("headline") or "")[:120]
+    return hits, newest
+
+
 def due_for_review(conn, positions, now: datetime,
                    interval_hours: int = REVIEW_INTERVAL_HOURS):
     """(to_review, [(position, why_not)]).
@@ -310,6 +355,25 @@ def due_for_review(conn, positions, now: datetime,
     Every gate that declines a review names itself, because a position
     that is silently never reviewed looks exactly like one that is
     reviewed and always held.
+
+    THE INTERVAL IS A FLOOR ON ATTENTION, NOT A CEILING. A fixed 24-hour
+    clock means a thesis can break at ten in the morning and go unread
+    until the next day - the owner's point, and a fair one. Raising the
+    rate for everything is the expensive answer: five positions reviewed
+    every six hours is $18/month against a $25 cap, and it competes
+    directly with discovery, which is what finds the next trade.
+
+    So news brings a review FORWARD. If a feed has published something
+    naming this company since it was last read, it is read now rather
+    than on the clock. That spends the money where something has
+    actually changed instead of paying repeatedly to be told nothing
+    has, and asking costs nothing - the news is already stored, and the
+    check is one indexed query.
+
+    MIN_REVIEW_GAP_HOURS is the guard underneath. A company in the news
+    all day would otherwise be re-read every cycle, which is how a
+    responsive rule becomes a runaway bill; a busy name is read at most
+    that often however much is written about it.
     """
     to_review: list = []
     skipped: list = []
@@ -321,11 +385,23 @@ def due_for_review(conn, positions, now: datetime,
         last = last_reviewed_at(conn, position.get("id"))
         if last is not None:
             hours = (now - last).total_seconds() / 3600.0
-            if hours < interval_hours:
+            if hours < MIN_REVIEW_GAP_HOURS:
                 skipped.append((position, (
-                    f"reviewed {hours:.1f}h ago; the interval is "
-                    f"{interval_hours}h")))
+                    f"reviewed {hours:.1f}h ago; nothing is re-read inside "
+                    f"{MIN_REVIEW_GAP_HOURS}h however much news there is")))
                 continue
+            if hours < interval_hours:
+                hits, headline = news_since(conn, position.get("ticker"), last)
+                if not hits:
+                    skipped.append((position, (
+                        f"reviewed {hours:.1f}h ago, the interval is "
+                        f"{interval_hours}h, and no news has named "
+                        f"{position.get('ticker')} since")))
+                    continue
+                position["review_trigger"] = (
+                    f"{hits} news item(s) named {position.get('ticker')} "
+                    f"since it was last read {hours:.1f}h ago"
+                    + (f': "{headline}"' if headline else ""))
         to_review.append(position)
     return to_review, skipped
 

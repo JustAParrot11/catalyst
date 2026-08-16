@@ -78,6 +78,15 @@ def is_fresh(cache_dir, ticker: str, *, now=None,
     except OSError:
         return False
     now = now or datetime.now(timezone.utc)
+    # A NAIVE `now` RAISES ON THE SUBTRACTION, not on the way in:
+    # "can't subtract offset-naive and offset-aware datetimes". Found by
+    # stress rather than by reading, and it is the same shape as the
+    # stress-tester defect already recorded in cycle.py for a feed that
+    # dropped its trailing Z. Every caller in this repo passes an aware
+    # datetime, which is exactly why the one that eventually does not
+    # would fail inside the trading loop.
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
     age = now - datetime.fromtimestamp(stat.st_mtime, timezone.utc)
     if age > timedelta(days=max_age_days):
         return False
@@ -138,6 +147,8 @@ def ensure_history(broker, cache_dir, ticker: str, *, now=None,
         return True
 
     now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:            # same trap as is_fresh, same fix
+        now = now.replace(tzinfo=timezone.utc)
     start = (now - timedelta(days=int(365.25 * years))).date().isoformat()
     # Yesterday, not today: a partial session's bar is not a session.
     end = (now - timedelta(days=1)).date().isoformat()

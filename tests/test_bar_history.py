@@ -349,3 +349,28 @@ class TestTheCycleActuallyCallsIt:
         s5.run(conn, broker, s5.model_transport(), [s5.candidate()])
         conn.close()
         assert asked == []
+
+
+class TestNaiveDatetimesDoNotCrashTheLoop:
+    """Found by stress, not by reading. A naive `now` does not fail on
+    the way in - it raises on the SUBTRACTION, inside the trading loop:
+    "can't subtract offset-naive and offset-aware datetimes". The same
+    shape as the defect cycle.py already records for a feed that dropped
+    its trailing Z.
+
+    Every caller in this repo passes an aware datetime, which is
+    precisely why the first one that does not would be a live failure.
+    """
+
+    def test_is_fresh_survives_a_naive_clock(self, tmp_path):
+        (tmp_path / "AAPL.csv").write_text(
+            "date,open,high,low,close,volume\n"
+            + "2024-01-01,1,1,1,1,1\n" * 400)
+        # datetime inside the European DST gap, deliberately
+        assert bh.is_fresh(tmp_path, "AAPL",
+                           now=datetime(2026, 3, 29, 2, 30)) in (True, False)
+
+    def test_ensure_history_survives_a_naive_clock(self, tmp_path):
+        broker = FakeBroker()
+        assert bh.ensure_history(broker, tmp_path, "AAPL",
+                                 now=datetime(2026, 3, 29, 2, 30)) is True

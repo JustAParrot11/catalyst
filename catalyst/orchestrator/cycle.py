@@ -1151,6 +1151,13 @@ def _review_open_positions(conn, broker: Broker, transport,
             f"{position.get('ticker')}: {why}")
 
     for position in to_review:
+        # WHY THIS ONE, NOW. A review that fired early because news
+        # broke is a different event from one the clock came round to,
+        # and the funnel should not make them look identical.
+        if position.get("review_trigger"):
+            report.drop_reasons.setdefault("positions_reviewed", []).append(
+                f"{position.get('ticker')}: read early - "
+                f"{position['review_trigger']}")
         try:
             snapshot = build_market_snapshot(broker, position["ticker"], now)
             entry = position.get("entry_price")

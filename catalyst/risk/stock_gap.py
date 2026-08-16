@@ -155,7 +155,24 @@ def daily_move_percentile(bars_dir, ticker: str,
         return None
     moves.sort()
     idx = int(q * (len(moves) - 1))
-    return Decimal(str(moves[idx])).quantize(Decimal("0.0001"))
+    measured = Decimal(str(moves[idx])).quantize(Decimal("0.0001"))
+
+    # A STOCK THAT NEVER MOVED IS NOT A CALM STOCK, IT IS A BAD FILE.
+    # Found by stress: several kinds of unusable history parse into
+    # constant prices - a column of 1s, a file whose only readable
+    # column is `close`, one mangled by a BOM. Every daily move is then
+    # zero, which reads as "no volatility" and puts the stop at the
+    # MIN_STOP_WIDTH floor: an 8% stop on a biotech binary, where the
+    # category says 50%.
+    #
+    # That is not dangerous - the adverse gap still dominates sizing, so
+    # the position does not grow - but it is a stop that ordinary noise
+    # takes out, and the cause is unreadable data rather than measured
+    # risk. No real security has a 95th-percentile daily move of zero
+    # over a year, so this is the file telling us it is not real.
+    if measured <= 0:
+        return None
+    return measured
 
 
 def effective_stop(catalyst_type: str, type_stop, bars_dir,

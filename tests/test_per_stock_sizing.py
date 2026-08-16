@@ -272,3 +272,92 @@ class TestHardBoundsAreUntouched:
         slot = Decimal("2000") / HARD_BOUNDS.max_open_positions
         assert res.notional_usd <= slot, (
             "per-stock evidence breached the equal-weight slot ceiling")
+
+
+class TestUnusableHistoryAlwaysFallsBackToTheCategory:
+    """Found by stress-sweeping the real reader, not by reading it.
+
+    Fifteen kinds of unusable bar file were pushed through
+    `effective_gap` and `effective_stop`. None raised - but SIX of them
+    produced a stop of 8% where the category says 50%, because they
+    parse into CONSTANT prices: a column of 1s, a file whose only
+    readable column is `close`, one mangled by a BOM. Every daily move
+    is then zero, which reads as "this stock never moves" and puts the
+    stop on the MIN_STOP_WIDTH floor.
+
+    Not dangerous - the adverse gap still dominates sizing, so the
+    position does not grow - but an 8% stop on a biotech binary is taken
+    out by ordinary noise, and the cause would have been an unreadable
+    file rather than measured risk. No real security has a
+    95th-percentile daily move of zero over a year; a file claiming
+    otherwise is telling us it is not real.
+    """
+
+    CASES = {
+        "empty file": "",
+        "header only": "date,open,high,low,close,volume\n",
+        "no header": "2024-01-01,1,1,1,1,1\n" * 400,
+        "NaN prices": "date,open,high,low,close,volume\n"
+                      + "2024-01-01,NaN,NaN,NaN,NaN,1\n" * 400,
+        "Infinity": "date,open,high,low,close,volume\n"
+                    + "2024-01-01,Infinity,1,1,1,1\n" * 400,
+        "negative prices": "date,open,high,low,close,volume\n"
+                           + "2024-01-01,-5,-5,-5,-5,1\n" * 400,
+        "zero prices": "date,open,high,low,close,volume\n"
+                       + "2024-01-01,0,0,0,0,0\n" * 400,
+        "text prices": "date,open,high,low,close,volume\n"
+                       + "2024-01-01,abc,def,ghi,jkl,1\n" * 400,
+        "missing columns": "date,close\n" + "2024-01-01,5\n" * 400,
+        "null bytes": "date,open,high,low,close,volume\n"
+                      + "2024-01-01,\x00,1,1,1,1\n" * 400,
+        "BOM and CRLF": "﻿date,open,high,low,close,volume\r\n"
+                        + "2024-01-01,1,1,1,1,1\r\n" * 400,
+        "huge numbers": "date,open,high,low,close,volume\n"
+                        + "2024-01-01,1e308,1e308,1e308,1e308,1\n" * 400,
+        "unicode prices": "date,open,high,low,close,volume\n"
+                          + "2024-01-01,\U0001f642,1,1,1,1\n" * 400,
+        "ragged rows": "date,open,high,low,close,volume\n"
+                       + "2024-01-01,1\n" * 400,
+        "constant prices": "date,open,high,low,close,volume\n"
+                           + "2024-01-01,7,7,7,7,1\n" * 400,
+    }
+
+    @pytest.mark.parametrize("name", sorted(CASES))
+    def test_both_bounds_fall_back(self, tmp_path, name):
+        (tmp_path / "ZZZZ.csv").write_text(self.CASES[name], encoding="utf-8")
+        gap, _ = stock_gap.effective_gap("fda_decision", Decimal("0.60"),
+                                         tmp_path, "ZZZZ")
+        stop, _ = stock_gap.effective_stop("fda_decision", Decimal("0.50"),
+                                           tmp_path, "ZZZZ")
+        assert gap == Decimal("0.60"), f"{name}: gap became {gap}"
+        assert stop == Decimal("0.50"), (
+            f"{name}: stop became {stop} - an unreadable file produced a "
+            f"tighter stop than the category, which is churn caused by bad "
+            f"data rather than by measured risk")
+
+    def test_a_directory_where_a_file_belongs(self, tmp_path):
+        (tmp_path / "DIRR.csv").mkdir()
+        gap, _ = stock_gap.effective_gap("earnings", Decimal("0.14"),
+                                         tmp_path, "DIRR")
+        assert gap == Decimal("0.14")
+
+    def test_an_unreadable_file(self, tmp_path):
+        import os
+        import stat
+
+        path = tmp_path / "NOPE.csv"
+        path.write_text("x")
+        os.chmod(path, 0)
+        try:
+            gap, _ = stock_gap.effective_gap("earnings", Decimal("0.14"),
+                                             tmp_path, "NOPE")
+            assert gap == Decimal("0.14")
+        finally:
+            os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+
+    def test_zero_volatility_is_read_as_no_data(self, tmp_path):
+        """The specific mechanism, pinned on its own."""
+        (tmp_path / "FLAT.csv").write_text(
+            "date,open,high,low,close,volume\n"
+            + "2024-01-01,7,7,7,7,1\n" * 400)
+        assert stock_gap.daily_move_percentile(tmp_path, "FLAT") is None
