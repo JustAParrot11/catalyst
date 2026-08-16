@@ -15,7 +15,7 @@ supplies the live pieces.
 import json
 import sqlite3
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -814,6 +814,21 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
         # is the conservative direction.
         if bars_dir:
             ensure_history(broker, bars_dir, c.ticker, now=now)
+            # AND PUT IT IN FRONT OF THE MODEL. The bars were being
+            # fetched for sizing and nothing else, while the research
+            # brief asked "what has the price done since the filing"
+            # with only today's close attached. The move since the
+            # catalyst date is the evidence for whether the opportunity
+            # is still open, and it is already on disk by this line.
+            try:
+                from catalyst.data.price_action import price_action
+
+                market = replace(
+                    market,
+                    price_action=price_action(bars_dir, c.ticker,
+                                              c.catalyst_date))
+            except Exception:  # noqa: BLE001 - research must not die here
+                pass
         # bars_dir lets sizing read the CANDIDATE'S OWN gap and volatility
         # history instead of only its catalyst category's assumption. It
         # reads the local bar cache, so it costs no API call, and it

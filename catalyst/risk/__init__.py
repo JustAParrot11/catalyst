@@ -89,4 +89,10 @@ class MarketSnapshot:
     last_close: Decimal
     half_spread_bp: Decimal           # measured, from live NBBO at decision time
     median_daily_dollar_volume: Decimal
+    #: What the tape has already done, from the cached daily bars. The
+    #: evidence for "is this already priced in", which the model was
+    #: previously asked to judge with only today's close in front of it.
+    #: Optional so every existing construction stays valid, and None
+    #: means NOT MEASURED rather than nothing happened.
+    price_action: object = None
 

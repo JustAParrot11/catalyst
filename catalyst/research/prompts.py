@@ -22,6 +22,8 @@ Design rules, enforced by tests/test_discovery.py:
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from catalyst.discovery import Candidate
 from catalyst.discovery.candidates import candidate_facts
 from catalyst.strategies.insider_cluster import (
@@ -135,12 +137,59 @@ def render_market_section(market) -> str:
             f"  - half-spread now: {spread} bp. This is what it costs to "
             "get in and out; a thesis worth less than the round trip is "
             "not a trade.")
-    vol = getattr(market, "median_daily_dollar_volume", None)
+    # WHAT THE PRICE HAS ALREADY DONE. Question 6 below asks exactly
+    # this and the block used to carry none of it, leaving a web search
+    # as the only route to an answer the cached bars can state exactly.
+    action = getattr(market, "price_action", None)
+    if action is not None and getattr(action, "measured", False):
+        if action.move_since_catalyst_pct is not None:
+            lines.append(
+                f"  - move since the catalyst date: "
+                f"{action.move_since_catalyst_pct:+}% over "
+                f"{action.sessions_since_catalyst} session(s). THIS IS THE "
+                "EVIDENCE FOR WHETHER YOU ARE TOO LATE - a large move "
+                "already made is what 'consumed' looks like; a flat tape "
+                "after public evidence is the opposite.")
+        if action.move_5d_pct is not None:
+            lines.append(f"  - move over the last 5 sessions: "
+                         f"{action.move_5d_pct:+}%")
+        if action.move_20d_pct is not None:
+            lines.append(f"  - move over the last 20 sessions: "
+                         f"{action.move_20d_pct:+}%")
+        if action.range_position_pct is not None:
+            lines.append(
+                f"  - position in its 52-week range: "
+                f"{action.range_position_pct}% (0 = at the low, 100 = at "
+                "the high)")
+        if action.recent_volume_ratio is not None:
+            lines.append(
+                f"  - recent volume against its own median: "
+                f"{action.recent_volume_ratio}x. Above 1 means the name is "
+                "being traded more than usual, which is what the market "
+                "noticing something looks like.")
+
+    # VOLUME, OR AN HONEST SILENCE. This rendered "$0" for every
+    # candidate because the field was never populated - telling the
+    # model a $60bn company has no volume at all, under a heading
+    # claiming it was measured, with a nudge attached saying thin names
+    # are least likely to have been consumed. A wrong number pointing
+    # the judgement in one direction is worse than no number.
+    vol = getattr(action, "median_daily_dollar_volume", None) if action \
+        else None
+    if vol is None:
+        vol = getattr(market, "median_daily_dollar_volume", None)
+        if vol is not None and Decimal(str(vol)) <= 0:
+            vol = None
     if vol is not None:
         lines.append(
             f"  - median daily dollar volume: ${int(vol):,}. Thin names "
             "move on little, and are also where a cluster is least "
             "likely to have been consumed already.")
+    else:
+        lines.append(
+            "  - median daily dollar volume: NOT MEASURED for this "
+            "candidate. Do not assume it is thin or liquid; if that "
+            "matters to your thesis, find it.")
     return "\n".join(lines)
 
 
