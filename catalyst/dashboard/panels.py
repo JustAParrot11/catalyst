@@ -828,15 +828,26 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
 
     # Daily billed spend, charted. Same rows as the table below - this
     # is the same data drawn, not a second source of truth.
-    daily = [(str(r["target_date"])[5:], float(r["cost_api_total_cents"] or 0),
-              f"{r['target_date']}: {r['cost_api_total_cents']} cents billed")
+    # DOLLARS ON THE AXIS, cents kept in the tooltip. The Cost API
+    # reports cents (TRAPS.md) and the ledger stores cents, but the
+    # owner's budget, the cap and the account are all in dollars, and a
+    # chart whose axis is in different units from the figure beside it
+    # is a chart that gets misread. The stored value is unchanged; only
+    # the presentation divides by 100.
+    daily = [(str(r["target_date"])[5:],
+              float(r["cost_api_total_cents"] or 0) / 100.0,
+              f"{r['target_date']}: "
+              f"${float(r['cost_api_total_cents'] or 0) / 100.0:,.4f} "
+              f"({r['cost_api_total_cents']} cents billed)")
              for r in reversed(c.billed_q.rows)][-30:]
     if daily:
         out.append('<div class="chart-wrap">' + charts.bar_chart(
             daily, chart_id=f"{p}-daily-chart",
-            title="Billed spend per closed day, cents (Anthropic Cost API)",
-            value_fmt=lambda v: f"{v:,.1f}",
-            reference=(float(c.base_cap_cents) / 30.0,
+            title="Billed spend per closed day (Anthropic Cost API)",
+            # Four decimals: a day can genuinely cost under a cent, and
+            # "$0.00" for every bar would look like a broken feed.
+            value_fmt=lambda v: f"${v:,.4f}",
+            reference=(float(c.base_cap_cents) / 100.0 / 30.0,
                        "cap, pro-rata per day"),
         ) + "</div>")
         out.append(prov(
@@ -849,7 +860,7 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
     else:
         out.append('<div class="chart-wrap">' + charts.placeholder(
             chart_id=f"{p}-daily-placeholder",
-            title="Billed spend per closed day, cents (Anthropic Cost API)",
+            title="Billed spend per closed day (Anthropic Cost API)",
             explanation="Bars appear once a day has closed and been "
                         "reconciled against the real bill.",
         ) + "</div>")
