@@ -192,6 +192,22 @@ def _protective_duties(conn, broker: Broker, report: "CycleReport",
 
     open_rows = _open_position_dicts(conn, now)
 
+    # WHAT DOES THE BROKER ACTUALLY HOLD? Read once, used by everything
+    # below. An entry that never filled holds nothing, and a position
+    # holding nothing needs no stop, cannot be sold, and must not block
+    # the whole bot from trading (ESCALATION-7).
+    broker_held = _broker_held(broker, report)
+    held_syms = ({p.get("symbol") for p in broker_held if p.get("symbol")}
+                 if broker_held is not None else None)
+    pending = _pending_entry_ids(open_rows, held_syms)
+    _void_stale_pending(conn, report, [p for p in open_rows
+                                       if p["id"] in pending and p["due"]])
+    # A voided phantom is no longer an open position, so it drops out of
+    # every list below rather than being carried as a special case.
+    open_rows = [p for p in open_rows
+                 if not (p["id"] in pending and p["due"])]
+    pending &= {p["id"] for p in open_rows}
+
     # Hard-date exits FIRST: they neutralize their own stops and must
     # not wait on the confirmation pass (re-review NEW-5: one flaky
     # get_open_orders delayed every exit a full cycle).
@@ -214,7 +230,8 @@ def _protective_duties(conn, broker: Broker, report: "CycleReport",
             report.errors.append(f"manage_exits: {exc}")
 
     if not open_rows:
-        return _broker_positions_agree(broker, conn, report), open_rows
+        return (_broker_positions_agree(broker, conn, report, broker_held),
+                open_rows)
     try:
         open_orders = broker.get_open_orders()
         confirmations = confirm_stops_resting(open_rows, broker, conn,
@@ -229,7 +246,10 @@ def _protective_duties(conn, broker: Broker, report: "CycleReport",
     stop_qty_by_id = {o.get("id"): o.get("qty") for o in open_orders}
 
     for p in open_rows:
-        if p["due"]:
+        if p["due"] or p["id"] in pending:
+            # A position holding nothing gets no stop. There is no
+            # quantity to protect, and a sell stop for shares that were
+            # never bought is a short waiting to happen (ESCALATION-7).
             continue
         status = status_by_id.get(p["id"])
         live = live_ids_by_pos.get(p["id"], ())
@@ -291,7 +311,7 @@ def _protective_duties(conn, broker: Broker, report: "CycleReport",
         p for p in open_rows
         if status_by_id.get(p["id"]) == "unprotected"
         and p.get("stop_price") is not None and p.get("qty")
-        and not p["due"]]
+        and not p["due"] and p["id"] not in pending]
     if unprotected:
         results = reopen_stops(unprotected, broker, conn)
         for pos, res in zip(unprotected, results):
@@ -303,24 +323,72 @@ def _protective_duties(conn, broker: Broker, report: "CycleReport",
                 status_by_id[pos["id"]] = "ok"
         conn.commit()
 
+    # A position holding nothing is not "unprotected" - there is nothing
+    # to protect. Counting it as such is how ONE entry that silently
+    # never filled blocks every future trade the bot would ever make
+    # (ESCALATION-7), which is a far larger loss than the risk the block
+    # was written to avoid.
     all_protected = all(
         status_by_id.get(p["id"]) == "ok" for p in open_rows
-        if not p["due"])
+        if not p["due"] and p["id"] not in pending)
     return (all_protected
-            and _broker_positions_agree(broker, conn, report)), open_rows
+            and _broker_positions_agree(broker, conn, report,
+                                        broker_held)), open_rows
+
+
+def _broker_held(broker: Broker, report: "CycleReport") -> list | None:
+    """What the broker says it actually holds, or None when it will not
+    say. Read ONCE per cycle and passed to everything that needs it:
+    two reads a cycle can disagree with each other, and a rule that
+    fires on the difference between them is a rule that fires at random.
+    """
+    try:
+        return broker.get_positions()
+    except BrokerError as exc:
+        report.errors.append(f"get_positions: {exc}")
+        return None
+
+
+def _pending_entry_ids(open_rows: list[dict], held_syms: set | None) -> set:
+    """Open positions that hold NOTHING, confirmed from both sides.
+
+    ESCALATION-7. An entry that is accepted but never fills leaves a
+    positions row with no fill. The qty then falls back to the ORDERED
+    quantity, and every session re-arms a protective sell stop for
+    shares the account does not hold - which, if it ever triggered,
+    sells stock that was never bought and leaves a short in a cash
+    account. Worse in practice: the phantom can never be protected, and
+    an unprotected position blocks EVERY new entry, so one order that
+    silently failed to fill stops the bot trading indefinitely.
+
+    THE TEST IS ZERO SHARES, AND BOTH SIDES MUST AGREE. No local fill
+    row is not enough on its own - if `reconcile` failed, the shares can
+    be real and simply unrecorded, and skipping the stop there would
+    leave a genuine holding naked. So the broker must also report
+    holding none of that ticker before the position is treated as empty.
+
+    A BROKER THAT WILL NOT ANSWER CHANGES NOTHING. `held_syms is None`
+    returns the empty set, so every position keeps exactly today's
+    behaviour. The unsafe direction is assuming emptiness we cannot
+    confirm, and that is the one case this refuses to guess in.
+    """
+    if held_syms is None:
+        return set()
+    return {p["id"] for p in open_rows
+            if not p.get("fill_confirmed") and p["ticker"] not in held_syms}
 
 
 def _broker_positions_agree(broker: Broker, conn,
-                            report: "CycleReport") -> bool:
+                            report: "CycleReport",
+                            held: list | None = None) -> bool:
     """Positions-level reconciliation (re-review NEW-1 / stress
     ESCALATION-8): a ticker held at the broker with no local open
     position is invisible to every kill switch, limit and exit. Detect
     the divergence and block entries until a human resolves it. Fails
     open-eyed: a broker error here reads as 'cannot confirm agreement'."""
-    try:
-        held = broker.get_positions()
-    except BrokerError as exc:
-        report.errors.append(f"get_positions: {exc}")
+    if held is None:
+        held = _broker_held(broker, report)
+    if held is None:
         return False
     local = {r[0] for r in conn.execute(
         "SELECT ticker FROM positions WHERE status = 'open'")}
@@ -411,6 +479,34 @@ def _void_dead_entries(conn, report: "CycleReport") -> None:
     conn.commit()
 
 
+def _void_stale_pending(conn, report: "CycleReport",
+                        stale: list[dict]) -> None:
+    """Close the book on an entry that never filled and never will.
+
+    ESCALATION-7, the long tail. A position whose entry is still live at
+    the broker holds nothing, so it is left alone while there is any
+    chance of a fill. Once it reaches its planned exit date that chance
+    is gone: the thesis had a deadline and the deadline has passed.
+
+    IT IS VOIDED, NEVER SOLD. The alternative path for a due position is
+    a market sell, and selling shares that were never bought is the
+    exact naked short this whole fix exists to prevent. `void` is also
+    not `closed`: nothing was ever held, so there is no P&L, and it must
+    not reach `closed_trades` and pollute the record the adaptive
+    parameters learn from.
+    """
+    for p in stale:
+        conn.execute("UPDATE positions SET status = 'void' WHERE id = ?",
+                     (p["id"],))
+        report.errors.append(
+            f"position {p['id']} ({p['ticker']}) voided: its entry order "
+            f"never filled and it has reached its planned exit date. "
+            f"Nothing was bought, nothing was sold, and no stop was ever "
+            f"armed for it. The broker confirms holding no {p['ticker']}.")
+    if stale:
+        conn.commit()
+
+
 def _poll_entry_fill(broker: Broker, broker_order_id: str | None, *,
                      attempts: int, interval_s: float) -> Decimal:
     """Filled qty of a just-placed market order, polled briefly."""
@@ -454,7 +550,8 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
               entry_poll_attempts: int = 5,
               entry_poll_interval_s: float = 1.0,
               account_mode: str = "paper",
-              owner_monthly_cap_cents=None) -> CycleReport:
+              owner_monthly_cap_cents=None,
+              bars_dir: str | None = None) -> CycleReport:
     now = now or datetime.now(timezone.utc)
     cycle_id = str(uuid.uuid4())
     params = current_values(conn)
@@ -704,8 +801,14 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
         researched += 1
 
         cluster_key = cluster_keys.get(c.id) or _fallback_cluster_key(c)
+        # bars_dir lets sizing read the CANDIDATE'S OWN gap and volatility
+        # history instead of only its catalyst category's assumption. It
+        # reads the local bar cache, so it costs no API call, and it
+        # falls back to the category value for any ticker not cached -
+        # which is the conservative direction, since the category value
+        # is the ceiling.
         decision = evaluate(c, log.parsed_view, portfolio, params, market,
-                            cluster_key=cluster_key)
+                            cluster_key=cluster_key, bars_dir=bars_dir)
         decision_id = _persist_decision(conn, decision, cluster_key)
         if decision.action == "skip":
             conn.execute(
@@ -776,6 +879,19 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
         entry_order_row = conn.execute(
             "SELECT id FROM orders WHERE decision_id=? AND side='buy' "
             "ORDER BY submitted_at DESC LIMIT 1", (c.id,)).fetchone()
+        if entry_order_row:
+            # THE SPREAD THE PAPER ACCOUNT DID NOT PAY (TRAPS.md).
+            # Recorded here because this is the only moment the measured
+            # NBBO for this entry exists; reconcile writes the fill on a
+            # later cycle, by which time the book has moved on. It is
+            # stored BESIDE the broker's price and never instead of it -
+            # reconciliation still compares against the real fill.
+            conn.execute(
+                "INSERT OR REPLACE INTO entry_market_context "
+                "(order_id, half_spread_bp, last_close, recorded_at) "
+                "VALUES (?,?,?,?)",
+                (entry_order_row[0], str(market.half_spread_bp),
+                 str(market.last_close), now.isoformat()))
         conn.execute(
             "INSERT INTO positions VALUES (?,?,?,?,?,?,?)",
             (str(uuid.uuid4()), c.ticker,
@@ -970,6 +1086,11 @@ def _persist_decision(conn, decision, cluster_key: str) -> str:
             "INSERT INTO limit_applications VALUES (?,?,?,?,?,?)",
             (decision_id, lim.rule_name, str(lim.bound_value),
              str(lim.requested_value), lim.bound_type, int(lim.binding)))
+        if getattr(lim, "note", ""):
+            conn.execute(
+                "INSERT OR REPLACE INTO limit_application_notes "
+                "(decision_id, rule_name, note) VALUES (?,?,?)",
+                (decision_id, lim.rule_name, lim.note))
     conn.commit()
     return decision_id
 
@@ -1119,7 +1240,15 @@ def _open_position_dicts(conn, now: datetime) -> list[dict]:
         out.append(
             {"id": r[0], "ticker": r[1], "stop_order_id": r[2],
              "decision_id": r[4], "qty": qty,
-             "stop_price": r[6], "due": r[3] <= today})
+             "stop_price": r[6], "due": r[3] <= today,
+             # Whether a fill was actually RECORDED, kept separate from
+             # qty because qty falls back to the ordered quantity when
+             # it was not. Without this the two cases - "we hold four
+             # shares" and "we asked for four shares and heard nothing
+             # back" - are the same value with the same type, and the
+             # second one arms a stop for stock nobody owns
+             # (ESCALATION-7).
+             "fill_confirmed": r[7] is not None})
     return out
 
 

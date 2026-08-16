@@ -88,6 +88,24 @@ CREATE TABLE IF NOT EXISTS limit_applications (
     binding         INTEGER NOT NULL
 );
 
+-- WHY A BOUND LANDED WHERE IT DID, in a sentence.
+--
+-- Its own table rather than a seventh column on limit_applications,
+-- for the same reason entry_market_context is its own table: that one
+-- is written with positional INSERTs in a great many places, and a new
+-- column silently shifts every one of them. (Learned by doing it the
+-- other way first and breaking 157 tests at once.)
+--
+-- Needed at all because a bound derived from the stock's own measured
+-- history no longer explains itself: "per_stock_stop_width 0.08 vs
+-- 0.50" is not an answer to "why is this position that size".
+CREATE TABLE IF NOT EXISTS limit_application_notes (
+    decision_id TEXT NOT NULL REFERENCES risk_decisions(id),
+    rule_name   TEXT NOT NULL,
+    note        TEXT NOT NULL,
+    PRIMARY KEY (decision_id, rule_name)
+);
+
 CREATE TABLE IF NOT EXISTS refusals (
     decision_id      TEXT NOT NULL REFERENCES risk_decisions(id),
     candidate_id     TEXT NOT NULL REFERENCES candidates(id),
@@ -161,6 +179,28 @@ CREATE TABLE IF NOT EXISTS fills (
     filled_at             TEXT NOT NULL,
     broker_reported_price TEXT NOT NULL,
     modeled_slippage      TEXT
+);
+
+-- WHAT THE BOOK LOOKED LIKE WHEN THE ENTRY WAS SENT.
+--
+-- TRAPS.md: "Paper fills pay no spread. Model the cost, but record it
+-- BESIDE the broker's price, not instead of it - reconciliation
+-- compares against the real fill." A paper account fills at the mid and
+-- charges nothing to cross the spread, so paper P&L is optimistic by
+-- roughly the half-spread on entry and again on exit. On the small caps
+-- where the insider-cluster edge lives that is tens of basis points a
+-- side, which is the difference between beating the S&P and only
+-- appearing to.
+--
+-- Its own table rather than a column on `orders`, because it is market
+-- context rather than order data, and because `orders` is written with
+-- positional INSERTs in a great many places that a new column would
+-- silently shift.
+CREATE TABLE IF NOT EXISTS entry_market_context (
+    order_id       TEXT PRIMARY KEY REFERENCES orders(id),
+    half_spread_bp TEXT NOT NULL,       -- measured from live NBBO
+    last_close     TEXT,
+    recorded_at    TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS positions (

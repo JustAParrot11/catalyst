@@ -17,6 +17,13 @@ class LimitApplication:
     requested_value: Decimal
     bound_type: Literal["hard", "adaptive"]
     binding: bool
+    #: Why this bound landed where it did, in a sentence. "Why is this
+    #: position that size" is the question the decision page exists to
+    #: answer, and a rule name plus two numbers cannot answer it once
+    #: the bound is derived from the stock's own history rather than
+    #: from a constant. Optional, so every existing construction and
+    #: every stored row stays valid.
+    note: str = ""
 
 
 @dataclass(frozen=True)

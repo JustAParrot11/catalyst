@@ -492,6 +492,22 @@ def mindmap(
 SPIDER_SLOTS = ("var(--series-1)", "var(--series-2)", "var(--series-3)")
 
 
+def _leaf_box(leaf_label: str) -> tuple[float, float]:
+    """The box a leaf label will occupy. One definition, used both to
+    place the leaf and to draw it - two functions disagreeing about a
+    box size is precisely how things end up overlapping."""
+    lines = _wrap(leaf_label, 20)
+    return (max(len(ln) for ln in lines) * CHAR_W + 20,
+            15.0 + 13 * len(lines))
+
+
+def _boxes_overlap(a, b, pad: float = 6.0) -> bool:
+    """Axis-aligned overlap with a little breathing room, so boxes are
+    separated rather than merely not-quite-touching."""
+    return (a[0] - pad < b[0] + b[2] and b[0] - pad < a[0] + a[2]
+            and a[1] - pad < b[1] + b[3] and b[1] - pad < a[1] + a[3])
+
+
 def decision_spider(
     centre_label: str,
     verdict: str,
@@ -541,6 +557,46 @@ def decision_spider(
         f'fill="var(--surface)" stroke="var(--hairline)"/>',
     ]
 
+    # Every box placed so far, across ALL arms. Collision is checked
+    # globally rather than per arm, because adjacent arms are exactly
+    # where two wedges meet and where leaves collided in practice.
+    #
+    # THE CENTRE AND THE HUBS GO IN FIRST. They are drawn last, so they
+    # sit on top - which is exactly why a leaf underneath one is
+    # invisible rather than merely untidy. Registering them before any
+    # leaf is placed is what stops a fact being painted over by the very
+    # label that is supposed to introduce it.
+    clines = _wrap(centre_label, 14)
+    cw = max(max(len(ln) for ln in clines), len(verdict)) * CHAR_W + 34
+    ch = 22 + 15 * len(clines) + 14
+    placed: list = [(cx - cw / 2, cy - ch / 2, cw, ch)]
+
+    # HOW FAR OUT THE HUBS SIT IS DERIVED, not a fixed fraction of the
+    # canvas. `min(width, height) * 0.21` ignores how big the centre
+    # label actually is, so a two-line candidate name pushed the centre
+    # box out under its own arm labels - measured, two hub boxes
+    # overlapping the centre box on an ordinary decision.
+    hub_boxes = []
+    for glabel, _leaves in groups:
+        hub_lines = _wrap(glabel, 16)
+        hub_boxes.append((max(len(ln) for ln in hub_lines) * CHAR_W + 22,
+                          16 + 13 * len(hub_lines), hub_lines))
+    _max_hw = max(b[0] for b in hub_boxes)
+    _max_hh = max(b[1] for b in hub_boxes)
+    hub_r = max(hub_r,
+                cw / 2 + _max_hw / 2 + 16,
+                ch / 2 + _max_hh / 2 + 16)
+    leaf_r = max(leaf_r, hub_r + _max_hh)
+
+    hubs = []
+    for gi, (glabel, _leaves) in enumerate(groups):
+        arm_angle = -math.pi / 2 + (2 * math.pi * gi / n_groups)
+        hx = cx + hub_r * math.cos(arm_angle)
+        hy = cy + hub_r * math.sin(arm_angle)
+        hw, hh, hub_lines = hub_boxes[gi]
+        hubs.append((hx, hy, hw, hh, hub_lines))
+        placed.append((hx - hw / 2, hy - hh / 2, hw, hh))
+
     # Arms are spread over the full circle, each arm's leaves fanned
     # inside its own wedge so two groups never interleave.
     for gi, (glabel, leaves) in enumerate(groups):
@@ -552,11 +608,49 @@ def decision_spider(
         wedge = (2 * math.pi / n_groups) * 0.78
         k = len(leaves)
 
+        spots: dict = {}
+
         def place(li: int):
+            """Where leaf `li` sits, with its box guaranteed not to
+            overlap any box already placed.
+
+            THE OLD VERSION COLLIDED, and that is what the owner was
+            looking at: "they dont format well its a bunch of lines with
+            cut off text". Measured on a realistic decision - three arms
+            of three facts - FOUR pairs of leaf boxes overlapped, so
+            labels were painted over each other and read as clipped.
+
+            The old fix was a fixed 26px stagger on alternate leaves,
+            which is a guess at how wide a box is. This measures the box
+            instead and walks the leaf outwards along its own spoke
+            until it is clear. Still deterministic: same groups in, same
+            picture out, because the search order is fixed and the step
+            is fixed.
+            """
+            # MEMOISED. place() is called once for the connector and
+            # again for the box; without this the second call would see
+            # the first call's own box already registered and shove the
+            # leaf outwards, so the line and the box it points at would
+            # be drawn in two different places.
+            if li in spots:
+                return spots[li]
             offset = 0.0 if k == 1 else (li / (k - 1) - 0.5) * wedge
             a = arm_angle + offset
+            bw, bh = _leaf_box(leaves[li][0])
             r = leaf_r - (STAGGER if (k > 3 and li % 2) else 0.0)
-            return cx + r * math.cos(a), cy + r * math.sin(a)
+            for _ in range(40):          # bounded: never loop forever
+                x = cx + r * math.cos(a)
+                y = cy + r * math.sin(a)
+                box = (x - bw / 2, y - bh / 2, bw, bh)
+                if not any(_boxes_overlap(box, other) for other in placed):
+                    placed.append(box)
+                    spots[li] = (x, y)
+                    return x, y
+                r += 18.0
+            placed.append((cx + r * math.cos(a) - bw / 2,
+                           cy + r * math.sin(a) - bh / 2, bw, bh))
+            spots[li] = (cx + r * math.cos(a), cy + r * math.sin(a))
+            return spots[li]
 
         for li, (leaf_label, detail) in enumerate(leaves):
             lx, ly = place(li)
@@ -601,9 +695,7 @@ def decision_spider(
         out.append(
             f'<line x1="{cx:.1f}" y1="{cy:.1f}" x2="{hx:.1f}" y2="{hy:.1f}" '
             f'stroke="{colour}" stroke-width="2.5"/>')
-        hub_lines = _wrap(glabel, 16)
-        hw = max(len(ln) for ln in hub_lines) * CHAR_W + 22
-        hh = 16 + 13 * len(hub_lines)
+        hx, hy, hw, hh, hub_lines = hubs[gi]
         out.append(
             f'<rect x="{hx - hw / 2:.1f}" y="{hy - hh / 2:.1f}" width="{hw:.1f}" '
             f'height="{hh:.1f}" rx="5" fill="{colour}" stroke="var(--surface)" '
@@ -615,9 +707,6 @@ def decision_spider(
                 f'fill="#ffffff">{ln}</text>')
 
     # The candidate last and largest: it is what everything else is about.
-    clines = _wrap(centre_label, 14)
-    cw = max(max(len(ln) for ln in clines), len(verdict)) * CHAR_W + 34
-    ch = 22 + 15 * len(clines) + 14
     out.append(
         f'<rect x="{cx - cw / 2:.1f}" y="{cy - ch / 2:.1f}" width="{cw:.1f}" '
         f'height="{ch:.1f}" rx="9" fill="var(--surface-2)" '
@@ -633,7 +722,35 @@ def decision_spider(
         f'fill="var(--muted)">{verdict}</text>')
 
     out.append("</svg>")
-    return "\n".join(out)
+    svg = "\n".join(out)
+
+    # THE FRAME FITS THE DRAWING, rather than the drawing being trusted
+    # to stay inside a frame chosen before it was laid out. Leaves are
+    # pushed outwards to resolve collisions, so how far out the furthest
+    # one ends up is not known until every one is placed - and a box
+    # past the edge of the viewBox is simply not rendered, which is the
+    # other half of "cut off text".
+    #
+    # Recomputed from the boxes actually placed, then applied to the
+    # viewBox and the background rect together so they cannot disagree.
+    pad = 14.0
+    min_x = min(b[0] for b in placed) - pad
+    min_y = min(b[1] for b in placed) - pad
+    max_x = max(b[0] + b[2] for b in placed) + pad
+    max_y = max(b[1] + b[3] for b in placed) + pad
+    vb_x, vb_y = min(0.0, min_x), min(0.0, min_y)
+    vb_w, vb_h = max(float(width), max_x) - vb_x, max(float(height), max_y) - vb_y
+    svg = svg.replace(
+        f'viewBox="0 0 {width} {height}"',
+        f'viewBox="{vb_x:.0f} {vb_y:.0f} {vb_w:.0f} {vb_h:.0f}"', 1)
+    svg = svg.replace(
+        f'<rect x="0" y="0" width="{width}" height="{height}" '
+        f'fill="var(--surface)" stroke="var(--hairline)"/>',
+        f'<rect x="{vb_x:.0f}" y="{vb_y:.0f}" width="{vb_w:.0f}" '
+        f'height="{vb_h:.0f}" fill="var(--surface)" '
+        f'stroke="var(--hairline)"/>', 1)
+    return svg.replace(f'height="{height}"',
+                       f'height="{vb_h:.0f}"', 1)
 
 
 # --------------------------------------------------------------------------
@@ -648,6 +765,26 @@ NEURAL_STEPS = ("var(--step-1)", "var(--step-2)", "var(--step-3)",
                 "var(--step-4)", "var(--step-5)")
 
 MAX_NODES_PER_LAYER = 14
+
+#: Columns are sized to their longest label (see neural_map). These bound
+#: that: never so narrow that the nodes crowd, never so wide that the
+#: owner is scrolling for a minute to reach the last column.
+MIN_COL_WIDTH = 150.0
+MAX_MAP_WIDTH = 2600.0
+#: Node radius plus breathing room between glyph and circle.
+NODE_LABEL_PAD = 26.0
+
+
+def _text_width_px(text: str, font_size: float = FONT_SIZE - 1) -> float:
+    """Roughly how wide `text` renders, in pixels.
+
+    0.56em per character is the measured average for the dashboard's
+    stack at these sizes. It is an approximation on purpose - the server
+    cannot measure a font it is not rendering - but it is the same
+    approximation the trimming already used, so widths and trim points
+    agree with each other instead of disagreeing by a few characters.
+    """
+    return len(str(text)) * font_size * 0.56
 
 #: Sweeps of the barycentre pass. Two forward and two back settles a
 #: graph this size; more buys nothing and costs determinism nothing.
@@ -756,20 +893,51 @@ def neural_map(
     width = int(width * zoom)
     row_gap = int(row_gap * zoom)
     n_cols = len(kept)
+
+    # COLUMNS ARE SIZED TO THEIR CONTENT, not carved out of a fixed
+    # width. Dividing 1180px equally gave every label
+    # `col_w / 2 - r - 14` pixels to live in - about 14 characters at
+    # five columns and 11 at six - so "below_conviction_floor" and
+    # "J. Restrepo, CFO" were both cut mid-word. That is the owner's
+    # report, twice: "you can only read a few lines before it cuts off"
+    # and "its a bunch of lines with cut off text".
+    #
+    # Widening the whole map instead is the honest fix: the drawing is
+    # as wide as its longest name needs, and .chart-scroll scrolls it.
+    # A label that has room does not need trimming at all, so the
+    # trimming below becomes a genuine last resort rather than the
+    # normal case.
+    label_px = [
+        max((_text_width_px(nl) for _, nl, _ in nodes), default=0.0)
+        for _, nodes, _ in kept]
+    # The label sits on ONE side of its node, so a column needs its
+    # longest label plus the node and its padding, then the same again
+    # for the mirrored half.
+    col_needs = [max(MIN_COL_WIDTH, 2 * (px + NODE_LABEL_PAD))
+                 for px in label_px]
+    # Never narrower than it was, never wider than can be scrolled
+    # comfortably.
+    width = int(max(width, min(sum(col_needs), MAX_MAP_WIDTH)))
+    _scale = width / sum(col_needs) if sum(col_needs) else 1.0
+    col_widths = [w * _scale for w in col_needs]
+    col_centres, _acc = [], 0.0
+    for w in col_widths:
+        col_centres.append(_acc + w / 2)
+        _acc += w
+
     tallest = max((len(nodes) for _, nodes, _ in kept), default=1)
     # THE BOX FITS THE DRAWING. A 340px floor put a four-node focused map
     # in a mostly-empty frame, which reads as a chart that failed to load
     # rather than as a small answer. The floor is now only what the
     # header and caption need.
     height = max(180, 96 + row_gap * tallest)
-    col_w = width / n_cols
     top = 74
 
     # Position every node first: edges need both endpoints.
     pos, radius = {}, {}
     max_w = max((w for _, nodes, _ in kept for _, _, w in nodes), default=1) or 1
     for ci, (label, nodes, _) in enumerate(kept):
-        cx = col_w * (ci + 0.5)
+        cx = col_centres[ci]
         for ri, (nid, _, weight) in enumerate(nodes):
             pos[nid] = (cx, top + row_gap * ri + row_gap / 2)
             radius[nid] = 4.0 + 4.0 * math.sqrt(max(weight, 0) / max_w)
@@ -806,7 +974,7 @@ def neural_map(
 
     # Column headings, then the edges beneath every node.
     for ci, (label, nodes, extra) in enumerate(kept):
-        cx = col_w * (ci + 0.5)
+        cx = col_centres[ci]
         out.append(
             f'<text x="{cx:.1f}" y="30" font-size="{FONT_SIZE}" font-weight="700" '
             f'text-anchor="middle" fill="var(--ink-2)" '
@@ -883,7 +1051,7 @@ def neural_map(
             # fixed 20 threw away readable text in a wide column and
             # still overflowed a narrow one (owner-reported: "you can
             # only read a few lines before it cuts off").
-            room_px = max(40.0, col_w / 2 - r - 14)
+            room_px = max(40.0, col_widths[ci] / 2 - r - 14)
             fits = max(8, int(room_px / (FONT_SIZE * 0.56)))
             trimmed = len(node_label) > fits
             text = node_label if not trimmed else node_label[:fits - 1] + "…"

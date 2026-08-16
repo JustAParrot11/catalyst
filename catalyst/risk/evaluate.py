@@ -92,6 +92,7 @@ def evaluate(
     params: dict,
     market: MarketSnapshot,
     cluster_key: str = "",
+    bars_dir: str | None = None,
 ) -> RiskDecision:
     skip_reasons: list[str] = []
 
@@ -157,6 +158,7 @@ def evaluate(
         hard_bounds=HARD_BOUNDS,
         market=market,
         cluster_key=cluster_key,
+        bars_dir=bars_dir,
     )
 
     holding, holding_basis = _hold_days(view, params, candidate.catalyst_type)

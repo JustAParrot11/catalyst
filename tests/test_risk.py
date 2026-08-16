@@ -410,14 +410,17 @@ class TestAdaptiveParams:
         assert out.refusal_reason.startswith("stale_proposal")
 
     def test_range_ceiling_refusal_names_bound_and_margin(self, db):
+        # The ceiling is 0.75 (see CONVICTION_FLOOR_CEILING): above that
+        # a priced-in candidate's bar exceeds the maximum conviction the
+        # model can express, so it could never be cleared at all.
         snapshot = ap.current_values(db)
-        snapshot["conviction_floor"] = Decimal("0.94")
-        p = ap.propose_adjustment("conviction_floor", Decimal("0.94"),
+        snapshot["conviction_floor"] = Decimal("0.74")
+        p = ap.propose_adjustment("conviction_floor", Decimal("0.74"),
                                   evidence(effect="1"))
         out = ap.apply(p, HARD_BOUNDS, snapshot, db)
         assert not out.applied
         assert "range_ceiling" in out.refusal_reason
-        assert "0.02" in out.refusal_reason  # 0.97 is 0.02 above 0.95
+        assert "0.02" in out.refusal_reason  # 0.77 is 0.02 above 0.75
 
     def test_oversized_step_refused_even_if_proposal_lies(self, db):
         p = ap.AdjustmentProposal(
