@@ -21,9 +21,38 @@ Pessimistic in every assumption, deliberately:
   verified), no leverage, T+1 settlement — sale proceeds are unusable
   until the NEXT session. Fractional shares allowed.
 - **Portfolio**: max 5 position slots, equal-weight risk budget
-  (equity / max_positions per position). Every position carries a
-  planned exit date at entry; holds are clamped to 15 trading days
-  (~3 calendar weeks, the brief's hard ceiling).
+  (equity / max_positions per position), and BOTH of the risk engine's
+  portfolio hard bounds - 90% total exposure and 35% per correlated
+  cluster. Every position carries a planned exit date at entry; holds
+  are clamped to 15 trading days (~3 calendar weeks, the brief's hard
+  ceiling).
+
+  THE TWO BOUNDS WERE ADDED AFTER MEASURING THE TWO ENGINES AGAINST
+  EACH OTHER, and they changed the answer. Production sizes by risk,
+  notional = (equity x max_loss_per_position_pct) / max(gap, stop),
+  which for insider_cluster lands at exactly $200 on a $1,000 account -
+  identical to equity/max_positions here. The PER-POSITION size agreed,
+  so nothing looked wrong. The PORTFOLIO did not:
+
+    * five slots at $200 is 100% invested; the exposure bound is 90%
+    * the Form 4 payload carries no sector field, so every insider
+      candidate keys on "unknown|insider_cluster|<week>" and they all
+      bind against each other. Five candidates completing in one week
+      open 2 positions for $350, not 5 for $1,000.
+
+  Effect on the graded strategy, out of sample 2024-01..2026-08
+  (SPY +68.7%), no API cost: excess went +31.6% -> +10.4% with the
+  exposure bound -> -20.1% with both. The signal is unchanged - 229
+  trades either way, same 52.8% hit rate, same +1.75% mean per trade.
+  What changed is that the cluster bound bites hardest in the weeks
+  when several clusters complete at once, which is when the signal is
+  strongest, so it is a selection effect rather than a scale one:
+  average capital deployed barely moved (66.7% -> 64.6%) while terminal
+  equity fell 23%.
+
+  Set max_total_exposure_pct / max_cluster_pct to 1 to model an
+  unbounded account - useful for isolating a signal, never the
+  headline.
 - **Benchmark**: SPY total-return (adjustment=all) over the identical
   period. excess_return_net is THE headline number: a strategy that
   makes money but loses to SPY is a failure and reports as one.
@@ -42,6 +71,7 @@ from typing import Callable
 
 from catalyst.backtest import BacktestResult
 from catalyst.backtest.data import Bar, BarCache, PointInTimeView
+from catalyst.discovery.correlation import cluster_key_for
 from catalyst.backtest.scoring import (
     ZERO,
     benchmark_comparison,
@@ -71,6 +101,33 @@ class ReplayConfig:
     split_date: date = date(2023, 12, 31)            # chronological in/out split
     benchmark_symbol: str = "SPY"
     min_notional_usd: Decimal = Decimal("1")
+    #: THE PRODUCTION EXPOSURE CAP, mirrored here so the grade describes
+    #: the bot that will actually run.
+    #:
+    #: Found by measuring rather than reading: production sizes by risk,
+    #: notional = (equity x max_loss_per_position_pct) / max(gap, stop),
+    #: which for insider_cluster lands at exactly $200 on a $1,000
+    #: account - identical to this harness's equity/max_positions. So the
+    #: per-position size agreed. The PORTFOLIO did not: five slots at
+    #: $200 is 100% invested, and HARD_BOUNDS.max_total_exposure_pct is
+    #: 0.90, so live the fifth position is cut to $100 and the bot runs
+    #: at 90% invested.
+    #:
+    #: Without this the harness graded a portfolio the risk engine would
+    #: never assemble, and it graded it ~11% larger. Set to 1 to model an
+    #: uncapped account.
+    max_total_exposure_pct: Decimal = Decimal("0.90")
+    #: HARD_BOUNDS.max_correlated_cluster_pct. "Correlated positions are
+    #: one bet wearing several hats" (BUILD-BRIEF), so the risk engine
+    #: caps how much can sit in a single sector/type/resolution-week
+    #: bucket. It matters far more here than it looks: the Form 4
+    #: payload carries NO sector, so every insider candidate keys on
+    #: "unknown|insider_cluster|<week>" and they all bind against each
+    #: other. Measured against the live engine: five candidates in ONE
+    #: week open 2 positions for $350, not 5 for $1,000.
+    #:
+    #: Set to 1 to model an account with no cluster bound.
+    max_cluster_pct: Decimal = Decimal("0.35")
 
 
 @dataclass(frozen=True)
@@ -105,6 +162,11 @@ class _Open:
     signal_day: date
     notional: Decimal
     planned_exit_idx: int
+    #: The production correlated-cluster key. Insider clusters carry no
+    #: sector (the Form 4 payload has no such field), so every one of
+    #: them keys on the same "unknown|insider_cluster|<week>" and the
+    #: 35% cluster bound binds between them.
+    cluster_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -285,9 +347,33 @@ def replay_detailed(
             mark_day = calendar[i - 1] if i > 0 else day
             equity = settled_cash + unsettled_total() + mark_positions(mark_day)
             budget = equity / cfg.max_positions
-            notional = min(budget, settled_cash)
+            # The exposure cap, exactly as the risk engine applies it:
+            # the position is CUT to whatever headroom remains, not
+            # refused. Measured against the live engine - four full
+            # $200 slots leave $100 of headroom and it sizes the fifth
+            # at $100 rather than skipping it.
+            headroom = (equity * cfg.max_total_exposure_pct
+                        - sum(p.notional for p in positions))
+            # The correlated-cluster bound, keyed exactly as production
+            # keys it (discovery.correlation.cluster_key_for), so a week
+            # in which several clusters complete is treated as the one
+            # bet it is rather than as several independent ones.
+            ckey = cluster_key_for(cand.sector, cand.catalyst_type,
+                                   cand.catalyst_date)
+            cluster_room = (equity * cfg.max_cluster_pct
+                            - sum(p.notional for p in positions
+                                  if p.cluster_key == ckey))
+            notional = min(budget, settled_cash, headroom, cluster_room)
             if notional < cfg.min_notional_usd:
-                skips.append(SkipRecord(cand.id, day, "insufficient_settled_cash"))
+                # NAME THE RULE THAT ACTUALLY BOUND. "Insufficient
+                # settled cash" and "the exposure cap is full" are
+                # different diagnoses with opposite fixes, and a skip
+                # log that conflates them cannot tell you which.
+                smallest = min(budget, settled_cash, headroom, cluster_room)
+                reason = ("max_correlated_cluster" if smallest == cluster_room
+                          else "max_total_exposure_pct" if smallest == headroom
+                          else "insufficient_settled_cash")
+                skips.append(SkipRecord(cand.id, day, reason))
                 continue
             fill = bar.open * (1 + cost)
             qty = notional / fill
@@ -297,6 +383,7 @@ def replay_detailed(
                 candidate_id=cand.id, ticker=cand.ticker, qty=qty,
                 entry_fill=fill, entry_day=day, signal_day=calendar[i - 1] if i else day,
                 notional=notional, planned_exit_idx=i + hold,
+                cluster_key=ckey,
             ))
 
         # 4. Signals at today's close: view sees data through today only.

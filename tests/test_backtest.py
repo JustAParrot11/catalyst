@@ -217,8 +217,15 @@ def test_t_plus_1_settlement_blocks_same_day_reuse_of_proceeds(tmp_path):
     for sym in ("AAA", "BBB", "CCC"):
         cache.write_bars(sym, flat_bars(days, 10))
 
+    # BOTH PORTFOLIO CAPS ARE TURNED OFF HERE ON PURPOSE, to isolate the
+    # mechanism under test. With max_positions=1 the single slot is the
+    # whole account, so either cap would leave cash permanently idle -
+    # and cB would then enter on that idle cash rather than on unsettled
+    # proceeds, passing the test for the wrong reason. Both caps have
+    # their own tests below.
     cfg = ReplayConfig(per_side_cost_pct=D("0"), api_cost_monthly_usd=D("0"),
-                       max_positions=1)
+                       max_positions=1, max_total_exposure_pct=D("1"),
+                       max_cluster_pct=D("1"))
     universe = [
         mk_candidate("AAA", days[0], "cA"),   # enters d1, exits d6 (5-day hold)
         mk_candidate("BBB", days[5], "cB"),   # entry d6: proceeds NOT settled yet
@@ -244,8 +251,13 @@ def test_max_position_slots_cap(tmp_path):
     for s in syms:
         cache.write_bars(s, flat_bars(days, 10))
     universe = [mk_candidate(s, days[0], f"c{s}") for s in syms]
-    detail = replay_detailed(const_signal(), universe, (days[0], days[-1]),
-                             cache=cache)
+    # Slot counting is what is under test, so the two MONEY caps are
+    # off: all six candidates share a catalyst date, hence one cluster
+    # key, and the 35% cluster bound would otherwise stop the third.
+    detail = replay_detailed(
+        const_signal(), universe, (days[0], days[-1]), cache=cache,
+        config=ReplayConfig(max_total_exposure_pct=D("1"),
+                            max_cluster_pct=D("1")))
     assert len(detail.trades) == 5
     assert [s.reason for s in detail.skips] == ["no_free_slot"]
 
@@ -502,3 +514,230 @@ def test_every_result_carries_the_survivorship_statement(tmp_path):
     assert result.costs_applied["survivorship"] == SURVIVORSHIP_STATEMENT
     assert SURVIVORSHIP_STATEMENT in result.market_regime_notes
     assert "FLATTERS long strategies" in SURVIVORSHIP_STATEMENT
+
+
+# ------------------------------------------------- the exposure cap
+#
+# FOUND BY MEASURING THE TWO ENGINES AGAINST EACH OTHER, not by reading
+# either. Production sizes by risk:
+#
+#     notional = (equity x max_loss_per_position_pct) / max(gap, stop)
+#
+# which for insider_cluster on a $1,000 account lands at exactly $200 -
+# identical to this harness's equity/max_positions. The PER-POSITION
+# size agreed, so nothing looked wrong. The PORTFOLIO did not: five
+# slots at $200 is 100% invested, and HARD_BOUNDS.max_total_exposure_pct
+# is 0.90. Live, the fifth position is cut to $100.
+#
+# So the harness was grading a portfolio ~11% larger than the risk
+# engine will ever assemble, and every excess-vs-SPY figure it produced
+# inherited that. These tests exist so the two cannot drift apart again
+# silently.
+
+def test_the_harness_caps_total_exposure_like_the_risk_engine(tmp_path):
+    days = weekdays(START, 12)
+    cache = BarCache(tmp_path)
+    cache.write_bars("SPY", flat_bars(days, 100))
+    syms = ("AAA", "BBB", "CCC", "DDD", "EEE")
+    for s in syms:
+        cache.write_bars(s, flat_bars(days, 10))
+
+    cfg = ReplayConfig(per_side_cost_pct=D("0"), api_cost_monthly_usd=D("0"),
+                       max_positions=5, max_cluster_pct=D("1"))
+    universe = [mk_candidate(s, days[0], f"c{s}") for s in syms]
+    detail = replay_detailed(const_signal(holding=8), universe,
+                             (days[0], days[-1]), cache=cache, config=cfg)
+
+    total = sum(t.notional for t in detail.trades)
+    assert total <= D("900.01"), (
+        f"the harness invested ${total} of a $1,000 account - the risk "
+        "engine's hard bound is 90%, so this grades a portfolio it would "
+        "never assemble")
+
+
+def test_the_fifth_position_is_CUT_not_refused(tmp_path):
+    """Matching the live engine, which was measured doing exactly this:
+    four full $200 slots leave $100 of headroom and it sizes the fifth
+    at $100 rather than skipping it. Refusing it instead would lose a
+    trade the bot really takes, and understate the sample."""
+    days = weekdays(START, 12)
+    cache = BarCache(tmp_path)
+    cache.write_bars("SPY", flat_bars(days, 100))
+    syms = ("AAA", "BBB", "CCC", "DDD", "EEE")
+    for s in syms:
+        cache.write_bars(s, flat_bars(days, 10))
+
+    cfg = ReplayConfig(per_side_cost_pct=D("0"), api_cost_monthly_usd=D("0"),
+                       max_positions=5, max_cluster_pct=D("1"))
+    universe = [mk_candidate(s, days[0], f"c{s}") for s in syms]
+    detail = replay_detailed(const_signal(holding=8), universe,
+                             (days[0], days[-1]), cache=cache, config=cfg)
+
+    assert len(detail.trades) == 5, (
+        f"{len(detail.trades)} of 5 candidates traded - the cap must SHRINK "
+        "the last position, not drop it")
+    sizes = sorted(t.notional for t in detail.trades)
+    assert sizes[0] == D("100"), f"the cut position is ${sizes[0]}, not $100"
+    assert sizes[-1] == D("200")
+
+
+def test_turning_the_cap_off_restores_the_full_account(tmp_path):
+    """The negative control. Without this, a cap that silently did
+    nothing would pass the test above just as well."""
+    days = weekdays(START, 12)
+    cache = BarCache(tmp_path)
+    cache.write_bars("SPY", flat_bars(days, 100))
+    syms = ("AAA", "BBB", "CCC", "DDD", "EEE")
+    for s in syms:
+        cache.write_bars(s, flat_bars(days, 10))
+
+    universe = [mk_candidate(s, days[0], f"c{s}") for s in syms]
+    uncapped = replay_detailed(
+        const_signal(holding=8), universe, (days[0], days[-1]), cache=cache,
+        config=ReplayConfig(per_side_cost_pct=D("0"),
+                            api_cost_monthly_usd=D("0"), max_positions=5,
+                            max_total_exposure_pct=D("1"),
+                            max_cluster_pct=D("1")))
+    assert sum(t.notional for t in uncapped.trades) == D("1000")
+    assert all(t.notional == D("200") for t in uncapped.trades)
+
+
+def test_the_skip_reason_names_the_cap_not_the_cash(tmp_path):
+    """"Insufficient settled cash" and "the exposure cap is full" have
+    opposite fixes. A skip log that conflates them cannot tell you
+    which one stopped the trade."""
+    days = weekdays(START, 12)
+    cache = BarCache(tmp_path)
+    cache.write_bars("SPY", flat_bars(days, 100))
+    syms = ("AAA", "BBB", "CCC", "DDD", "EEE", "FFF")
+    for s in syms:
+        cache.write_bars(s, flat_bars(days, 10))
+
+    # Six candidates, five slots, and the cap full at $900: the sixth
+    # cannot enter and the reason has to say which rule did it.
+    cfg = ReplayConfig(per_side_cost_pct=D("0"), api_cost_monthly_usd=D("0"),
+                       max_positions=5, max_cluster_pct=D("1"))
+    universe = [mk_candidate(s, days[0], f"c{s}") for s in syms]
+    detail = replay_detailed(const_signal(holding=8), universe,
+                             (days[0], days[-1]), cache=cache, config=cfg)
+    reasons = {s.reason for s in detail.skips}
+    assert reasons, "nothing was skipped, so nothing was named"
+    assert "no_free_slot" in reasons or "max_total_exposure_pct" in reasons, (
+        f"skip reasons were {reasons} - none of them names a real rule")
+
+
+# --------------------------------------------- the correlated-cluster cap
+#
+# THE BIGGER OF THE TWO DIVERGENCES, and the one that hid behind a
+# missing field rather than behind a wrong number.
+#
+# BUILD-BRIEF: "correlated positions are one bet wearing several hats.
+# Four small-cap biotech binaries all resolving the same fortnight is a
+# single wager on biotech sentiment, not four independent trades." The
+# risk engine caps one sector/type/resolution-week bucket at 35% of
+# equity.
+#
+# The Form 4 payload carries NO sector field (data/form4_adapter.py
+# builds the payload and there is no such key), so
+# discovery/candidates.py falls through to "unknown" for every insider
+# candidate. They therefore ALL key on "unknown|insider_cluster|<week>"
+# and bind against each other whenever their catalyst dates land in the
+# same ISO week.
+#
+# Measured against the LIVE engine, $1,000 account, five candidates:
+#   all in one week   -> 2 positions, $350 deployed (35%)
+#   one per week      -> 5 positions, $900 deployed (90%)
+#
+# The harness modelled neither, so it graded 5 positions at $1,000.
+
+def _five(tmp_path, dates, **cfg_kw):
+    days = weekdays(START, 30)
+    cache = BarCache(tmp_path)
+    cache.write_bars("SPY", flat_bars(days, 100))
+    syms = ("AAA", "BBB", "CCC", "DDD", "EEE")
+    for s in syms:
+        cache.write_bars(s, flat_bars(days, 10))
+    universe = [mk_candidate(s, d, f"c{s}") for s, d in zip(syms, dates)]
+    cfg = ReplayConfig(per_side_cost_pct=D("0"), api_cost_monthly_usd=D("0"),
+                       max_positions=5, **cfg_kw)
+    return replay_detailed(const_signal(holding=20), universe,
+                           (days[0], days[-1]), cache=cache, config=cfg)
+
+
+def test_a_burst_in_one_week_is_ONE_bet_not_five(tmp_path):
+    """The whole point of the bound. Five clusters completing the same
+    week is a single wager on whatever moved that week."""
+    days = weekdays(START, 30)
+    detail = _five(tmp_path, [days[0]] * 5)
+    total = sum(t.notional for t in detail.trades)
+    assert total <= D("350.01"), (
+        f"${total} went into one resolution week on a $1,000 account - the "
+        "risk engine's cluster bound is 35%")
+    assert len(detail.trades) == 2, (
+        f"{len(detail.trades)} positions opened in one week; the live engine "
+        "opens 2 and skips the rest")
+
+
+def test_candidates_in_DIFFERENT_weeks_do_not_bind_each_other(tmp_path):
+    """The control. A cluster bound that fired on everything would be
+    indistinguishable from a broken strategy, and would silently grade
+    the bot as trading a third of what it will."""
+    days = weekdays(START, 30)
+    weekly = [days[0], days[5], days[10], days[15], days[20]]
+    detail = _five(tmp_path, weekly)
+    assert len(detail.trades) == 5, (
+        "five candidates in five separate weeks must not bind each other")
+    assert sum(t.notional for t in detail.trades) > D("350")
+
+
+def test_turning_the_cluster_cap_off_restores_the_full_account(tmp_path):
+    """Negative control: a cap doing nothing would pass the week test
+    above just as happily as a correct one."""
+    days = weekdays(START, 30)
+    detail = _five(tmp_path, [days[0]] * 5,
+                   max_cluster_pct=D("1"), max_total_exposure_pct=D("1"))
+    assert len(detail.trades) == 5
+    assert sum(t.notional for t in detail.trades) == D("1000")
+
+
+def test_the_skip_names_the_cluster_bound(tmp_path):
+    days = weekdays(START, 30)
+    detail = _five(tmp_path, [days[0]] * 5)
+    reasons = {s.reason for s in detail.skips}
+    assert "max_correlated_cluster" in reasons, (
+        f"skips said {reasons} - the rule that actually stopped the trade "
+        "is not named, so the funnel cannot report it")
+
+
+def test_the_harness_keys_clusters_EXACTLY_as_production_does(tmp_path):
+    """If the two ever key differently the backtest silently grades a
+    different portfolio, which is the defect this whole section exists
+    because of."""
+    import inspect
+
+    from catalyst.backtest import harness
+    from catalyst.discovery.correlation import cluster_key_for
+
+    assert "cluster_key_for" in inspect.getsource(harness.replay_detailed), (
+        "the harness computes its own cluster key instead of calling the "
+        "production one - they will drift")
+    # And the key an insider candidate really gets is sector-less.
+    assert cluster_key_for("", "insider_cluster", date(2026, 8, 16)) == \
+        cluster_key_for("unknown", "insider_cluster", date(2026, 8, 16))
+
+
+def test_the_form4_payload_really_has_no_sector(tmp_path):
+    """The premise of everything above. If a sector field is ever added
+    to the adapter, insider candidates stop sharing one cluster key and
+    these grades change - so this must fail loudly rather than quietly
+    become untrue."""
+    import inspect
+
+    from catalyst.data import form4_adapter
+
+    src = inspect.getsource(form4_adapter)
+    body = src[src.find("payload_raw={"):]
+    assert '"sector"' not in body, (
+        "the Form 4 payload now carries a sector - insider candidates no "
+        "longer all share one cluster key, and every backtest grade that "
+        "assumed they did needs re-running")
