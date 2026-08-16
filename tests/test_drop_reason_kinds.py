@@ -196,12 +196,12 @@ class TestTheOwnersPageReadsCorrectly:
         block = _drops_block(owners_funnel)
         i = block.find("budget_denied")
         assert i > 0
-        assert "a limit you set" in block[max(0, i - 400):i], (
-            "budget_denied is not identified as a limit the owner set")
+        assert "a limit" in block[max(0, i - 400):i], (
+            "budget_denied is not identified as a bound doing its job")
 
     def test_the_page_explains_the_three_tags(self, owners_funnel):
         block = _drops_block(owners_funnel)
-        for word in ("routine", "a limit you set", "fault"):
+        for word in ("routine", "a limit", "fault"):
             assert word in block, f"the key does not explain {word!r}"
 
 
@@ -371,3 +371,170 @@ class TestEverythingSettledIsNotEverythingGone:
         query, which is the diagnosis this project keeps having to make."""
         block = _drops_block(all_settled)
         assert "Nothing is currently stopping candidates here" in block
+
+
+# ------------------------------------------ every stage, not just one
+#
+# OWNER-REPORTED WITH A SCREENSHOT, against the first version of the
+# classifier above - which was worse than the problem it fixed:
+#
+#   Model saw a trade worth making
+#     21  [FAULT]  the model judged the move already priced in
+#      1  [FAULT]  the model saw no tradeable edge
+#   Risk engine approved a trade
+#      5  [FAULT]  the model judged the move already priced in
+#      3  [FAULT]  below conviction floor
+#
+# Four stages share one renderer. The classifier knew only the RESEARCH
+# stage's vocabulary - machine codes like budget_denied and
+# transport_error - and defaulted everything else to FAULT. So every
+# ordinary decline on the judgement and risk stages came out red.
+#
+# Declining a candidate is the single most common CORRECT thing this bot
+# does. The previous build declined eight of eight and the brief records
+# that the declines were right. Painting that as damage is precisely the
+# failure this whole feature was meant to remove.
+#
+# The rule now: "an unknown reason means something broke" holds only
+# where it is true - the research stage's machine codes, and an approved
+# trade with no order. Everywhere else an unknown reason is attrition.
+
+class TestEveryStageIsClassifiedOnItsOwnVocabulary:
+    @pytest.mark.parametrize("reason,stage,kind", [
+        # The owner's screenshot, line by line.
+        ("the model judged the move already priced in", "views", "ROUTINE"),
+        ("the model saw no tradeable edge", "views", "ROUTINE"),
+        ("model_judged_priced_in", "proposed", "ROUTINE"),
+        ("below conviction floor", "proposed", "LIMIT"),
+        ("below_conviction_floor", "proposed", "LIMIT"),
+        # The research stage is unchanged.
+        ("budget_denied", "researched", "LIMIT"),
+        ("not_attempted: market_closed", "researched", "ROUTINE"),
+        ("transport_error: HTTP 400", "researched", "FAULT"),
+        # Risk bounds are bounds wherever they appear.
+        ("max_total_exposure", "proposed", "LIMIT"),
+        ("max_correlated_cluster", "proposed", "LIMIT"),
+        ("insufficient_settled_cash", "proposed", "LIMIT"),
+        # A real break stays a break on ANY stage.
+        ("transport_error: HTTP 400", "views", "FAULT"),
+        ("approved but no order was recorded", "orders", "FAULT"),
+        ("(unparseable skip_reasons)", "proposed", "FAULT"),
+    ])
+    def test_reason_and_stage_together_decide_the_kind(
+            self, reason, stage, kind):
+        assert queries.skip_kind(reason, stage) == kind
+
+    def test_an_unknown_reason_is_a_fault_ONLY_where_that_is_true(self):
+        """The whole defect in one assertion."""
+        assert queries.skip_kind("something new", "researched") == "FAULT"
+        assert queries.skip_kind("something new", "orders") == "FAULT"
+        assert queries.skip_kind("something new", "views") == "ROUTINE"
+        assert queries.skip_kind("something new", "proposed") == "ROUTINE"
+
+
+class TestTheOwnersScreenshotIsNoLongerRed:
+    @pytest.fixture
+    def judged_and_bounded(self, tmp_path):
+        """Stages 3 and 4 exactly as reported: 21 + 1 declines, then
+        5 priced-in vetoes and 3 below the conviction floor."""
+        import json
+
+        path = str(tmp_path / "j.db")
+        conn = init_db(path)
+        now = TODAY.isoformat()
+
+        def cand(cid):
+            conn.execute("INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?,?)",
+                         (cid, "AAA", "insider_cluster", "2026-09-01",
+                          "estimated", "[]", now, "tech", "[]"))
+            conn.execute("INSERT INTO research_calls VALUES (?,?,?,?,?,?,?,?,?)",
+                         (f"rc{cid}", cid, "m", "p", "[]", "5", 100, None, now))
+
+        for k in range(22):
+            cid = f"v{k}"
+            cand(cid)
+            conn.execute("INSERT INTO research_views VALUES (?,?,?,?,?,?,?,?)",
+                         (cid, "no_trade", 0.4, "t", "i", 10,
+                          1 if k < 21 else 0, "r"))
+        for k in range(8):
+            cid = f"t{k}"
+            cand(cid)
+            conn.execute("INSERT INTO research_views VALUES (?,?,?,?,?,?,?,?)",
+                         (cid, "long", 0.5, "t", "i", 10, 0, "r"))
+            reason = ("model_judged_priced_in" if k < 5
+                      else "below_conviction_floor")
+            conn.execute(
+                "INSERT INTO risk_decisions VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (f"d{k}", cid, "skip", None, None, None, None, None,
+                 json.dumps([reason]), "{}", now))
+        conn.commit()
+        conn.close()
+        return path
+
+    def _stage(self, path, key):
+        html = _page(path)
+        m = re.search(rf'<div class="funnel-why" id="fun-drops-{key}">.*?</ul>',
+                      html, re.S)
+        assert m, f"stage {key} rendered no drop list"
+        return m.group(0)
+
+    def test_the_models_own_declines_are_not_faults(self, judged_and_bounded):
+        block = self._stage(judged_and_bounded, "views")
+        assert "drop-live" not in block, (
+            "the model declining a candidate is tagged as a fault - that is "
+            "the commonest correct thing this bot does")
+        assert re.findall(r'<li class="(drop-[a-z]+)"', block) == \
+            ["drop-routine", "drop-routine"]
+
+    def test_a_conviction_floor_reads_as_a_limit_not_a_break(
+            self, judged_and_bounded):
+        block = self._stage(judged_and_bounded, "proposed")
+        i = block.find("below conviction floor")
+        assert i > 0, "the conviction floor drop vanished"
+        assert "drop-limit" in block[max(0, i - 400):i], (
+            "a threshold doing its job is not tagged as a limit")
+        assert "drop-live" not in block, (
+            "the risk engine declining a trade is tagged as a fault")
+
+    def test_the_key_no_longer_claims_YOU_set_every_limit(
+            self, judged_and_bounded):
+        """The conviction floor is adaptive - the system moves it on
+        measured evidence. Calling it "a limit you set" told the owner
+        they had configured something they had not."""
+        block = self._stage(judged_and_bounded, "proposed")
+        assert "a limit you set" not in block
+        assert "a limit" in block
+
+    def test_the_RENDERER_passes_the_stage_through(self, tmp_path):
+        """A hole found by sabotage: every render test above used a
+        reason already in the known vocabulary, so dropping the stage
+        argument in panels.py changed nothing and passed. It takes an
+        UNRECOGNISED reason on a judgement stage to prove the stage is
+        actually reaching the classifier."""
+        import json
+
+        path = str(tmp_path / "u.db")
+        conn = init_db(path)
+        now = TODAY.isoformat()
+        conn.execute("INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?,?)",
+                     ("c1", "AAA", "insider_cluster", "2026-09-01",
+                      "estimated", "[]", now, "tech", "[]"))
+        conn.execute("INSERT INTO research_calls VALUES (?,?,?,?,?,?,?,?,?)",
+                     ("rc1", "c1", "m", "p", "[]", "5", 100, None, now))
+        conn.execute("INSERT INTO research_views VALUES (?,?,?,?,?,?,?,?)",
+                     ("c1", "long", 0.5, "t", "i", 10, 0, "r"))
+        conn.execute(
+            "INSERT INTO risk_decisions VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("d1", "c1", "skip", None, None, None, None, None,
+             json.dumps(["some_rule_added_next_year"]), "{}", now))
+        conn.commit()
+        conn.close()
+
+        html = _page(path)
+        m = re.search(r'<div class="funnel-why" id="fun-drops-proposed">.*?</ul>',
+                      html, re.S)
+        assert m, "the risk stage rendered no drop list"
+        assert "drop-live" not in m.group(0), (
+            "an unrecognised RISK-ENGINE reason rendered as a fault - the "
+            "renderer is not passing the stage to skip_kind, so every new "
+            "skip reason will read as damage")

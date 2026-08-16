@@ -504,23 +504,67 @@ def source_label(name) -> str:
 #:
 #: Rendering an HTTP 400 traceback in the same list, in the same style,
 #: as "the market was closed" is what made a working bot look broken.
+#: Reasons that ARE something breaking, wherever they appear. Matched
+#: first, so a transport failure is a fault even on a stage whose other
+#: reasons are all ordinary judgement.
+FAULT_MARKERS = (
+    "transport_error", "httpstatuserror", "anthropichttperror",
+    "traceback", "exception", "invalid_request", "unparseable",
+    "no order was recorded", "http 4", "http 5",
+)
+
+#: Nothing went wrong. The bot worked exactly as designed and these
+#: recur every day.
 ROUTINE_SKIPS = (
     "deferred_max_research_per_cycle",
     "market_closed",
     "already_researched",
     "no_candidates",
+    # The model's own judgement. Declining a candidate is the single
+    # most common correct thing this bot does - the previous build
+    # declined eight of eight and the declines were RIGHT.
+    "priced in",
+    "priced_in",
+    "no tradeable edge",
+    "no_trade",
 )
-LIMIT_SKIPS = ("budget_denied", "budget_exhausted", "owner_cap")
+
+#: A bound doing its job. A decision, not a failure.
+LIMIT_SKIPS = (
+    "budget_denied", "budget_exhausted", "owner_cap",
+    "conviction_floor", "conviction floor",
+    "max_total_exposure", "max_correlated_cluster", "max_open_positions",
+    "max_loss_per_position", "max_entry_half_spread", "max_hold_days",
+    "notional_below_minimum", "insufficient_settled_cash",
+    "liquidity", "kill_switch",
+)
+
+#: WHERE AN UNRECOGNISED REASON IS A FAULT, and where it is not. This
+#: is the distinction the first version of this classifier missed, and
+#: the miss was worse than the problem it fixed: on the model and risk
+#: stages every ordinary decline - "the model judged the move already
+#: priced in", "below conviction floor" - came out tagged FAULT in red
+#: (owner-reported, with a screenshot).
+#:
+#: On the RESEARCH stage an unknown reason really is something broken:
+#: that list is machine codes and transport failures. On the judgement
+#: and risk stages an unknown reason is attrition - the bot deciding not
+#: to trade - which is the system working. Defaulting those to FAULT
+#: paints correct behaviour as damage, which is the exact failure this
+#: whole feature exists to remove.
+UNKNOWN_IS_FAULT_ON = ("researched", "orders")
 
 
-def skip_kind(reason: str) -> str:
-    """ROUTINE / LIMIT / FAULT for a research skip reason."""
+def skip_kind(reason: str, stage_key: str = "researched") -> str:
+    """ROUTINE / LIMIT / FAULT for one drop reason on one stage."""
     text = str(reason or "").lower()
+    if any(m in text for m in FAULT_MARKERS):
+        return "FAULT"
     if any(k in text for k in ROUTINE_SKIPS):
         return "ROUTINE"
     if any(k in text for k in LIMIT_SKIPS):
         return "LIMIT"
-    return "FAULT"
+    return "FAULT" if stage_key in UNKNOWN_IS_FAULT_ON else "ROUTINE"
 
 
 def _last_seen(last_at, first_at=None) -> str:

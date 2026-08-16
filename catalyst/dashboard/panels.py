@@ -515,14 +515,18 @@ def funnel_panel(db: Db, p: str = "funnel") -> str:
             # date text. "The market was closed" and an HTTP 400 are not
             # the same news and must not look the same; matching on
             # wording also broke the moment the wording changed.
-            def _chip(reason):
-                kind = queries.skip_kind(reason)
+            def _chip(reason, _key=stage.key):
+                # STAGE-AWARE. "Unknown means broken" is true of the
+                # research stage's machine codes and false of every
+                # judgement stage, where an unknown reason is the bot
+                # deciding not to trade.
+                kind = queries.skip_kind(reason, _key)
                 if kind == "ROUTINE":
                     return ("drop-routine",
                             '<span class="drop-tag">routine</span> ')
                 if kind == "LIMIT":
                     return ("drop-limit",
-                            '<span class="drop-tag">a limit you set</span> ')
+                            '<span class="drop-tag">a limit</span> ')
                 return ("drop-live",
                         '<span class="drop-tag drop-tag-fault">fault</span> ')
 
@@ -541,10 +545,11 @@ def funnel_panel(db: Db, p: str = "funnel") -> str:
                     f'<div class="funnel-why" id="{p}-drops-{esc(stage.key)}">'
                     f"<h3>Why they stopped here</h3>"
                     "<p class='prov'>Tagged <b>routine</b> where nothing went "
-                    "wrong and the bot was working as designed, <b>a limit "
-                    "you set</b> where a bound did its job, and <b>fault</b> "
-                    "where something actually broke. Only the last kind is "
-                    "worth your attention.</p>"
+                    "wrong and the bot was working as designed - declining "
+                    "a candidate is the commonest correct thing it does - "
+                    "<b>a limit</b> where a bound did its job, and "
+                    "<b>fault</b> where something actually broke. Only the "
+                    "last kind is worth your attention.</p>"
                     f"<ul>{items}</ul>")
             else:
                 # NOTHING CURRENT IS NOT NOTHING AT ALL. Everything here
