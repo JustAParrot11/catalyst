@@ -695,9 +695,11 @@ NAV_GROUPS = [
     ("Investigate", [
         ("/chain", "Every decision", "Found \u2192 linked \u2192 judged \u2192 sized \u2192 traded"),
         ("/brain", "The brain", "Everything it has linked, as one map"),
-        ("/newsmap", "News map", "What was said, about whom"),
+        ("/newsmap", "News map",
+         "What was said, about whom \u2014 click a headline"),
         ("/decisions", "Decisions", "Why each trade was taken or declined"),
-        ("/refusals", "Refusals", "What declined candidates went on to do"),
+        ("/refusals", "Learning",
+         "What declined candidates did, and what moved because of it"),
         ("/logs", "Logs", "Searchable event log"),
     ]),
     ("Operate", [

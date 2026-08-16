@@ -238,6 +238,18 @@ def route_newsmap(db: Db, params: dict) -> str:
                        subtitle="Every line is one stored story")
 
 
+def route_story(db: Db, params: dict) -> str:
+    """One news story and what the bot made of it.
+
+    Reached by clicking a headline on the news map, which is what the
+    owner asked for: "I want to be able to click the news and see what
+    the bot thought of each and connectiosn".
+    """
+    return render_page("News story", panels.story_panel(db, params, p="story"),
+                       "/newsmap", db.path, db=db,
+                       subtitle="What was said, and what the bot made of it")
+
+
 def route_refusals(db: Db, params: dict) -> str:
     # Simple by default, same as Decisions: the map answers "is a reason
     # refusing money" by following a strand; the table makes you compute
@@ -246,7 +258,15 @@ def route_refusals(db: Db, params: dict) -> str:
         body = panels.refusals_panel(db, p="ref")
     else:
         body = panels.refusals_simple(db, p="refs")
-    return render_page("Refusals", body, "/refusals", db.path, db=db)
+    # THE EVIDENCE AND WHAT IT MOVED, ON ONE PAGE. Refusals are the
+    # input to the adaptation loop and the loop now actually runs, so
+    # "what did declining these do to the thresholds" is answerable in
+    # one place instead of two. It was only ever rendered inside the
+    # Overview digest, which is the one page a reader skims.
+    body += panels.section("adapt-section",
+                           "What the evidence has moved so far",
+                           panels.adaptation_block(db, p="adapt"))
+    return render_page("Learning", body, "/refusals", db.path, db=db)
 
 
 def route_logs(db: Db, params: dict) -> str:
@@ -698,6 +718,10 @@ HTML_ROUTES = {
     "/node": route_node,
     "/chain": route_chain,
     "/newsmap": route_newsmap,
+    # Not a tab of its own: it is always arrived at FROM the news map, so
+    # it stays highlighted as that tab rather than adding a navigation
+    # entry nobody could click without a story in mind.
+    "/story": route_story,
     "/refusals": route_refusals,
     "/logs": route_logs,
     "/maintenance": route_maintenance,

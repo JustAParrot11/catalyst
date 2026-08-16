@@ -1239,6 +1239,24 @@ def alerts_panel(db: Db, p: str = "alerts") -> str:
             "prove the checks ran; the Logs page is where you confirm they did."
         ))
 
+    out.append(adaptation_block(db, p))
+    out.append(catalyst_coverage_block(p))
+    return section(f"{p}-section", "Operational alerts and adaptation",
+                   "".join(out))
+
+
+def adaptation_block(db: Db, p: str = "adapt") -> str:
+    """What has moved, and on what evidence.
+
+    Its own function since the adaptation loop actually started running:
+    it was only ever rendered inside the Overview digest, which is the
+    one place a reader skims. The thresholds this bot trades on now
+    change by themselves, and "which number moved, when, and why" is a
+    thing the owner should be able to go and look at rather than happen
+    across.
+    """
+    a = queries.alerts(db)
+    out = []
     out.append("<h3>Adaptive parameter changes, with the evidence behind each</h3>")
     rows = [
         [esc(r["parameter"]), esc(r["old_value"]), esc(r["new_value"]),
@@ -1264,8 +1282,7 @@ def alerts_panel(db: Db, p: str = "alerts") -> str:
                     "scored outcomes and a minimum sample per parameter "
                     "(ARCHITECTURE section 6.1).",
         ))
-    out.append(catalyst_coverage_block(p))
-    return section(f"{p}-section", "Operational alerts and adaptation", "".join(out))
+    return "".join(out)
 
 
 def _daily_ceiling_tile(db: Db, c) -> tuple:
@@ -3502,6 +3519,178 @@ def news_map_panel(db: Db, params: dict | None = None, p: str = "newsmap") -> st
             "bot treats as more than coincidence."))
     return section(f"{p}-section", "News map: what was said, about whom",
                    "".join(out))
+
+
+def story_panel(db: Db, params: dict | None = None, p: str = "story") -> str:
+    """One headline, and what the bot made of it.
+
+    OWNER-ASKED: "I want to be able to click the news and see what the
+    bot thought of each and connectiosn".
+
+    Written as a NARRATIVE, in the order a person would ask the
+    questions: what was published, was it about a company the bot
+    follows, did anything else say the same thing, did it become a
+    candidate, what did the model conclude, and what did the code then
+    do. BUILD-BRIEF's test is that "someone who was not there can read a
+    single trade and understand why it was made".
+
+    THE COMMON CASE IS THAT A STORY LED NOWHERE, and that is stated
+    plainly rather than rendered as an empty panel. "Nothing happened"
+    and "this page is broken" look identical otherwise, and telling them
+    apart is repeatedly the whole diagnosis.
+    """
+    params = params or {}
+    got = params.get("id")
+    sid = (got[0] if isinstance(got, list) else got) or ""
+    if not sid:
+        return section(f"{p}-section", "A news story",
+                       "<p>Open a story from the "
+                       "<a href='/newsmap'>news map</a> &mdash; click any "
+                       "headline in the left-hand column.</p>")
+
+    d = queries.story_detail(db, sid)
+    if not d.found:
+        return section(
+            f"{p}-section", "A news story",
+            zero_block(f"{p}-missing", d.story_q,
+                       meaning=(
+                           f"no stored news story has the id "
+                           f"{esc(sid)}. Stories are kept as they arrive "
+                           "from the feed; one from before this install, or "
+                           "from a window that has since been pruned, will "
+                           "not be here.")))
+
+    out: list[str] = []
+    arrow = " &rarr; "
+    hint = {1: "read as good news", -1: "read as bad news",
+            0: "no direction read from it"}.get(d.hint, "no direction")
+
+    out.append(tiles(f"{p}-tiles", [
+        ("Company", esc(d.ticker or "&mdash;"),
+         "the ticker the feed attached to this story"),
+        ("Kind", esc(d.catalyst.replace("_", " ")), hint),
+        ("Became a candidate", "yes" if d.candidates else "no",
+         f"{len(d.candidates)} candidate row(s) for this company"),
+    ]))
+
+    # 1. What was said.
+    out.append(f'<h3 id="{p}-said">1. What was said</h3>')
+    headline_text = d.headline or "(the stored story carries no headline)"
+    out.append(
+        f'<p class="lead" id="{p}-headline">{esc(headline_text)}</p>')
+    out.append(prov(
+        f"{esc(d.publisher or 'publisher not recorded')}, "
+        f"{esc(d.when or 'date not recorded')}. Stored id "
+        f"<code>{esc(d.source_id)}</code>. This is the feed's own text, "
+        "kept verbatim."))
+
+    # 2. Did anything else say it too?
+    out.append(f'<h3 id="{p}-corrob">2. Did anything else say the same?</h3>')
+    if d.corroboration:
+        out.append(note(
+            "<b>Yes &mdash; another feed named the same company.</b> That is "
+            "two independent observations rather than one newsroom, which "
+            "is the only kind of link this bot treats as more than "
+            "coincidence, and it is what earns a candidate a bigger "
+            "research budget."))
+        out.append(table(
+            f"{p}-corrob-table", ["feed", "what it said"],
+            [[esc(src), esc(text or sid2)]
+             for src, sid2, text in d.corroboration[:12]]))
+    else:
+        out.append(note(
+            f"<b>No.</b> Only the news feed mentioned {esc(d.ticker)} in the "
+            "stored window. A single newsroom saying something is one "
+            "observation, and the bot weights it as such &mdash; this is "
+            "normal, not a fault."))
+
+    # 3. What the bot thought, and did.
+    out.append(f'<h3 id="{p}-thought">3. What the bot thought of it</h3>')
+    if not d.candidates:
+        out.append(note(
+            f"<b>Nothing was built from this story.</b> No candidate row "
+            f"exists for {esc(d.ticker)}, so the model was never asked "
+            "about it and no decision was made. That is the ordinary "
+            "outcome for most stories: the news feed is used for "
+            "corroboration and sentiment, and on its own it does not "
+            "manufacture a candidate. The "
+            f'<a href="/funnel">funnel</a> shows how many reach each '
+            "stage and why the rest stop."))
+    for item in d.candidates:
+        cid = str(item.get("id") or "")
+        made_it = item.get("from_this_story")
+        head = (f'<b>{esc(item.get("catalyst_type") or "candidate")}</b> '
+                f'&mdash; discovered {esc(str(item.get("discovered_at"))[:19])}'
+                + (' <span class="pill good">built from THIS story</span>'
+                   if made_it else
+                   ' <span class="pill idle">same company, different '
+                   'evidence</span>'))
+        body = [f"<p>{head}</p>"]
+
+        if item.get("direction"):
+            body.append(
+                f'<p><b>The model read it as {esc(item["direction"])}</b>, '
+                f'conviction {esc(item.get("conviction"))}. '
+                f'{esc(item.get("thesis") or "")}</p>')
+            if item.get("invalidation"):
+                body.append(prov("What would prove it wrong: "
+                                 + esc(item["invalidation"])))
+            if item.get("priced_in"):
+                body.append(note(
+                    "<b>The model judged this already priced in.</b> "
+                    + esc(item.get("priced_in_reasoning") or "")
+                    + " That does not veto the trade &mdash; it raises the "
+                    "conviction bar the candidate has to clear."))
+        else:
+            body.append(note(
+                "<b>The model was never asked about this one.</b> It was "
+                "discovered but not researched, which the "
+                '<a href="/funnel">funnel</a> explains by stage.'))
+
+        action = item.get("action")
+        if action == "trade":
+            body.append(
+                f'<p><b>The risk engine traded it:</b> '
+                f'{dollars(_cents(item.get("notional_usd")))}, stop at '
+                f'{esc(item.get("stop_price"))}, exit by '
+                f'{esc(item.get("planned_exit_date"))}.</p>')
+        elif action == "skip":
+            reasons = jload(item.get("skip_reasons"), []) or []
+            body.append(
+                "<p><b>The risk engine declined it.</b> "
+                + ", ".join(f"<code>{esc(r)}</code>" for r in reasons)
+                + "</p>")
+        else:
+            body.append(prov("No risk decision is recorded for this "
+                             "candidate yet."))
+
+        # WHY THE SIZE WAS THE SIZE. These sentences come from the
+        # per-stock sizing bounds and answer the question a number
+        # cannot.
+        for rule, why in (item.get("notes") or []):
+            body.append(prov(f"{esc(rule.replace('_', ' '))}: {esc(why)}"))
+
+        if cid:
+            body.append(
+                f'<p><a href="/decision?candidate_id={esc(cid)}">Read the '
+                f"whole decision for this candidate</a>{arrow}every query "
+                "behind it, in order.</p>")
+        out.append(details(
+            f"{p}-cand-{esc(cid)}",
+            f'{esc(item.get("catalyst_type") or "candidate")} '
+            f'&mdash; {esc(cid or "no id")}',
+            "".join(body)))
+
+    out.append(prov(
+        f"Provenance: the story is one row of raw_events "
+        f"({d.story_q.row_count if d.story_q else 0} matched); the "
+        f"candidates are "
+        f"{d.cand_q.row_count if d.cand_q else 0} row(s) joined to "
+        "research_views and risk_decisions on candidate_id. Nothing here "
+        "is inferred."))
+    return section(f"{p}-section",
+                   f"News: {d.ticker or 'story'} &mdash; what the bot made "
+                   "of it", "".join(out))
 
 
 # --------------------------------------------------------------------------

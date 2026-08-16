@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
+from urllib.parse import quote
+
 from catalyst import benchmark
 from catalyst.dashboard.db import Db, QueryResult, START_CAPITAL_CENTS, bars_path, jload
 
@@ -1898,6 +1900,115 @@ MAP_MAX_TICKERS = 14
 MAP_MAX_STORIES = 26
 
 
+@dataclass
+class StoryDetail:
+    """One news story, and everything the bot did with it."""
+
+    found: bool = False
+    source_id: str = ""
+    headline: str = ""
+    publisher: str = ""
+    when: str = ""
+    ticker: str = ""
+    catalyst: str = ""
+    hint: int = 0
+    payload_raw: str = ""
+    #: [(candidate_id, catalyst_type, discovered_at, view, decision)]
+    candidates: list = field(default_factory=list)
+    #: Other feeds that named the same company in the same window.
+    corroboration: list = field(default_factory=list)
+    story_q: QueryResult | None = None
+    cand_q: QueryResult | None = None
+
+
+def story_detail(db: Db, source_id: str) -> StoryDetail:
+    """A single headline, and what the bot made of it.
+
+    OWNER-ASKED: "I want to be able to click the news and see what the
+    bot thought of each and connectiosn".
+
+    Until now a story node on the news map was not clickable at all, and
+    the ticker beside it went to a LOG SEARCH - which answers "what was
+    logged about this symbol", not "what did the bot think of this
+    story". Those are different questions and only the second one is
+    worth clicking a headline for.
+
+    Everything here is a stored row. Where a story led nowhere - which
+    is the common case - that is stated rather than left as an empty
+    panel, because silence and breakage look identical otherwise.
+    """
+    d = StoryDetail(source_id=str(source_id or ""))
+    if not d.source_id:
+        return d
+
+    d.story_q = db.q(
+        "SELECT source_id, fetched_at, payload_raw FROM raw_events "
+        "WHERE source = 'alpaca_news' AND source_id = ? LIMIT 1",
+        (d.source_id,))
+    if not d.story_q.rows:
+        return d
+    row = d.story_q.rows[0]
+    payload = jload(row["payload_raw"], {}) or {}
+    d.found = True
+    d.payload_raw = str(row["payload_raw"] or "")
+    d.headline = str(payload.get("headline") or "")
+    d.publisher = str(payload.get("publisher") or "")
+    d.when = str(payload.get("filed_date") or row["fetched_at"] or "")[:19]
+    d.ticker = str(payload.get("ticker") or "").strip().upper()
+    d.catalyst = str(payload.get("catalyst_type") or "news")
+    try:
+        d.hint = int(payload.get("direction_hint") or 0)
+    except (TypeError, ValueError):
+        d.hint = 0
+
+    if not d.ticker:
+        return d
+
+    # Candidates for this company, with the model's view and the risk
+    # engine's decision beside each. Matched on TICKER rather than on
+    # source_event_ids alone: a conjunction candidate is built from
+    # several events and naming only one of them would hide the very
+    # link the owner clicked through to see.
+    d.cand_q = db.q(
+        "SELECT c.id, c.catalyst_type, c.discovered_at, c.source_event_ids, "
+        "       v.direction, v.conviction, v.thesis, v.invalidation, "
+        "       v.priced_in, v.priced_in_reasoning, "
+        "       d.action, d.skip_reasons, d.notional_usd, d.stop_price, "
+        "       d.planned_exit_date, d.id AS decision_id "
+        "FROM candidates c "
+        "LEFT JOIN research_views v ON v.candidate_id = c.id "
+        "LEFT JOIN risk_decisions d ON d.candidate_id = c.id "
+        "WHERE c.ticker = ? ORDER BY c.discovered_at DESC LIMIT 20",
+        (d.ticker,))
+    for r in d.cand_q.rows:
+        item = dict(r)
+        # Was THIS story one of the events the candidate was built from?
+        ids = jload(item.get("source_event_ids"), []) or []
+        item["from_this_story"] = d.source_id in [str(x) for x in ids]
+        item["notes"] = [
+            (n["rule_name"], n["note"]) for n in db.q(
+                "SELECT rule_name, note FROM limit_application_notes "
+                "WHERE decision_id = ?", (item.get("decision_id") or "",)).rows]
+        d.candidates.append(item)
+
+    # Did any OTHER feed name the same company? Two independent
+    # observations is the thing the bot treats as more than coincidence.
+    others = db.q(
+        "SELECT source, source_id, payload_raw FROM raw_events "
+        "WHERE source != 'alpaca_news' ORDER BY fetched_at DESC LIMIT 4000")
+    for r in others.rows:
+        pl = jload(r["payload_raw"], {}) or {}
+        sym = str(pl.get("ticker") or pl.get("symbol") or "").strip().upper()
+        if sym == d.ticker:
+            d.corroboration.append(
+                (str(r["source"]), str(r["source_id"]),
+                 str(pl.get("headline") or pl.get("title")
+                     or pl.get("catalyst_type") or "")[:120]))
+        if len(d.corroboration) >= 12:
+            break
+    return d
+
+
 def news_map(db: Db, *, days: int = 3, kind: str = "",
              ticker: str = "", only_linked: bool = False) -> NewsMap:
     """News stories -> tickers -> what happened next, as recorded rows.
@@ -2011,7 +2122,12 @@ def news_map(db: Db, *, days: int = 3, kind: str = "",
                 ("About whom", ticker_nodes),
                 ("What the bot did", act_nodes)],
         edges=edges,
-        node_links={f"tk-{t}": f"/logs?q={t}" for t in keep_tickers},
+        # THE HEADLINE IS THE THING WORTH CLICKING. A story now opens
+        # what the bot made of it; the ticker keeps its log search,
+        # which answers a different and narrower question.
+        node_links={**{f"tk-{t}": f"/logs?q={t}" for t in keep_tickers},
+                    **{f"st-{s['id']}": f"/story?id={quote(str(s['id']))}"
+                       for s in shown_stories}},
         story_count=len(stories), ticker_count=len(by_ticker),
         query=res,
         filters={"days": days, "kind": kind, "ticker": ticker,
