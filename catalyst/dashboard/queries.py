@@ -488,6 +488,41 @@ def source_label(name) -> str:
     return SOURCE_LABELS.get(key, key.replace("_", " ") or "unknown source")
 
 
+#: WHAT KIND OF THING A DROP REASON IS. Owner-reported twice, and the
+#: second time with the right diagnosis: "Is this old or still relevant?
+#: If so its confusing me by being there."
+#:
+#: The list mixed three unrelated things under one hedging label:
+#:
+#:   ROUTINE   the per-cycle research cap deferring a candidate, or the
+#:             market being closed. NOT faults. Nothing broke, nothing
+#:             needs doing, and they recur every single day by design.
+#:   LIMIT     a bound the owner set doing its job - the budget governor
+#:             refusing to spend. A decision, not a failure.
+#:   FAULT     something actually broke. An HTTP 400, a transport error,
+#:             a feed that would not parse.
+#:
+#: Rendering an HTTP 400 traceback in the same list, in the same style,
+#: as "the market was closed" is what made a working bot look broken.
+ROUTINE_SKIPS = (
+    "deferred_max_research_per_cycle",
+    "market_closed",
+    "already_researched",
+    "no_candidates",
+)
+LIMIT_SKIPS = ("budget_denied", "budget_exhausted", "owner_cap")
+
+
+def skip_kind(reason: str) -> str:
+    """ROUTINE / LIMIT / FAULT for a research skip reason."""
+    text = str(reason or "").lower()
+    if any(k in text for k in ROUTINE_SKIPS):
+        return "ROUTINE"
+    if any(k in text for k in LIMIT_SKIPS):
+        return "LIMIT"
+    return "FAULT"
+
+
 def _last_seen(last_at, first_at=None) -> str:
     """When a drop reason last happened, in words that age.
 
@@ -507,9 +542,32 @@ def _last_seen(last_at, first_at=None) -> str:
     first = _as_date(first_at)
     if first is not None and first != day:
         span = f", first {first}"
-    if age >= 2:
-        when += " - NOT since, so this may be history rather than a live fault"
     return f"{when} ({day}{span})"
+
+
+def _fault_age(last_at, first_at, n_ok_since: int) -> str:
+    """Date a FAULT with what is actually known, and nothing more.
+
+    THE OLD WORDING WAS A GUESS DRESSED AS A FINDING: "NOT since, so
+    this may be history rather than a live fault". The commit that fixed
+    the tool_result 400 recorded exactly why that is wrong - "the
+    dashboard called it 'may be history' because none had recurred, but
+    the defect was still in the code, waiting for the next malformed
+    early submission". Absence of recurrence is not evidence of a fix.
+
+    What the database CAN prove is how much work has happened since
+    without hitting it again. That is a measurement, so it is what gets
+    printed; the reader draws their own conclusion from a number rather
+    than from the dashboard's opinion.
+    """
+    base = _last_seen(last_at, first_at)
+    if not base:
+        return ""
+    if n_ok_since <= 0:
+        return base + " - nothing has succeeded since, so treat it as live"
+    return (f"{base} - {n_ok_since} research call(s) have succeeded since "
+            "without hitting it. That is not proof it is fixed, only that "
+            "it has not recurred")
 
 
 @dataclass
@@ -939,8 +997,37 @@ def funnel(db: Db) -> Funnel:
             continue
         key = f"research skipped: {r['skipped_reason']}"
         res_reasons.setdefault(key, []).append(r["called_at"])
-    drops = [(k, len(v), _last_seen(max(v), min(v)))
+
+    # How much research has SUCCEEDED, for dating faults against work
+    # done rather than against the calendar.
+    ok_q = db.q("SELECT COUNT(*) AS n, MAX(called_at) AS last_ok "
+                "FROM research_calls WHERE skipped_reason IS NULL")
+    n_ok_total = int(ok_q.rows[0]["n"]) if ok_q.rows else 0
+
+    def _date_drop(reason: str, whens: list) -> str:
+        last, first = max(whens), min(whens)
+        if skip_kind(reason) != "FAULT":
+            # Routine and limit reasons recur by design. Dating them as
+            # "history or live fault?" invites the reader to worry about
+            # the bot working correctly.
+            return _last_seen(last, first)
+        since = 0
+        try:
+            since = int(db.q(
+                "SELECT COUNT(*) AS n FROM research_calls "
+                "WHERE skipped_reason IS NULL AND called_at > ?",
+                (str(last),)).rows[0]["n"])
+        except Exception:  # noqa: BLE001 - a label must not break the page
+            since = n_ok_total
+        return _fault_age(last, first, since)
+
+    drops = [(k, len(v), _date_drop(k, v))
              for k, v in sorted(res_reasons.items(), key=lambda kv: -len(kv[1]))]
+    # FAULTS FIRST, routine last. Sorting by count alone buried a real
+    # HTTP 400 under "the market was closed", which is the ordering that
+    # made the page unreadable.
+    _ORDER = {"FAULT": 0, "LIMIT": 1, "ROUTINE": 2}
+    drops.sort(key=lambda d: (_ORDER[skip_kind(d[0])], -d[1]))
     # A governor denial is a FAULT, not attrition: the bot wanted to
     # research and was not allowed to spend. It is also not attributable
     # to a candidate, so it can never sit in the drop column.

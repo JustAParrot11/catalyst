@@ -1750,10 +1750,28 @@ class TestFunnelDropReasonsAreDated:
         conn.close()
         return Db(path)
 
-    def test_a_reason_from_days_ago_is_marked_as_possibly_history(self, tmp_path):
+    def test_an_older_fault_is_dated_against_WORK_DONE(self, tmp_path):
+        """Was: asserted the words "may be history rather than a live
+        fault". That phrasing is gone, and the requirement it stood for
+        survives in a stronger form.
+
+        The commit that fixed the tool_result 400 recorded why the old
+        wording was actively wrong - "the dashboard called it 'may be
+        history' because none had recurred, but the defect was still in
+        the code, waiting for the next malformed early submission".
+        Absence of recurrence is not evidence of a fix, so the page no
+        longer implies one. It reports how much work has succeeded since
+        and says plainly that this is not proof.
+
+        This fixture has NO successful research after the fault, so the
+        honest answer is that it must not be softened at all.
+        """
         html_out = panels.funnel_panel(self._db_with_skip(tmp_path, 5))
         assert "last seen 5 days ago" in html_out
-        assert "may be history rather than a live fault" in html_out
+        assert "treat it as live" in html_out, (
+            "a fault with nothing successful since it was softened")
+        assert "may be history" not in html_out, (
+            "the page is guessing again instead of measuring")
 
     def test_a_reason_from_today_is_not_softened(self, tmp_path):
         """The distinction has to cut both ways or it is just a way of
@@ -2092,16 +2110,24 @@ class TestTheFourOwnerItems:
                       when.isoformat(), "tech", "[]"))
         conn.execute("INSERT INTO research_calls VALUES (?,?,?,?,?,?,?,?,?)",
                      ("rc1", "c1", "claude-sonnet-5", "P", "[]", "1.0", 100,
-                      "transport_error: 400", when.isoformat()))
+                      "not_attempted: market_closed", when.isoformat()))
         conn.commit()
         conn.close()
         html_out = panels.funnel_panel(Db(path))
         li = next(x for x in html_out.split("<li")
                   if "research skipped" in x and 'class="drop-' in x)
-        assert "drop-stale" in li
+        # WAS: a five-day-old `transport_error: 400` with nothing
+        # successful after it, asserted to render muted. That is the
+        # exact inference the fix commit for that 400 recorded as wrong -
+        # it had not recurred because nothing had run, and the defect was
+        # still in the code. An untested fault is not a stale one, so it
+        # now renders live and this test uses a reason that really is
+        # routine. The requirement it was written for - normal attrition
+        # must not wear the colour of a live error - is unchanged.
+        assert "drop-routine" in li
         assert "drop-live" not in li, (
-            "a reason not seen for days still wears the colour that "
-            "means something is wrong right now")
+            "routine attrition still wears the colour that means "
+            "something is wrong right now")
 
     def test_a_todays_funnel_reason_stays_loud(self, tmp_path):
         from catalyst.storage import init_db

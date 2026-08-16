@@ -525,6 +525,21 @@ button { background: var(--series-1); color: #fff; border-color: transparent;
 .funnel-why li.drop-live { color: var(--ink-2); }
 .funnel-why li.drop-stale, .funnel-why li.drop-stale .funnel-why-n {
   color: var(--muted); }
+/* THREE KINDS, THREE WEIGHTS. Routine attrition and a bound doing its
+   job are recessive; only a genuine fault carries colour. Owner-
+   reported: an HTTP 400 traceback sitting in the same style as "the
+   market was closed" made a working bot look broken. The tag is text,
+   never colour alone, so it survives greyscale and colour blindness. */
+.funnel-why li.drop-routine, .funnel-why li.drop-routine .funnel-why-n,
+.funnel-why li.drop-limit, .funnel-why li.drop-limit .funnel-why-n {
+  color: var(--muted); }
+.drop-tag { display: inline-block; font-size: 0.78em; font-weight: 700;
+  letter-spacing: .04em; text-transform: uppercase; padding: 1px 6px;
+  margin-right: 6px; border-radius: 3px; background: var(--surface-2);
+  color: var(--ink-2); border: 1px solid var(--hairline);
+  vertical-align: 1px; }
+.drop-tag-fault { background: var(--crit-wash); color: var(--critical);
+  border-color: var(--critical); }
 .funnel-why-n { font-weight: 700; font-variant-numeric: tabular-nums;
                 color: var(--ink); text-align: right; }
 /* The reason and its provenance, as ONE grid child. min-width: 0 is not

@@ -511,17 +511,36 @@ def funnel_panel(db: Db, p: str = "funnel") -> str:
             # rendered one word per line (owner-reported, with a
             # screenshot). Wrapping is structural, so the next element
             # added here cannot fall into the same trap.
-            items = "".join(
-                '<li class="'
-                + ("drop-stale" if "may be history" in str(detail) else "drop-live")
-                + f'"><span class="funnel-why-n">{esc(n)}</span>'
-                + '<span class="funnel-why-text">' + esc(reason)
-                + (f' <span class="prov">{raw(detail)}</span>' if detail else "")
-                + "</span></li>"
-                for reason, n, detail in stage.drops)
+            # THE KIND DECIDES THE STYLING, not a substring of the
+            # date text. "The market was closed" and an HTTP 400 are not
+            # the same news and must not look the same; matching on
+            # wording also broke the moment the wording changed.
+            def _chip(reason):
+                kind = queries.skip_kind(reason)
+                if kind == "ROUTINE":
+                    return ("drop-routine",
+                            '<span class="drop-tag">routine</span> ')
+                if kind == "LIMIT":
+                    return ("drop-limit",
+                            '<span class="drop-tag">a limit you set</span> ')
+                return ("drop-live",
+                        '<span class="drop-tag drop-tag-fault">fault</span> ')
+
+            items = ""
+            for reason, n, detail in stage.drops:
+                cls, tag = _chip(reason)
+                items += (
+                    f'<li class="{cls}">'
+                    f'<span class="funnel-why-n">{esc(n)}</span>'
+                    '<span class="funnel-why-text">' + tag + esc(reason)
+                    + (f' <span class="prov">{raw(detail)}</span>'
+                       if detail else "")
+                    + "</span></li>")
             out.append(
                 f'<div class="funnel-why" id="{p}-drops-{esc(stage.key)}">'
-                f"<h3>Why they stopped here</h3><ul>{items}</ul>")
+                f"<h3>Why they stopped here</h3>"
+                "<p class='prov'>Tagged <b>routine</b> where nothing went wrong and the bot was working as designed, <b>a limit you set</b> where a bound did its job, and <b>fault</b> where something actually broke. Only the last kind is worth your attention.</p>"
+                f"<ul>{items}</ul>")
             explained = 0
             for _r, n, _d in stage.drops:
                 try:
