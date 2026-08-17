@@ -296,6 +296,11 @@ h3 { font-size: 11px; margin: 14px 0 5px 0; text-transform: uppercase;
      letter-spacing: .11em; color: var(--ink-2); font-weight: 700; }
 .prov { color: var(--muted); font-size: var(--t-fine); margin: 4px 0;
         line-height: 1.45; }
+/* Explanatory text inside a table cell. Not .prov for the same reason
+   as .fig-cap: a reason lifted out of the row it explains is a reason
+   attached to nothing. */
+.prov-inline { color: var(--muted); font-size: var(--t-fine);
+        line-height: 1.45; }
 /* A chart's legend, which must stay WITH the chart. Looks like .prov
    and is deliberately not .prov, because section() lifts every .prov
    into a fold at the foot of the panel. */
@@ -782,6 +787,8 @@ NAV_GROUPS = [
         ("/", "Overview", "Everything at a glance"),
         ("/performance", "Performance", "Account value against the S&P"),
         ("/trades", "Trades", "Every position, and why it was taken"),
+        ("/next", "What happens next",
+         "When Claude next re-reads each thesis, and what closes when"),
         ("/funnel", "Pipeline", "Raw filings through to orders"),
     ]),
     ("Investigate", [

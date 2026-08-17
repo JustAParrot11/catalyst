@@ -3121,3 +3121,194 @@ def node_detail(db: Db, node_id: str) -> NodeDetail:
                              f"/brain?focus={node_id}"))
     detail.links.append(("Back to the whole map", "/brain"))
     return detail
+
+
+# ==========================================================================
+# What happens next, and when
+#
+# OWNER-ASKED: "can we add a next actions tab e.g. when will claude next
+# evaluate the choice and say sell or keep".
+#
+# THE ONE DESIGN RULE HERE. This module does not know the review
+# schedule and must never learn it. Every rule below is asked of
+# catalyst/research/position_review.py - the same functions the live
+# cycle calls - so the page cannot drift into describing a schedule the
+# bot does not keep. A dashboard that confidently states the wrong next
+# action is worse than one that says nothing: the owner plans around it.
+#
+# What it therefore CANNOT promise: that the cycle will run at all. A
+# tripped kill switch, an exhausted budget or a stopped service all
+# stop these firing, and each of those is named on the page rather than
+# quietly making the schedule a lie.
+# ==========================================================================
+
+
+#: How far ahead to probe should_review() for the day a gated position
+#: becomes reviewable. Comfortably past the longest hold the hard bounds
+#: allow, so the answer is "never" only when it really is.
+_GATE_PROBE_DAYS = 60
+
+
+@dataclass
+class NextAction:
+    when: str = ""              # ISO, or "" when it cannot be dated
+    when_words: str = ""        # "in about 4 hours", "now"
+    what: str = ""              # "Re-read the EMBC thesis"
+    detail: str = ""            # why then, in the code's own words
+    kind: str = "review"        # review | exit | hunt | blocked
+    ticker: str = ""
+    due_now: bool = False
+    blocked_by: str = ""
+
+
+@dataclass
+class NextActions:
+    actions: list = field(default_factory=list)
+    positions_q: QueryResult | None = None
+    n_open: int = 0
+    interval_hours: int = 0
+    min_gap_hours: int = 0
+    review_cost_note: str = ""
+    error: str = ""
+
+
+def _in_words(delta_hours: float) -> str:
+    """A duration a person reads, not a timestamp they subtract."""
+    if delta_hours <= 0:
+        return "due now"
+    if delta_hours < 1:
+        return f"in about {int(round(delta_hours * 60))} minutes"
+    if delta_hours < 36:
+        return f"in about {int(round(delta_hours))} hours"
+    return f"in about {int(round(delta_hours / 24))} days"
+
+
+def next_actions(db: Db, now=None) -> NextActions:
+    """Every decision the bot has queued, soonest first."""
+    from catalyst.orchestrator.cycle import _reviewable_positions
+    from catalyst.research.position_review import (
+        MIN_REVIEW_GAP_HOURS, REVIEW_INTERVAL_HOURS, last_reviewed_at,
+        news_since, should_review,
+    )
+
+    now = now or datetime.now(timezone.utc)
+    out = NextActions(interval_hours=REVIEW_INTERVAL_HOURS,
+                      min_gap_hours=MIN_REVIEW_GAP_HOURS)
+    out.positions_q = db.q(
+        "SELECT id, ticker, opened_at, planned_exit_date "
+        "FROM positions WHERE status = 'open' ORDER BY opened_at")
+    if db.conn is None:
+        out.error = db.open_error or "no connection"
+        return out
+    try:
+        positions = _reviewable_positions(db.conn)
+    except Exception as exc:            # noqa: BLE001 - shown, not raised
+        out.error = f"{type(exc).__name__}: {exc}"
+        return out
+    out.n_open = len(positions)
+
+    for pos in positions:
+        ticker = str(pos.get("ticker") or "?")
+        exit_date = pos.get("planned_exit_date")
+
+        # THE HARD EXIT always happens, needs no model and cannot be
+        # deferred, so it is listed whatever the review schedule says.
+        if exit_date:
+            hours = (datetime.combine(exit_date, datetime.min.time(),
+                                      timezone.utc) - now).total_seconds() / 3600
+            out.actions.append(NextAction(
+                when=str(exit_date), when_words=_in_words(hours),
+                what=f"Close {ticker} regardless",
+                detail=("The hard exit date set when the position opened. A "
+                        "review can bring this forward but never push it "
+                        "out."),
+                kind="exit", ticker=ticker, due_now=hours <= 0))
+
+        ok, why_not = should_review(pos, now.date())
+        if not ok:
+            # WHEN DOES THE GATE OPEN? The owner asked "when will claude
+            # next evaluate", and "not scheduled" does not answer it.
+            #
+            # Found by ASKING should_review about each future day rather
+            # than re-deriving its arithmetic here. Copying the rule
+            # would make this module a second source of truth for the
+            # schedule, which is the one thing this page must not be -
+            # and the probe stays correct through any change to the
+            # rule, including one nobody remembers to mirror.
+            opens = None
+            for ahead in range(1, _GATE_PROBE_DAYS + 1):
+                day = now.date() + timedelta(days=ahead)
+                if should_review(pos, day)[0]:
+                    opens = day
+                    break
+            if opens is None:
+                out.actions.append(NextAction(
+                    when="", when_words="never",
+                    what=f"Re-read the {ticker} thesis",
+                    detail=(f"{why_not} It closes before another review "
+                            "would be worth paying for."),
+                    kind="blocked", ticker=ticker, blocked_by=why_not))
+            else:
+                hours = (datetime.combine(opens, datetime.min.time(),
+                                          timezone.utc) - now
+                         ).total_seconds() / 3600
+                out.actions.append(NextAction(
+                    when=str(opens), when_words=_in_words(hours),
+                    what=f"Re-read the {ticker} thesis",
+                    detail=(f"Not yet: {why_not}. The first review falls "
+                            f"on {opens}."),
+                    kind="review", ticker=ticker))
+            continue
+
+        last = last_reviewed_at(db.conn, pos.get("id"))
+        if last is None:
+            out.actions.append(NextAction(
+                when=now.isoformat(), when_words="due now",
+                what=f"Re-read the {ticker} thesis",
+                detail=("Never reviewed, so the next cycle takes it. Claude "
+                        "answers hold, exit now, or no opinion."),
+                kind="review", ticker=ticker, due_now=True))
+            continue
+
+        since = (now - last).total_seconds() / 3600
+        if since < MIN_REVIEW_GAP_HOURS:
+            wait = MIN_REVIEW_GAP_HOURS - since
+            out.actions.append(NextAction(
+                when=(last + timedelta(hours=MIN_REVIEW_GAP_HOURS)).isoformat(),
+                when_words=_in_words(wait),
+                what=f"Re-read the {ticker} thesis",
+                detail=(f"Read {since:.1f}h ago. Nothing is re-read inside "
+                        f"{MIN_REVIEW_GAP_HOURS}h however much news there "
+                        "is."),
+                kind="review", ticker=ticker))
+            continue
+
+        # NEWS BRINGS IT FORWARD. Asking is free - the news is already
+        # stored and this is one indexed query - which is exactly why
+        # the live cycle asks, and why this page can afford to.
+        hits, headline = news_since(db.conn, ticker, last)
+        if hits:
+            out.actions.append(NextAction(
+                when=now.isoformat(), when_words="due now",
+                what=f"Re-read the {ticker} thesis",
+                detail=(f"{hits} item(s) of news have named {ticker} since "
+                        "it was last read, which brings the review forward "
+                        "from the clock."
+                        + (f' Newest: "{headline}"' if headline else "")),
+                kind="review", ticker=ticker, due_now=True))
+            continue
+
+        wait = REVIEW_INTERVAL_HOURS - since
+        out.actions.append(NextAction(
+            when=(last + timedelta(hours=REVIEW_INTERVAL_HOURS)).isoformat(),
+            when_words=_in_words(wait),
+            what=f"Re-read the {ticker} thesis",
+            detail=(f"Last read {since:.1f}h ago and no news has named "
+                    f"{ticker} since, so it waits for the "
+                    f"{REVIEW_INTERVAL_HOURS}h clock. Fresh news would "
+                    "bring it forward."),
+            kind="review", ticker=ticker))
+
+    # Soonest first; undated last, since "not scheduled" is not a time.
+    out.actions.sort(key=lambda a: (a.when == "", a.when))
+    return out
