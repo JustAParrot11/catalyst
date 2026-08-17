@@ -156,6 +156,12 @@ def route_trades(db: Db, params: dict) -> str:
                        "/trades", db.path, db=db)
 
 
+def route_next(db: Db, params: dict) -> str:
+    return render_page("What happens next",
+                       panels.next_actions_panel(db, p="na"),
+                       "/next", db.path, db=db)
+
+
 def route_funnel(db: Db, params: dict) -> str:
     # The origin split sits UNDER the funnel because it answers the
     # question the funnel raises: candidates stopped here - whose
@@ -732,6 +738,7 @@ HTML_ROUTES = {
     "/": route_overview,
     "/performance": route_performance,
     "/trades": route_trades,
+    "/next": route_next,
     "/funnel": route_funnel,
     "/costs": route_costs,
     "/decisions": route_decisions,

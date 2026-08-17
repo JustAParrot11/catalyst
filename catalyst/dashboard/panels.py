@@ -5007,3 +5007,88 @@ def node_panel(db: Db, node_id: str, p: str = "node") -> str:
         f'<a href="{esc(href)}">{esc(text)}</a>' for text, href in d.links)
         + "</p>")
     return section(f"{p}-section", f"Node: {esc(d.label)}", "".join(out))
+
+
+#: What each queued action is, at a glance. Beside the words, never
+#: instead of them, and aria-hidden - the same rule as the trade steps.
+_ACTION_ICON = {"review": "\U0001F9E0", "exit": "\U0001F6AA",
+                "hunt": "\U0001F50D", "blocked": "⏸"}
+
+
+def next_actions_panel(db: Db, p: str = "na") -> str:
+    """What the bot will do next, and when.
+
+    OWNER-ASKED: "can we add a next actions tab e.g. when will claude
+    next evaluate the choice and say sell or keep".
+
+    Everything on this page is asked of the code that actually decides -
+    position_review.should_review, last_reviewed_at and news_since, the
+    same three the live cycle calls. Restating the schedule here would
+    make the page a second source of truth, and a dashboard that
+    confidently names the wrong next action is worse than one that says
+    nothing, because the owner plans around it.
+
+    WHAT IT CANNOT PROMISE, and says so: that any of this fires. A
+    tripped kill switch, an exhausted budget or a stopped service each
+    stop the cycle, and none of them are visible from a schedule.
+    """
+    d = queries.next_actions(db)
+    out: list[str] = []
+
+    if d.error:
+        out.append(alarm(f"The schedule could not be read: {esc(d.error)}"))
+        out.append(empty_block(f"{p}-err", d.positions_q,
+                               meaning="the positions table could not be read"))
+        return section(f"{p}-section", "What happens next", "".join(out))
+
+    if not d.actions:
+        out.append(zero_block(
+            f"{p}-none", d.positions_q,
+            meaning=("nothing is queued because nothing is open. Reviews "
+                     "and exits are both properties of a held position, so "
+                     "this page fills in when the next order fills.")))
+        return section(f"{p}-section", "What happens next", "".join(out))
+
+    due = [a for a in d.actions if a.due_now]
+    reviews = [a for a in d.actions if a.kind == "review"]
+    out.append(tiles(f"{p}-tiles", [
+        ("Due now", f"{len(due)}", "on the next cycle, budget allowing"),
+        ("Open positions", f"{d.n_open}", "each re-read on its own clock"),
+        ("Re-read every", f"{d.interval_hours}h",
+         f"sooner on news, never inside {d.min_gap_hours}h"),
+    ]))
+
+    rows = []
+    for i, a in enumerate(d.actions):
+        ico = _ACTION_ICON.get(a.kind, _ACTION_ICON["review"])
+        state = ("crit" if a.kind == "exit" and a.due_now
+                 else "good" if a.due_now
+                 else "idle" if a.kind != "blocked" else "warn")
+        rows.append([
+            f'<span class="step-ico" aria-hidden="true">{ico}</span>'
+            f"<b>{esc(a.what)}</b>",
+            pill(state, a.when_words),
+            esc(a.when[:16].replace("T", " ") if a.when else "—"),
+            f'<span class="prov-inline">{esc(a.detail)}</span>',
+        ])
+    out.append(table(f"{p}-table",
+                     ["what", "when", "at", "why then"], rows))
+
+    out.append(note(
+        "<b>Claude answers one of three things at a review:</b> keep "
+        "holding, close it now, or no opinion. It can bring an exit date "
+        "<b>forward</b> and never push it out."))
+    out.append(_why_fold(f"{p}-why", (
+        "<p>Reviews are gated so a position is not paid for repeatedly to "
+        f"be told nothing changed: at most one every {d.min_gap_hours} "
+        f"hours, otherwise on a {d.interval_hours}-hour clock, brought "
+        "forward the moment a feed publishes something naming the "
+        "company. A position opened today is skipped - there is nothing "
+        "new to find yet - and so is one closing tomorrow, because an "
+        "early exit would not settle any sooner.</p>"
+        "<p>These times are what the schedule ALLOWS, not a promise the "
+        "cycle runs. A tripped kill switch, an exhausted daily budget or "
+        "a stopped service each stop all of it, and none of them are "
+        "visible from a schedule. The Overview and Cost pages are where "
+        "those live.</p>")))
+    return section(f"{p}-section", "What happens next", "".join(out))
