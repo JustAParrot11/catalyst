@@ -85,13 +85,114 @@ SUBMIT_RESEARCH_VIEW_TOOL = {
     "input_schema": {
         "type": "object",
         "properties": {
-            "direction": {"type": "string", "enum": ["long", "short", "no_trade"]},
-            "conviction": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-            "thesis": {"type": "string"},
-            "invalidation": {"type": "string"},
-            "expected_holding_days": {"type": "integer", "minimum": 1},
-            "priced_in": {"type": "boolean"},
-            "priced_in_reasoning": {"type": "string"},
+            "direction": {
+                "type": "string",
+                "enum": ["long", "short", "no_trade"],
+                "description": (
+                    "The direction you would take if a position were "
+                    "opened. Use no_trade when the evidence does not "
+                    "support either side - a justified no_trade is a "
+                    "good answer, not a failure."
+                ),
+            },
+            # THE FIELD THAT HAD NO DESCRIPTION AT ALL, and the defect
+            # that cost the owner every trade. Measured over the first 31
+            # live views: every LONG scored between 0.30 and 0.45 while
+            # the floor deciding whether to trade sat at 0.60. Nothing
+            # anywhere told the model what the number meant, so it
+            # calibrated on instinct while the code read the same digits
+            # as a probability. Two scales, never reconciled, and a
+            # system arithmetically incapable of opening a position.
+            #
+            # It is defined as a FREQUENCY because that is the only form
+            # the refusal tracker can grade: score enough 0.6 calls and
+            # roughly six in ten should have worked, or the number is
+            # wrong and the evidence says by how much.
+            #
+            # It deliberately does NOT say what the floor is. Naming the
+            # bar teaches the model to clear it, which converts the one
+            # measurement worth having into a formality.
+            "conviction": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0,
+                "description": (
+                    "How often this call would be RIGHT across many "
+                    "setups that looked like this one - a frequency, not "
+                    "a feeling. 0.50 is a coin flip: the move is as "
+                    "likely to go against you as with you. 0.60 means "
+                    "about six such setups in ten resolve your way. 0.75 "
+                    "means three in four. Above 0.85 should be rare and "
+                    "needs evidence a careful reader would also find "
+                    "compelling. Below 0.50 on a long or short is a "
+                    "contradiction - if you would be wrong more often "
+                    "than right, the direction is no_trade.\n"
+                    "On no_trade this is your confidence that NOT "
+                    "trading is correct, judged the same way.\n"
+                    "A deterministic threshold reads this number and "
+                    "decides whether the trade happens, so it is a "
+                    "measurement rather than a flourish. Do not inflate "
+                    "it to get a trade through and do not shade it down "
+                    "to look careful: both corrupt the only feedback "
+                    "loop this system has."
+                ),
+            },
+            "thesis": {
+                "type": "string",
+                "description": (
+                    "The MECHANISM, in two to four sentences: what "
+                    "specifically would move this price from here, why "
+                    "that has not already happened, and what the insiders "
+                    "plausibly knew that the market does not. Name the "
+                    "figures you are relying on - who bought, how much, "
+                    "at what price against what recent range. A thesis "
+                    "that would read the same for any insider cluster in "
+                    "any company is not a thesis."
+                ),
+            },
+            "invalidation": {
+                "type": "string",
+                "description": (
+                    "The single observable fact that would prove this "
+                    "wrong, stated so a person could check it without "
+                    "asking you. A price level, a filing, a date, a "
+                    "number in a report. 'The thesis does not play out' "
+                    "is not checkable and is not an answer; this text is "
+                    "re-read later to decide whether to close the "
+                    "position early."
+                ),
+            },
+            "expected_holding_days": {
+                "type": "integer",
+                "minimum": 1,
+                "description": (
+                    "Whole trading days you expect the thesis to need. "
+                    "This strategy holds days to weeks and every position "
+                    "carries a hard exit date, so answer with how long "
+                    "the MECHANISM needs, not with how long you would "
+                    "like to be given."
+                ),
+            },
+            "priced_in": {
+                "type": "boolean",
+                "description": (
+                    "True only if the market has already consumed these "
+                    "filings. Judge it on what price and volume did after "
+                    "each filing became public and whether the cluster "
+                    "has been reported anywhere. A priced_in call you "
+                    "cannot support with a figure should be false."
+                ),
+            },
+            "priced_in_reasoning": {
+                "type": "string",
+                "description": (
+                    "The evidence behind that boolean, with numbers: the "
+                    "move since the filing date, the volume against its "
+                    "normal, where it sits in its recent range, what a "
+                    "search did or did not turn up. 'Probably priced in' "
+                    "with no figure behind it is not an answer."
+                ),
+            },
             # EVIDENCE, never a sizing input. Optional by design: a view
             # without findings is perfectly valid, and the trade decision
             # never depends on this field. It rides along in a pass

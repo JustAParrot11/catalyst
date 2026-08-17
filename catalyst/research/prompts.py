@@ -263,11 +263,35 @@ def render_research_prompt(candidate: Candidate,
     sections.append(
         "ANSWER THESE\n"
         "1. direction — \"long\", \"short\" or \"no_trade\".\n"
-        "2. conviction — 0.0 to 1.0, your confidence in that direction.\n"
-        "3. thesis — the mechanism, in one or two sentences: why would "
-        "this specific cluster still move the price from here?\n"
-        "4. invalidation — the observable fact that would prove the "
-        "thesis wrong.\n"
+        # THE NUMBER THAT DECIDED EVERY TRADE AND WAS NEVER DEFINED.
+        # "your confidence" is not a unit. Over the first 31 live views
+        # every long landed between 0.30 and 0.45 against a floor of
+        # 0.60 - not disagreement, just two different scales. Stated as
+        # a frequency it becomes something the refusal tracker can
+        # grade: score enough 0.6 calls and about six in ten should
+        # have worked, or the number is wrong and by a measurable
+        # amount.
+        "2. conviction — 0.0 to 1.0, and read it as a FREQUENCY, not a "
+        "feeling: out of many setups that looked like this one, how "
+        "often would this call be right? 0.50 is a coin flip. 0.60 is "
+        "six in ten. 0.75 is three in four. Above 0.85 should be rare. "
+        "Below 0.50 on a direction is a contradiction — if you would be "
+        "wrong more often than right, the answer is no_trade. Code "
+        "reads this number and decides whether to trade, so give the "
+        "honest figure: inflating it to force a trade and shading it "
+        "down to look careful both break the only feedback loop this "
+        "system has.\n"
+        "3. thesis — the MECHANISM, in two to four sentences: what "
+        "would move this price from here, why it has not moved already, "
+        "and what these insiders plausibly knew that the market does "
+        "not. Name your figures — who bought, how much, at what price "
+        "against what recent range. A thesis that would read the same "
+        "for any cluster in any company is not a thesis.\n"
+        "4. invalidation — the ONE observable fact that would prove the "
+        "thesis wrong, checkable by someone who cannot ask you: a price "
+        "level, a filing, a date, a number in a report. This text is "
+        "re-read on every position review to decide whether to close "
+        "early, so \"the thesis does not play out\" is useless there.\n"
         "5. expected_holding_days — whole days; this strategy holds days "
         f"to weeks (the graded arm held {HOLD_DAYS} trading days).\n"
         "6. priced_in — has the market already consumed these filings? "
