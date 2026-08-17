@@ -566,17 +566,59 @@ def _void_stale_pending(conn, report: "CycleReport",
         conn.commit()
 
 
+#: Broker order states in which the order is STILL WORKING - the broker
+#: may yet route more of it. Alpaca refuses an opposite-side order while
+#: one of these is live (error 40310000, "potential wash trade detected"),
+#: so a protective sell stop submitted now is not merely risky, it is
+#: certain to be rejected.
+#:
+#: WHY THE UNKNOWN STATE IS TREATED AS DONE. Everything not named here
+#: falls through to "place the stop". That is deliberate and it is the
+#: safe direction: if the guess is wrong the broker rejects the stop and
+#: the position is unprotected - exactly where declining to try would
+#: have left it - so trying costs a rejected order row and never costs
+#: protection. Failing the other way would hold protection back on a
+#: status nobody had thought of, which is house rule 7's own example.
+_WORKING_ORDER_STATES = frozenset({
+    "new", "accepted", "pending_new", "accepted_for_bidding",
+    "partially_filled", "pending_cancel", "pending_replace",
+    "calculated", "held", "stopped",
+})
+
+
 def _poll_entry_fill(broker: Broker, broker_order_id: str | None, *,
-                     attempts: int, interval_s: float) -> Decimal:
-    """Filled qty of a just-placed market order, polled briefly."""
+                     attempts: int, interval_s: float) -> tuple[Decimal, bool]:
+    """(filled qty, still working) for a just-placed market order.
+
+    OWNER-REPORTED, 2026-08-17: "position ... is unprotected". The first
+    real trade sat naked for a full cycle because this function returned
+    the instant ANY quantity had filled, while the buy order itself was
+    still working. The sell stop that followed was rejected as a wash
+    trade, and nothing armed the position until the next pass fifteen
+    minutes later.
+
+    So the exit condition is now the ORDER's state, not the fill's: poll
+    until the entry stops working, and report whether it did. A market
+    order that completes immediately - the ordinary case - still returns
+    on the first attempt, so the common path is not slowed at all. Only
+    the pathological one waits, and it is waiting against a fifteen
+    minute alternative.
+
+    Not fixable with a bracket order: Alpaca's OTO/bracket types do not
+    accept fractional quantities, and every position here is fractional.
+    """
     import time as _time
     if not broker_order_id:
-        return Decimal("0")
+        return Decimal("0"), False
+    qty = Decimal("0")
     for attempt in range(attempts):
         try:
             state = broker.get_order(broker_order_id)
         except BrokerError:
-            return Decimal("0")
+            # No answer is not evidence the order is done. Report it as
+            # still working so the caller does not submit a stop into an
+            # order whose state we could not read.
+            return qty, True
         try:
             qty = _finite(state.get("filled_qty") or "0")
         except (ArithmeticError, TypeError, ValueError):
@@ -586,12 +628,13 @@ def _poll_entry_fill(broker: Broker, broker_order_id: str | None, *,
             # no stop and no exit date. Treat it as "not yet filled":
             # the position is recorded unprotected and the next cycle's
             # confirm_stops_resting arms it (stress-tester defect 10).
-            return Decimal("0")
-        if qty > 0:
-            return qty
+            return Decimal("0"), False
+        status = str(state.get("status") or "").strip().lower()
+        if status not in _WORKING_ORDER_STATES:
+            return qty, False
         if attempt < attempts - 1:
             _time.sleep(interval_s)
-    return Decimal("0")
+    return qty, True
 
 
 def _fallback_cluster_key(c: Candidate) -> str:
@@ -606,7 +649,12 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
               cluster_fn, *, now: datetime | None = None,
               kind: str = "scheduled",
               max_research: int = MAX_RESEARCH_PER_CYCLE,
-              entry_poll_attempts: int = 5,
+              # Only the SLOW case waits: the poll returns the moment the
+              # entry order stops working, so an ordinary market fill
+              # still costs one round trip. The budget is generous
+              # because the alternative to waiting is fifteen minutes of
+              # an unprotected position, not fifteen more seconds.
+              entry_poll_attempts: int = 15,
               entry_poll_interval_s: float = 1.0,
               account_mode: str = "paper",
               owner_monthly_cap_cents=None,
@@ -967,13 +1015,13 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
         # The protective stop covers what actually FILLED, never the
         # ordered qty (risk review B3/B4): a pre-fill sell stop is
         # rejected by a cash account, and its silent rejection left the
-        # position unprotected. Poll the market order briefly; if it has
-        # not filled yet, the position row carries stop_order_id NULL and
+        # position unprotected. Poll until the entry order stops working;
+        # if it has not, the position row carries stop_order_id NULL and
         # the next cycle's confirm_stops_resting arms it (and blocks new
         # entries until then).
-        filled_qty = _poll_entry_fill(broker, entry.broker_order_id,
-                                      attempts=entry_poll_attempts,
-                                      interval_s=entry_poll_interval_s)
+        filled_qty, entry_working = _poll_entry_fill(
+            broker, entry.broker_order_id, attempts=entry_poll_attempts,
+            interval_s=entry_poll_interval_s)
         if filled_qty == 0 and entry.status in _TERMINAL_UNFILLED:
             # The broker answered 200 but the order is already dead
             # (Alpaca cancels unfilled orders at the close). Nothing was
@@ -993,7 +1041,18 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
                 f"{decision.qty} on {c.id} - clamped, needs review")
             filled_qty = decision.qty
         stop_broker_id = None
-        if filled_qty > 0:
+        if filled_qty > 0 and entry_working:
+            # The buy is still working, so this stop would be rejected as
+            # a wash trade and the position would be unprotected anyway.
+            # Say which it is: "we did not try" and "we tried and were
+            # refused" need different responses, and the second one used
+            # to be the only story the record could tell.
+            report.errors.append(
+                f"{c.ticker}: entry still working after "
+                f"{entry_poll_attempts}x{entry_poll_interval_s}s with "
+                f"{filled_qty} filled - stop deferred to the next cycle "
+                "rather than submitted into a certain wash-trade refusal")
+        elif filled_qty > 0:
             stop = place_stop(decision_id=c.id, ticker=c.ticker,
                               qty=filled_qty,
                               stop_price=decision.stop_price,
