@@ -2295,6 +2295,10 @@ class TradeStory:
     stop_events: list = field(default_factory=list)
     reviews: list = field(default_factory=list)
     orders: list = field(default_factory=list)
+    #: [(rule, bound_type, requested, bound, binding, note)] - every
+    #: limit the risk engine checked, and the one that decided the size.
+    limits: list = field(default_factory=list)
+    equity_at_entry: str = ""
 
 
 @dataclass
@@ -2382,6 +2386,34 @@ def trades(db: Db, position_id: str | None = None) -> Trades:
             if oq.rows:
                 st.origin = str(dict(oq.rows[0]).get("origin") or "")
                 st.nomination_why = str(dict(oq.rows[0]).get("rationale") or "")
+
+            if dq.rows:
+                did = str(dict(dq.rows[0]).get("id") or "")
+                lq = db.q(
+                    "SELECT l.rule_name, l.bound_type, l.requested_value, "
+                    "       l.bound_value, l.binding, n.note "
+                    "FROM limit_applications l "
+                    "LEFT JOIN limit_application_notes n "
+                    "  ON n.decision_id = l.decision_id "
+                    " AND n.rule_name = l.rule_name "
+                    "WHERE l.decision_id = ? "
+                    "ORDER BY l.binding DESC, l.rule_name", (did,))
+                for r in lq.rows:
+                    r = dict(r)
+                    st.limits.append((
+                        r.get("rule_name"), r.get("bound_type"),
+                        r.get("requested_value"), r.get("bound_value"),
+                        bool(r.get("binding")), r.get("note") or ""))
+                # The equity the size was worked out FROM. Without it the
+                # arithmetic below cannot be shown, and "why $400" has no
+                # answer a reader can check.
+                eq = db.q(
+                    "SELECT equity_usd FROM equity_snapshots "
+                    "WHERE taken_at <= ? ORDER BY taken_at DESC LIMIT 1",
+                    (str(dict(dq.rows[0]).get("decided_at") or ""),))
+                if eq.rows:
+                    st.equity_at_entry = str(dict(eq.rows[0]).get(
+                        "equity_usd") or "")
 
             oq = db.q(
                 "SELECT id, side, qty, order_type, status, submitted_at, "

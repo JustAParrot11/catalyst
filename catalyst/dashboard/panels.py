@@ -3901,6 +3901,69 @@ def _trade_story(st, p: str, index: int) -> str:
         out.append(f"<p>{line}</p>")
     else:
         out.append(caveat("No risk decision is on record for this position."))
+    # WHY THAT AMOUNT AND NOT MORE. Owner-asked: "will the dashboard
+    # explain why it decided to for example spend 15% of account value
+    # instead of 30%". The arithmetic is short and completely
+    # explainable, and the figures behind it were already being stored -
+    # they just were not being shown anywhere a person would look.
+    binding = [l for l in st.limits if l[4]]
+    if st.limits:
+        out.append(f'<h5 id="{p}-t{index}-size">Why that amount, and not '
+                   "more</h5>")
+        pct = ""
+        try:
+            if st.equity_at_entry and st.notional_usd:
+                share = (Decimal(st.notional_usd)
+                         / Decimal(st.equity_at_entry) * 100)
+                pct = (f" &mdash; about <b>{share:.0f}% of the "
+                       f"{dollars(Decimal(st.equity_at_entry) * 100)} "
+                       "account</b>")
+        except (ArithmeticError, TypeError, ValueError):
+            pct = ""
+        widest = max((l for l in binding), key=lambda l: str(l[3]),
+                     default=None)
+        out.append(
+            "<p>The size is one short sum: <b>the most it may lose on a "
+            "single position</b>, divided by <b>how far this particular "
+            "stock could fall before the stop rescues it</b>. A stock "
+            "whose stop has to sit far away gets a SMALLER position, "
+            "because the same dollars of risk buy fewer shares.</p>")
+        if st.equity_at_entry and binding:
+            out.append(
+                f"<p>Here that gave <b>{esc(st.notional_usd)} dollars</b>"
+                + pct + ". Widen the stop and this number falls; a bigger "
+                "account raises it proportionally.</p>")
+        rows = []
+        # `why` not `note`: `note` is the module-level renderer, and
+        # binding it as a loop variable shadowed the function for the
+        # whole of _trade_story - which raised UnboundLocalError on the
+        # FIRST line of the story, before any of this ran. Exactly the
+        # shadowing that produced the `held` / `broker_held` bug in
+        # cycle.py.
+        for rule, btype, requested, bound, binds, why in st.limits:
+            plain = {
+                "max_loss_per_position": "most it may lose on one position",
+                "per_stock_adverse_gap": "how far this stock has gapped "
+                                         "overnight before",
+                "per_stock_stop_width": "how far the stop must sit outside "
+                                        "this stock's normal noise",
+                "max_hold_days": "longest it may hold anything",
+                "max_total_exposure": "most that may be invested at once",
+                "max_correlated_cluster": "most in one correlated bet",
+                "max_open_positions": "how many positions at once",
+            }.get(str(rule), str(rule))
+            rows.append([esc(plain), esc(str(requested)), esc(str(bound)),
+                         "<b>THIS ONE DECIDED IT</b>" if binds
+                         else "did not bind", esc(str(why or ""))])
+        out.append(table(
+            f"{p}-t{index}-limits",
+            ["what was checked", "wanted", "allowed", "effect", "why"],
+            rows))
+        if not binding:
+            out.append(prov(
+                "Nothing bound: the size came straight out of the sum "
+                "above with no limit reducing it."))
+
     if st.entry_intended and st.entry_price:
         out.append(
             f"<p class='prov'>It was sized from a live quote of "

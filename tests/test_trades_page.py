@@ -285,3 +285,110 @@ class TestItSaysNothingItDoesNotKnow:
         path = _seed(tmp_path, stops=[])
         html = _page(path)
         assert "No stop check has run" in html
+
+
+# ------------------------------------------------ why THAT amount
+#
+# OWNER-ASKED: "will the dashboard explain why it decided to for example
+# spend 15% of account value instead of 30% etc".
+#
+# It has always stored the answer - limit_applications records every rule
+# with what was wanted, what was allowed and whether it bound, and
+# limit_application_notes carries the sentence behind a per-stock bound.
+# None of it was shown anywhere a person would look.
+#
+# THE SIZE IS ONE SHORT SUM and it is completely explainable:
+#
+#     notional = (equity x most it may lose on one position)
+#                / how far this stock could fall before the stop
+#
+# On the owner's real trade: $2,000 x 2% = $40 of risk, divided by a 10%
+# stop, is $400 - 20% of the account. Widen the stop and the number
+# falls. That is the whole answer, and the page now says it.
+#
+# THIS PATH ALSO CRASHED THE WHOLE PAGE. `for ... note in st.limits`
+# shadowed the module-level `note()` renderer, raising UnboundLocalError
+# on the FIRST line of the story - and every test above passed anyway,
+# because none of their fixtures had limit rows. Hence these.
+
+LIMITS = [("per_stock_adverse_gap", "adaptive", "0.08", "0.08", 1),
+          ("per_stock_stop_width", "adaptive", "0.10", "0.10", 1),
+          ("max_loss_per_position", "hard", "0.10", "0.02", 0),
+          ("max_hold_days", "hard", "12", "31", 0)]
+GAP_NOTE = ("EMBC has gapped 45% overnight in its own history, at or "
+            "beyond the insider_cluster assumption of 8%, so the category "
+            "value stands")
+
+
+def _seed_with_limits(tmp_path, equity="2000.00", limits=LIMITS):
+    import sqlite3
+
+    path = _seed(tmp_path)
+    conn = sqlite3.connect(path)
+    for rule, bt, req, bound, binds in limits:
+        conn.execute("INSERT INTO limit_applications VALUES (?,?,?,?,?,?)",
+                     ("d1", rule, bound, req, bt, binds))
+    conn.execute("INSERT INTO limit_application_notes VALUES (?,?,?)",
+                 ("d1", "per_stock_adverse_gap", GAP_NOTE))
+    if equity:
+        conn.execute("INSERT INTO equity_snapshots VALUES (?,?,?,?,?,?)",
+                     ("2026-08-17", "2026-08-17T16:00:00+00:00", equity,
+                      equity, "0", "broker_read"))
+    conn.commit()
+    conn.close()
+    return path
+
+
+class TestItExplainsTheSize:
+    def test_the_page_still_renders_when_limits_exist(self, tmp_path):
+        """The regression. A loop variable shadowed the note() renderer
+        and took the entire page down, and no fixture above had limits."""
+        html = _page(_seed_with_limits(tmp_path))
+        assert "EMBC" in html and len(html) > 2000
+
+    def test_it_states_the_share_of_the_account(self, tmp_path):
+        """$400 of a $2,000 account is 20%. That is the number the owner
+        asked about, so it is the number printed."""
+        html = _page(_seed_with_limits(tmp_path))
+        assert "20% of the" in html
+        assert "$2,000.00 account" in html
+
+    def test_it_gives_the_rule_in_words_not_just_a_formula(self, tmp_path):
+        html = _page(_seed_with_limits(tmp_path))
+        assert "most it may lose on a single position" in html
+        assert "before the stop rescues it" in html
+        assert "SMALLER position" in html, (
+            "nothing explains why a wider stop means less money, which is "
+            "the counter-intuitive half")
+
+    def test_the_limit_that_decided_it_is_marked(self, tmp_path):
+        html = _page(_seed_with_limits(tmp_path))
+        assert "THIS ONE DECIDED IT" in html
+        assert "did not bind" in html, (
+            "limits that were checked and did not bind are hidden, so the "
+            "reader cannot see what else was considered")
+
+    def test_rule_names_are_translated(self, tmp_path):
+        html = _page(_seed_with_limits(tmp_path))
+        assert "how far this stock has gapped overnight before" in html
+        assert "longest it may hold anything" in html
+        assert "per_stock_adverse_gap" not in html, (
+            "the raw machine name is shown instead of English")
+
+    def test_the_per_stock_reasoning_is_shown(self, tmp_path):
+        """"EMBC has gapped 45% overnight in its own history" is the
+        difference between a number and an explanation."""
+        html = _page(_seed_with_limits(tmp_path))
+        assert "gapped 45% overnight in its own history" in html
+
+    def test_no_equity_snapshot_means_no_invented_percentage(self, tmp_path):
+        """A share of the account cannot be computed without the account.
+        Better silent than wrong."""
+        html = _page(_seed_with_limits(tmp_path, equity=""))
+        assert "% of the" not in html
+        assert "most it may lose on a single position" in html
+
+    def test_nothing_binding_is_said_plainly(self, tmp_path):
+        html = _page(_seed_with_limits(
+            tmp_path, limits=[("max_hold_days", "hard", "12", "31", 0)]))
+        assert "Nothing bound" in html
