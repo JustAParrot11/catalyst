@@ -296,6 +296,11 @@ h3 { font-size: 11px; margin: 14px 0 5px 0; text-transform: uppercase;
      letter-spacing: .11em; color: var(--ink-2); font-weight: 700; }
 .prov { color: var(--muted); font-size: var(--t-fine); margin: 4px 0;
         line-height: 1.45; }
+/* A chart's legend, which must stay WITH the chart. Looks like .prov
+   and is deliberately not .prov, because section() lifts every .prov
+   into a fold at the foot of the panel. */
+.fig-cap { color: var(--muted); font-size: var(--t-fine); margin: 2px 0 8px;
+        line-height: 1.45; max-width: 640px; }
 /* The one-sentence read. Sits above the detail on every page that has
    a simple view, and is the only prose allowed to outweigh a figure. */
 .lede-line { font-size: var(--t-lead); }
@@ -562,6 +567,37 @@ button { background: var(--series-1); color: #fff; border-color: transparent;
 .rail-entry { stroke: var(--ink-2); stroke-width: 2; }
 .rail-exit { stroke: var(--accent); stroke-width: 2; stroke-dasharray: 3 2; }
 .rail-label { fill: var(--muted); font-size: 11px; }
+/* HOW LONG EACH POSITION HAS LEFT. Owner-asked: "less text more graphs
+   and icons, make the UI more friendly, its text heavy". "Opened the
+   17th, closes the 29th" is two dates the reader has to subtract; a bar
+   against today is the subtraction already done. */
+.tl-wrap { border: 1px solid var(--hairline); border-radius: 6px;
+  padding: 10px 16px 14px; margin: 14px 0; background: var(--surface); }
+.tl-wrap h3 { margin: 0 0 6px; font-size: 0.95em; color: var(--ink-2); }
+.tl-chart { width: 100%; max-width: 640px; height: auto; }
+.tl-name { fill: var(--ink-2); font-size: 11px; font-weight: 600; }
+.tl-note { fill: var(--muted); font-size: 10px; }
+.tl-open { fill: var(--accent); opacity: .55; }
+.tl-done { fill: var(--muted); opacity: .35; }
+.tl-today { stroke: var(--series-2); stroke-width: 1.5; stroke-dasharray: 3 2; }
+.hold { margin: 8px 0 2px; max-width: 640px; }
+.hold-track { height: 8px; border-radius: 4px; background: var(--surface-2);
+  border: 1px solid var(--hairline); overflow: hidden; }
+.hold-fill { display: block; height: 100%; background: var(--accent);
+  opacity: .55; }
+/* ICONS BESIDE HEADINGS, never instead of them. Every step keeps its
+   words and the glyph is aria-hidden, so nothing is carried by the
+   picture alone - the same rule the status pills follow. */
+.step-ico { margin-right: 7px; font-size: 1.05em; }
+/* THE PROSE, FOLDED. Reported "text heavy" twice. None of it is wrong -
+   it is the provenance and reasoning the brief demands - so it is put
+   one click away rather than deleted. */
+.why-fold { margin: 6px 0 10px; }
+.why-fold summary { font-size: var(--t-fine); color: var(--muted);
+  cursor: pointer; }
+.why-fold[open] summary { margin-bottom: 4px; }
+.why-fold p { font-size: var(--t-fine); color: var(--ink-2);
+  margin: 4px 0; max-width: 62ch; }
 .funnel-why li.drop-live { color: var(--ink-2); }
 .funnel-why li.drop-stale, .funnel-why li.drop-stale .funnel-why-n {
   color: var(--muted); }
@@ -928,6 +964,22 @@ def section(sid: str, title: str, body: str) -> str:
 def prov(text: str) -> str:
     """Provenance line. Every number on this dashboard gets one."""
     return f'<p class="prov">{esc(text)}</p>'
+
+
+def figcap(html_text: str) -> str:
+    """A caption that belongs to the figure directly above it.
+
+    NOT provenance, and the distinction is not pedantry: section() lifts
+    every provenance line into a disclosure at the foot of the panel,
+    which is right for "where this number came from" and wrong for the
+    legend of a chart. Caught by rendering the trades page and finding
+    three graphs with their captions stacked together at the bottom,
+    hundreds of elements away from the drawings they explained. A chart
+    whose legend is somewhere else is not a chart.
+
+    So this looks like a provenance line and stays put.
+    """
+    return f'<p class="fig-cap">{html_text}</p>'
 
 
 def caveat(text: str) -> str:

@@ -379,6 +379,18 @@ ok "install tools up to date"
 step "Installing Catalyst"
 # --------------------------------------------------------------------------
 
+# STAMP BEFORE INSTALLING, so the installed copy can say what it is.
+# The service imports from site-packages, which has no .git and cannot
+# see the repository, so this file - shipped inside the package - is
+# the only channel that reaches it. Owner-reported as a version reading
+# "0.3.x" on a machine that had upgraded perfectly well.
+_BASE="$(git -C "${REPO_DIR}" log -1 --format=%H -- catalyst/VERSION 2>/dev/null || true)"
+if [ -n "${_BASE}" ]; then _SPAN="${_BASE}..HEAD"; else _SPAN="HEAD"; fi
+printf '%s\n%s\n' \
+  "$(git -C "${REPO_DIR}" rev-list --count "${_SPAN}" 2>/dev/null || true)" \
+  "$(git -C "${REPO_DIR}" rev-parse HEAD 2>/dev/null || true)" \
+  > "${REPO_DIR}/catalyst/BUILD" 2>>"${LOG_FILE}" || true
+
 if ! run "${VENV_PY}" -m pip install --quiet "${REPO_DIR}"; then
   fail "Catalyst itself could not be installed." \
        "$(log_tail)" \

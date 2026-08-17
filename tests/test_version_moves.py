@@ -185,7 +185,8 @@ class TestTheDeployStampWins:
         assert (text.index("stamp_build_number() {")
                 < text.index("rollback() {"))
 
-    @pytest.mark.parametrize("name", [".build_commit", ".build_number"])
+    @pytest.mark.parametrize(
+        "name", [".build_commit", ".build_number", "catalyst/BUILD"])
     def test_the_stamp_files_are_not_committed(self, name):
         """They are per-deploy. Committing one would make every machine
         claim whichever build a developer stamped last."""
@@ -193,6 +194,127 @@ class TestTheDeployStampWins:
         assert not (ROOT / name).exists() or subprocess.run(
             ["git", "-C", str(ROOT), "ls-files", "--error-unmatch", name],
             capture_output=True).returncode != 0
+
+
+class TestTheStampReachesTheRunningBot:
+    """OWNER-REPORTED: "almost it does just say 0.3.x though?" - on a
+    machine that had upgraded perfectly well.
+
+    THE DIAGNOSIS. Every channel the version had was unreachable from
+    where the bot actually runs:
+
+      - CATALYST_BUILD_* : install/catalyst.service sets no such
+        variable, and it runs `venv/bin/python -m catalyst...`
+      - .build_commit / .build_number at the REPOSITORY root: the
+        service imports from site-packages, whose parent is
+        site-packages. It never sees the repository.
+      - git: site-packages has no .git.
+
+    So all three fell through to "unknown" and "x" on the one machine
+    that matters, while upgrade.sh's own printout looked correct because
+    IT passes the value explicitly. That is the worst shape a bug can
+    have: right in the place that reports, wrong in the place that runs.
+
+    The fix ships the stamp INSIDE the package, so it travels with the
+    code it describes. These tests reproduce the owner's exact
+    conditions - no environment, no git, imported from elsewhere.
+    """
+
+    def install_like_the_vps(self, tmp_path, stamp="7\nabc123def456789\n"):
+        """A copy of the package with no .git anywhere above it, which
+        is what pip leaves behind."""
+        import shutil
+
+        dst = tmp_path / "site-packages" / "catalyst"
+        dst.mkdir(parents=True)
+        src = ROOT / "catalyst"
+        for name in ("__init__.py", "VERSION"):
+            shutil.copy2(src / name, dst / name)
+        if stamp is not None:
+            (dst / "BUILD").write_text(stamp)
+        return dst.parent
+
+    def run_there(self, where, expr):
+        out = subprocess.run(
+            [sys.executable, "-c", f"import catalyst; print({expr})"],
+            capture_output=True, text=True, cwd=str(where), timeout=30,
+            env={"PATH": "/nonexistent", "PYTHONPATH": str(where)})
+        assert out.returncode == 0, out.stderr
+        return out.stdout.strip()
+
+    def test_THE_REPORT_an_installed_copy_knows_its_version(self, tmp_path):
+        where = self.install_like_the_vps(tmp_path)
+        assert self.run_there(where, "catalyst.__version__") == "0.3.7", (
+            "the running bot still cannot say which version it is - the "
+            "exact owner report")
+
+    def test_and_its_commit(self, tmp_path):
+        where = self.install_like_the_vps(tmp_path)
+        assert self.run_there(where, "catalyst.__build__") == "abc123def456"
+
+    def test_without_the_stamp_it_is_admitted_not_invented(self, tmp_path):
+        where = self.install_like_the_vps(tmp_path, stamp=None)
+        assert self.run_there(where, "catalyst.__version__") == "0.3.x"
+        assert self.run_there(where, "catalyst.__build__") == "unknown"
+
+    @pytest.mark.parametrize("stamp", ["", "\n", "not-a-number\n",
+                                       "fatal: not a git repository\n\n",
+                                       "7", "\n\nabc"])
+    def test_a_broken_stamp_never_becomes_the_version(self, tmp_path, stamp):
+        """The stamp is written by a shell script from git output. If a
+        command failed, its error text lands here - and printing that as
+        a version would put a git error in front of the owner."""
+        where = self.install_like_the_vps(tmp_path, stamp=stamp)
+        v = self.run_there(where, "catalyst.__version__")
+        assert re.fullmatch(r"\d+\.\d+\.(\d+|x)", v), v
+        assert "fatal" not in v
+
+    def test_a_real_checkout_still_prefers_git_over_a_stale_stamp(self):
+        """Ordering matters in the other direction too: a developer's
+        tree can carry a stamp from an earlier install, and stale is the
+        failure this whole file exists to prevent."""
+        import catalyst
+
+        src = (ROOT / "catalyst" / "__init__.py").read_text()
+        git_at = src.index('_run("git", "-C", str(repo), "rev-list"')
+        stamp_at = src.index("shipped = _stamped(0)")
+        assert git_at < stamp_at, (
+            "the shipped stamp is now consulted before git, so a working "
+            "checkout can report a version from a previous install")
+
+    def test_BOTH_installers_write_it_before_pip_runs(self):
+        """pip copies the tree; a stamp written afterwards never reaches
+        the installed copy. And a fresh install needs it as much as an
+        upgrade - the owner's first machine had never run upgrade.sh."""
+        for script in ("install.sh", "upgrade.sh"):
+            lines = (ROOT / "install" / script).read_text().splitlines()
+            stamps = [i for i, ln in enumerate(lines)
+                      if "catalyst/BUILD" in ln
+                      and not ln.strip().startswith("#")]
+            installs = [i for i, ln in enumerate(lines)
+                        if "pip install --quiet \"${REPO_DIR}" in ln]
+            assert stamps, f"{script} never writes catalyst/BUILD"
+            assert installs, f"{script} has no install to precede"
+            for i in installs:
+                before = [t for t in stamps if t < i]
+                assert before, (
+                    f"{script} installs on line {i + 1} with no "
+                    "catalyst/BUILD written before it, so the installed "
+                    "package cannot report its own version")
+
+    def test_it_is_declared_as_package_data_or_it_never_ships(self):
+        proj = (ROOT / "pyproject.toml").read_text()
+        assert '"BUILD"' in proj, (
+            "catalyst/BUILD is written but not declared, so pip drops it "
+            "and the running bot is back to 0.3.x")
+
+    def test_the_service_unit_is_not_relied_on(self):
+        """The tempting fix was an Environment= line. It would stamp the
+        service and nothing else - not a shell, not a cron job, not the
+        diagnostic bundle - so the number would be right in one place
+        and wrong in the rest. Recorded so it is not re-attempted."""
+        unit = (ROOT / "install" / "catalyst.service").read_text()
+        assert "CATALYST_BUILD" not in unit
 
 
 class TestItIsOnlyALabel:

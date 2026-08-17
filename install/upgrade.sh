@@ -146,26 +146,41 @@ service_do() {
   run systemctl "$1" "${CATALYST_SERVICE_NAME}"
 }
 
-# THE PATCH NUMBER: commits since catalyst/VERSION last changed, which
-# is what turns the hand-set series 0.3 into 0.3.14. Counted here rather
-# than at import time because the installed copy in site-packages has no
-# git to count with.
+# THE STAMP THAT REACHES THE RUNNING BOT.
+#
+# The patch number is commits since catalyst/VERSION last changed, which
+# is what turns the hand-set series 0.3 into 0.3.14. It has to be
+# counted here, because the copy the service imports has no git.
+#
+# It is written INSIDE the package (catalyst/BUILD) and shipped as
+# package data. Owner-reported: "almost it does just say 0.3.x though?"
+# on a correctly upgraded machine. Every other channel is unreachable
+# from where the bot actually runs - catalyst.service sets no build
+# variable, a file at the repository root is not visible from
+# site-packages, and site-packages has no .git - so all three fell
+# through while THIS script's own printout looked right, because it
+# passes the value explicitly. A number correct everywhere except in
+# front of the owner is not a number.
 #
 # Defined up here, above rollback(), because rollback re-stamps too: a
 # rolled-back machine that kept the new version's number would report
 # the version it FAILED to install while running the previous code.
 #
-# Failure is never fatal. With no number the version reads 0.3.x, which
+# Failure is never fatal. With no stamp the version reads 0.3.x, which
 # is visibly not a digit and so cannot be mistaken for one.
 stamp_build_number() {
   _base="$(git -C "${REPO_DIR}" log -1 --format=%H -- catalyst/VERSION 2>/dev/null || true)"
   if [ -n "${_base}" ]; then _span="${_base}..HEAD"; else _span="HEAD"; fi
   _n="$(git -C "${REPO_DIR}" rev-list --count "${_span}" 2>/dev/null || true)"
+  _c="$(git -C "${REPO_DIR}" rev-parse HEAD 2>/dev/null || true)"
   if [ -n "${_n}" ]; then
     printf '%s\n' "${_n}" > "${REPO_DIR}/.build_number" 2>>"${LOG_FILE}" || true
   else
     rm -f "${REPO_DIR}/.build_number" 2>>"${LOG_FILE}" || true
   fi
+  # BEFORE pip runs, or it never reaches the installed copy.
+  printf '%s\n%s\n' "${_n}" "${_c}" \
+    > "${REPO_DIR}/catalyst/BUILD" 2>>"${LOG_FILE}" || true
 }
 
 # --------------------------------------------------------------------------

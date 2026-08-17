@@ -53,7 +53,14 @@ include = ["catalyst*"]
 # does not merely lose its version, it fails to import at all - and
 # upgrade.sh reads that as "will not even start" and rolls back.
 [tool.setuptools.package-data]
-catalyst = ["**/*.sql", "VERSION"]
+#
+# BUILD is the deploy stamp, written by the installers immediately
+# before pip runs. It is the ONLY channel that reaches the running
+# service: catalyst.service sets no build variable, a file at the
+# repository root is invisible from site-packages, and site-packages
+# has no .git. Owner-reported as a version reading "0.3.x" on a machine
+# that had upgraded perfectly well.
+catalyst = ["**/*.sql", "VERSION", "BUILD"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
