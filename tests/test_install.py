@@ -1361,17 +1361,36 @@ class TestTheUpgradeReportsWhatChanged:
             f"{name} is read in the summary but never initialised")
 
 
-def test_the_package_version_and_the_project_version_agree():
-    """They are two hand-maintained strings for one number. Letting them
-    drift means the upgrade reports one thing and pip installs another."""
+def test_the_release_series_and_the_project_version_agree():
+    """Letting them drift means the upgrade reports one thing and pip
+    installs another.
+
+    WAS: compared two hand-maintained strings, `__version__` and
+    pyproject's `version`. `__version__` is no longer hand-maintained -
+    it derives from the commit, because a number nobody remembered to
+    bump printed the same "0.2.0" after every upgrade and told the owner
+    nothing had changed (owner-reported).
+
+    The requirement is unchanged and still asserted; only the
+    hand-maintained half moved. `__release__` is now the series, and it
+    is that which must match pyproject.
+    """
     import re
 
-    pkg = re.search(r'__version__ = "([^"]+)"',
-                    (REPO_ROOT / "catalyst" / "__init__.py").read_text()).group(1)
+    src = (REPO_ROOT / "catalyst" / "__init__.py").read_text()
+    release = re.search(r'__release__ = "([^"]+)"', src)
+    assert release, "catalyst.__release__ is gone; pyproject has nothing to agree with"
     proj = re.search(r'^version = "([^"]+)"',
                      (REPO_ROOT / "pyproject.toml").read_text(),
                      re.M).group(1)
-    assert pkg == proj, f"catalyst.__version__ is {pkg}, pyproject says {proj}"
+    assert proj.startswith(release.group(1)), (
+        f"catalyst.__release__ is {release.group(1)}, pyproject says {proj}")
+
+    # And the derived half must still be derived, or this whole change
+    # quietly reverts to the defect it fixed.
+    assert '__version__ = f"' in src, (
+        "__version__ is a literal again, so it will sit still across "
+        "every commit exactly as it did before")
 
 
 # ==========================================================================

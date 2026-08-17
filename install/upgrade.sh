@@ -180,6 +180,14 @@ rollback() {
     fi
   fi
 
+  # RE-STAMP TO THE OLD COMMIT. Without this a rolled-back machine
+  # reports the version it FAILED to install while running the previous
+  # code - a lie in exactly the number the owner checks to decide
+  # whether an upgrade landed.
+  if [ -n "${OLD_COMMIT:-}" ]; then
+    printf '%s\n' "${OLD_COMMIT}" > "${REPO_DIR}/.build_commit" 2>>"${LOG_FILE}" || true
+  fi
+
   if run "${VENV_PY}" -m pip install --quiet "${REPO_DIR}[dev]"; then
     note "previous version reinstalled"
   else
@@ -408,10 +416,21 @@ fi
 phase "Installing the new version"
 # --------------------------------------------------------------------------
 
+# STAMP THE COMMIT BEFORE INSTALLING, so the installed package can
+# report which code it is. The version used to be a hand-maintained
+# string that nobody bumped, so every upgrade printed the same "0.2.0"
+# and told the owner nothing had changed (owner-reported). It is derived
+# from this file now - but the service user on a VPS may have no git,
+# and site-packages has no .git at all, so the commit is written down
+# here where it is still known.
+if [ -n "${NEW_COMMIT:-}" ]; then
+  printf '%s\n' "${NEW_COMMIT}" > "${REPO_DIR}/.build_commit" 2>>"${LOG_FILE}" || true
+fi
+
 if ! run "${VENV_PY}" -m pip install --quiet "${REPO_DIR}[dev]"; then
   rollback "The new version could not be installed." "$(log_tail)"
 fi
-NEW_VERSION="$("${VENV_PY}" -c 'import catalyst; print(catalyst.__version__)' 2>>"${LOG_FILE}" || echo unknown)"
+NEW_VERSION="$(cd / && CATALYST_BUILD_COMMIT="${NEW_COMMIT:-}" "${VENV_PY}" -c 'import catalyst; print(catalyst.__version__)' 2>>"${LOG_FILE}" || echo unknown)"
 # THE INSTALLED COPY, not the repo. `cd repo && python -m pytest` puts
 # the repo first on sys.path, so the tests exercise the working tree
 # while the SERVICE runs whatever pip put in site-packages. If those two
