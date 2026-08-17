@@ -11,3 +11,4 @@ build/
 # last, in exactly the number the owner checks after an upgrade.
 .build_commit
 .build_number
+catalyst/BUILD

@@ -8,6 +8,7 @@ both rendered blank.
 
 import json
 import re
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from catalyst.dashboard import charts, queries
@@ -26,6 +27,7 @@ from catalyst.dashboard.render import (
     empty_block,
     zero_block,
     esc,
+    figcap,
     json_pretty,
     meter,
     note,
@@ -3855,7 +3857,7 @@ def _price_rail(st, p: str, index: int) -> str:
         moved = (exit_px - entry) / entry * 100
         words += (f" It was sold at ${exit_px:.2f}, "
                   f"<b>{moved:+.1f}%</b> against the fill.")
-    return "".join(parts) + f'<p class="prov">{words}</p>'
+    return "".join(parts) + figcap(words)
 
 
 #: Broker rejection codes seen in this account's own record, translated.
@@ -3936,6 +3938,156 @@ def _broker_said(raw_text) -> tuple[str, str]:
     return "", text
 
 
+#: Section icons for the trade story. OWNER-ASKED: "less text more
+#: graphs and icons, make the UI more friendly, its text heavy".
+#:
+#: The icon is never the only signal - every heading keeps its words and
+#: every icon is aria-hidden, so a screen reader hears the heading and
+#: nothing is carried by the picture alone. That is the same rule the
+#: status pills follow, and for the same reason.
+_STEP_ICON = {
+    "why": "\U0001F50D",       # magnifier - how it was found
+    "view": "\U0001F9E0",      # brain - what Claude concluded
+    "size": "⚖️",    # scales - what code sized
+    "guard": "\U0001F6E1️",  # shield - protection
+    "orders": "\U0001F4CB",    # clipboard - what was sent
+    "next": "\U0001F504",      # cycle - reviews and what happens next
+}
+
+
+def _step(key: str, title: str) -> str:
+    return (f'<h4><span class="step-ico" aria-hidden="true">'
+            f'{_STEP_ICON[key]}</span>{esc(title)}</h4>')
+
+
+def _why_fold(fid: str, text: str) -> str:
+    """The explanation, available but out of the way.
+
+    The owner reported the page "text heavy" twice. None of this prose
+    is wrong - it is the provenance and the reasoning the brief demands
+    - so it is folded rather than deleted. Someone who wants to know why
+    a number is what it is can still find out in one click; someone
+    reading the page to see how a trade went is no longer wading.
+    """
+    return (f'<details class="why-fold" id="{fid}">'
+            "<summary>why this matters</summary>"
+            f"<div>{text}</div></details>")
+
+
+def _hold_progress(st, p: str, index: int) -> str:
+    """How far through its allowed life this position is.
+
+    A bar, because "opened 2026-08-17, closes 2026-08-29" is two dates a
+    reader has to subtract; a fill level is the answer already worked
+    out.
+    """
+    start, end = _as_date(st.opened_at), _as_date(st.planned_exit_date)
+    if not (start and end and end > start):
+        return ""
+    today = (_as_date(st.closed_at) if st.status != "open" else None) \
+        or datetime.now(timezone.utc).date()
+    total = (end - start).days
+    gone = max(0, min((today - start).days, total))
+    left = (end - today).days
+    pct = gone / total * 100
+    word = (f"{left} day(s) left of a {total}-day hold" if left >= 0
+            else f"{-left} day(s) past its exit date")
+    if st.status != "open":
+        word = f"held {gone} of an allowed {total} days"
+    return (f'<div class="hold" id="{p}-t{index}-hold">'
+            f'<div class="hold-track"><span class="hold-fill" '
+            f'style="width:{pct:.1f}%"></span></div>'
+            + figcap(esc(word)) + "</div>")
+
+
+def _as_date(text):
+    """A date from an ISO string of any precision, or None."""
+    try:
+        return datetime.fromisoformat(str(text).replace("Z", "+00:00")).date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _hold_timeline(stories, p: str) -> str:
+    """Every position's window on one axis, with today marked.
+
+    OWNER-ASKED: "for the trades tab its auto expanded, can we add more
+    detail, simplify into some other graphs".
+
+    Folding every trade shut means the page opens showing nothing, so
+    the shut state has to earn its place. This is the view that answers
+    the question the owner actually opens this tab with - what am I
+    holding, and how long until it closes - without opening anything.
+
+    The hard exit date is the whole design of this bot ("hold days to
+    weeks, never months"), and until now it was a string buried in each
+    story. A bar running out of room is that rule made visible.
+
+    TODAY IS THE REAL CLOCK, never a fixture date - house rule 6. The
+    marker is where it actually is; a pinned one would drift out of the
+    window a day at a time and quietly stop meaning anything.
+    """
+    rows = []
+    for st in stories:
+        start, end = _as_date(st.opened_at), _as_date(st.planned_exit_date)
+        if start and end and end >= start:
+            rows.append((st, start, end))
+    if not rows:
+        return ""
+
+    today = datetime.now(timezone.utc).date()
+    lo = min(r[1] for r in rows)
+    hi = max(max(r[2] for r in rows), today)
+    span = max((hi - lo).days, 1)
+
+    W, row_h, top = 640, 26, 22
+    H = top + row_h * len(rows) + 22
+    lab_w = 58
+
+    def x(d):
+        return lab_w + (d - lo).days / span * (W - lab_w - 14)
+
+    parts = [
+        f'<svg id="{p}-timeline" class="tl-chart" viewBox="0 0 {W} {H}" '
+        'role="img" aria-label="how long each position runs, against '
+        'today">']
+    for i, (st, start, end) in enumerate(rows):
+        y = top + i * row_h
+        x0, x1 = x(start), x(end)
+        held = st.status == "open"
+        parts.append(
+            f'<text x="0" y="{y + 11:.0f}" class="tl-name">'
+            f"{esc(st.ticker)}</text>")
+        parts.append(
+            f'<rect x="{x0:.1f}" y="{y:.0f}" '
+            f'width="{max(x1 - x0, 2):.1f}" height="13" rx="2" '
+            f'class="{"tl-open" if held else "tl-done"}">'
+            f"<title>{esc(st.ticker)}: {esc(str(start))} to "
+            f"{esc(str(end))}</title></rect>")
+        left = (end - today).days
+        if held:
+            parts.append(
+                f'<text x="{min(x1 + 6, W - 12):.1f}" y="{y + 11:.0f}" '
+                f'text-anchor="end" class="tl-note">'
+                + esc(f"{left}d left" if left >= 0 else "past due")
+                + "</text>")
+    # TODAY, drawn last so nothing overpaints it.
+    tx = x(today)
+    parts.append(f'<line x1="{tx:.1f}" y1="{top - 8:.0f}" x2="{tx:.1f}" '
+                 f'y2="{H - 20:.0f}" class="tl-today"/>')
+    parts.append(f'<text x="{tx:.1f}" y="{H - 8:.0f}" text-anchor="middle" '
+                 'class="tl-note">today</text>')
+    parts.append("</svg>")
+    return ('<div class="tl-wrap">'
+            "<h3>How long each position has left</h3>"
+            + "".join(parts)
+            + figcap("Every position carries a hard exit date set when it "
+                     "opened, and a review can only bring it FORWARD. A bar "
+                     "that ends left of today has overrun and should have "
+                     "closed.")
+            + "</div>")
+
+
 def _trade_headline(st) -> str:
     """The one line that shows while a trade is folded shut.
 
@@ -4007,6 +4159,7 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
              if st.expected_holding_days else "no expectation recorded"),
         ] + facts[:1]
     out.append(tiles(f"{p}-t{index}-tiles", facts))
+    out.append(_hold_progress(st, p, index))
     out.append(_price_rail(st, p, index))
     if not st.entry_price:
         out.append(caveat(
@@ -4014,36 +4167,54 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
             "not on record. Reconciliation runs every cycle."))
 
     # ---- 2. why this company at all
-    out.append(f'<h4>1. Why {esc(st.ticker)} was looked at</h4>')
+    out.append(_step("why", f"Why {st.ticker}"))
     if st.origin == "hunt":
-        who = ("<b>Claude found this one itself</b>, reading the raw feed "
-               "and nominating it.")
-        if st.nomination_why:
-            who += f' Its reason: &ldquo;{esc(st.nomination_why)}&rdquo;'
+        who = pill("good", "Claude found it") + (
+            f' &ldquo;{esc(st.nomination_why)}&rdquo;'
+            if st.nomination_why else "")
+        why_more = ("Claude read the raw feed and nominated this itself. "
+                    "The mechanical screen had no rule for it, so nothing "
+                    "about this route has been backtested.")
     elif st.origin == "screen":
-        who = ("The <b>mechanical screen</b> found this &mdash; the arm the "
-               "backtest graded, so its edge is measured rather than judged.")
+        who = pill("good", "Mechanical screen")
+        why_more = ("The screen is line-for-line the arm the backtest "
+                    "graded, so its edge is a measured one rather than a "
+                    "judgement.")
     else:
-        who = "The origin of this candidate was not recorded."
-    out.append(f"<p>{who}</p>")
+        who = pill("idle", "origin not recorded")
+        why_more = ""
     if st.catalyst_type:
-        out.append(
-            f"<p class='prov'><b>{esc(st.catalyst_type)}</b>"
-            + (f", resolving around {esc(st.catalyst_date)}"
-               if st.catalyst_date else "")
-            + ". The type sets how hard the risk engine sizes it.</p>")
+        who += " " + pill("idle", str(st.catalyst_type))
+        if st.catalyst_date:
+            who += " " + pill("idle", f"resolves {st.catalyst_date}")
+    out.append(f"<p>{who}</p>")
+    if why_more:
+        out.append(_why_fold(
+            f"{p}-t{index}-whyfold",
+            f"<p>{why_more}</p><p>The catalyst type also sets how hard the "
+            "risk engine sizes it: a binary event gets a smaller position "
+            "than a slow re-rating.</p>"))
 
     # ---- 3. what Claude concluded, in its own words
-    out.append("<h4>2. What Claude concluded, in its own words</h4>")
+    out.append(_step("view", "Claude's view"))
     if not st.thesis:
         out.append(caveat("No research view is on record for this position."))
     else:
         verdict = {"long": "buy it", "short": "short it",
                    "no_trade": "leave it alone"}.get(st.direction,
                                                      st.direction or "?")
-        out.append(
-            f"<p>It decided to <b>{esc(verdict)}</b>, with a conviction of "
-            f"{_plain_conviction(st.conviction)}.</p>")
+        out.append(f"<p>{pill('good', verdict)}</p>")
+        if st.conviction is not None:
+            # THE GAUGE AND THE TRANSLATION, not one or the other. The
+            # picture shows where 0.60 sat against the floor it had to
+            # clear; only the sentence says what 0.60 MEANS, and
+            # conviction is defined as a frequency precisely because the
+            # bare number meant two different things to the model and to
+            # the reader for weeks. Trimming text is not a reason to
+            # drop the definition.
+            out.append(_conviction_gauge(float(st.conviction),
+                                         f"{p}-t{index}"))
+            out.append(figcap(_plain_conviction(st.conviction)))
         out.append(
             '<blockquote class="said"><b>Its reasoning:</b><br>'
             f"{esc(st.thesis)}</blockquote>")
@@ -4051,27 +4222,35 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
             '<blockquote class="said"><b>What would prove it wrong:</b><br>'
             f"{esc(st.invalidation)}</blockquote>")
         if st.priced_in_reasoning:
-            already = ("It judged the move <b>already priced in</b>"
-                       if st.priced_in else
-                       "It judged the move <b>not yet priced in</b>")
+            already = ("already priced in" if st.priced_in
+                       else "not yet priced in")
             out.append(
-                f'<blockquote class="said">{already} &mdash; meaning '
-                "whether the market had already reacted to this news "
-                f"before the bot could:<br>{esc(st.priced_in_reasoning)}"
-                "</blockquote>")
+                f'<blockquote class="said"><b>Move {esc(already)}:</b><br>'
+                f"{esc(st.priced_in_reasoning)}</blockquote>")
+            # "Priced in" is jargon. The gloss is folded rather than cut:
+            # a reader who knows the term never has to read it, and one
+            # who does not is still one click from the answer.
+            out.append(_why_fold(
+                f"{p}-t{index}-pricedfold",
+                "<p>&ldquo;Priced in&rdquo; is whether the market had "
+                "already reacted to this news before the bot could. If it "
+                "had, the move is gone and there is nothing left to "
+                "trade.</p>"))
         if st.expected_holding_days:
-            out.append(
-                f"<p class='prov'>It expected the thesis to need about "
-                f"<b>{st.expected_holding_days} trading days</b> to play "
-                "out.</p>")
+            out.append(f"<p>{pill('idle', f'expected {st.expected_holding_days} trading days')}</p>")
 
     # ---- 4. what the code then did with that
-    out.append("<h4>3. What the risk engine did with that</h4>")
-    out.append(
-        "<p><b>Claude never chooses the amount.</b> Deterministic code "
-        "works it out from the account balance, the most it may lose on "
-        "one position, and how far this stock has gapped overnight "
-        "before.</p>")
+    out.append(_step("size", "Size and stop"))
+    out.append("<p><b>Claude never chooses the amount.</b></p>")
+    out.append(_why_fold(
+        f"{p}-t{index}-sizefold",
+        "<p>Deterministic code works the size out from the account "
+        "balance, the most it may lose on one position, and how far this "
+        "stock has gapped overnight before. The model has no parameter "
+        "through which a number of its own could arrive, and a test holds "
+        "that shape. A persuasive thesis and a correct one are different "
+        "properties, and a model that sizes its own positions converts "
+        "the first into money.</p>"))
     if not st.notional_usd:
         out.append(caveat("No risk decision is on record for this position."))
     # WHY THAT AMOUNT AND NOT MORE. Owner-asked: "will the dashboard
@@ -4093,14 +4272,17 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
                        "account</b>")
         except (ArithmeticError, TypeError, ValueError):
             pct = ""
-        out.append(
+        if st.equity_at_entry and binding:
+            out.append(
+                f"<p><b>{esc(st.notional_usd)} dollars</b>{pct}.</p>")
+        out.append(_why_fold(
+            f"{p}-t{index}-sumfold",
             "<p>One sum: <b>the most it may lose on a single position</b>, "
             "divided by <b>how far this stock could fall before the stop "
             "rescues it</b>. A stop that must sit far away gets a SMALLER "
-            "position, because the same risk buys fewer shares."
-            + (f" Here that gave <b>{esc(st.notional_usd)} dollars</b>{pct}."
-               if st.equity_at_entry and binding else "")
-            + "</p>")
+            "position, because the same dollars of risk buy fewer shares. "
+            "Widen the stop and this number falls; a bigger account raises "
+            "it proportionally.</p>"))
         rows = []
         # `why` not `note`: `note` is the module-level renderer, and
         # binding it as a loop variable shadowed the function for the
@@ -4134,42 +4316,43 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
 
     if st.entry_intended and st.entry_price:
         out.append(
-            f"<p class='prov'>It was sized from a live quote of "
-            f"${esc(st.entry_intended)} and filled at ${esc(st.entry_price)}. "
-            "The modelled spread it would have paid on a real account was "
-            f"{esc(st.modeled_slippage or '?')} cents &mdash; paper fills "
-            "pay no spread, so that figure is recorded beside the real "
-            "fill rather than instead of it.</p>")
+            f"<p>{pill('idle', f'quoted ${st.entry_intended}')} "
+            f"{pill('idle', f'filled ${st.entry_price}')} "
+            f"{pill('idle', f'modelled spread {st.modeled_slippage or chr(63)}c')}</p>")
+        out.append(_why_fold(
+            f"{p}-t{index}-fillfold",
+            "<p>Paper fills pay no spread, so the modelled cost is recorded "
+            "BESIDE the broker's price and never instead of it &mdash; "
+            "reconciliation still compares against the real fill.</p>"))
 
     # ---- 5. protection, told as a timeline
-    out.append("<h4>4. Was the stop actually resting at the broker?</h4>")
+    out.append(_step("guard", "Protection"))
     if not st.stop_events:
         out.append(caveat(
-            "No stop check has run for this position yet. Checks happen "
-            "every cycle, so this fills in within about fifteen minutes."))
+            "No stop check has run yet. Checks run every cycle, so this "
+            "fills in within about fifteen minutes."))
     else:
         gaps = [e for e in st.stop_events if e[1] != "ok"]
         latest = st.stop_events[-1]
         if latest[1] == "ok":
-            out.append(ok(
-                f"<b>Protected now.</b> The most recent check "
-                f"({esc(latest[0])}) found the stop resting at the broker."))
+            out.append(ok(f"<b>Protected.</b> Checked {esc(latest[0])}."))
         else:
             out.append(alarm(
-                f"<b>NOT protected.</b> The latest check ({esc(latest[0])}) "
-                f"found no resting stop: {esc(str(latest[1]))}."))
+                f"<b>NOT protected.</b> Checked {esc(latest[0])}: "
+                f"{esc(str(latest[1]))}."))
         if gaps and latest[1] == "ok":
             out.append(caveat(
-                f"There was a gap earlier: {len(gaps)} check(s) found no "
-                "resting stop, the first at "
-                f"{esc(gaps[0][0])}. It was resolved, and it is kept here "
-                "because a position that was briefly unprotected is a fact "
-                "worth knowing even once it is fixed."))
+                f"{len(gaps)} earlier check(s) found no resting stop, the "
+                f"first at {esc(gaps[0][0])} &mdash; resolved, and kept "
+                "because a position that was briefly unprotected is worth "
+                "knowing about even once it is fixed."))
         rows = [[esc(when), esc(status),
                  esc(str(ids) if ids not in ("[]", None) else "none")]
                 for when, status, ids in st.stop_events[-12:]]
-        out.append(table(f"{p}-t{index}-stops",
-                         ["checked", "status", "resting stop order"], rows))
+        out.append(details(
+            f"{p}-t{index}-stopfold", f"every check ({len(st.stop_events)})",
+            table(f"{p}-t{index}-stops",
+                  ["checked", "status", "resting stop order"], rows)))
 
     # ---- 6. every order, including the ones that failed
     #
@@ -4181,11 +4364,10 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
     # underneath - house rule 3 asks for the raw response BESIDE the
     # answer, not instead of it.
     if st.orders:
-        out.append("<h4>5. Every order sent to the broker</h4>")
+        out.append(_step("orders", "Orders sent"))
         out.append(
-            "<p class='prov'>Including rejected ones &mdash; a rejection is "
-            "part of the record, and hiding it is how a gap goes "
-            "unnoticed.</p>")
+            "<p class='prov'>Rejections included &mdash; hiding one is how "
+            "a gap goes unnoticed.</p>")
         rows = []
         for j, (when, side, otype, qty, status, raw_text) in enumerate(
                 st.orders):
@@ -4206,12 +4388,11 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
                           "what that meant"], rows))
 
     # ---- 7. re-reads, and what it will do next
-    out.append("<h4>6. What Claude has said since, and what happens next</h4>")
+    out.append(_step("next", "Re-reads, and what happens next"))
     if not st.reviews:
         out.append(
-            "<p>Claude re-reads its own thesis against the live price on a "
-            "schedule while a position is open. Nothing is on record for "
-            "this one yet.</p>")
+            "<p class='prov'>Nothing re-read yet. Claude re-reads each open "
+            "thesis about once a day, sooner if news names the company.</p>")
     else:
         for when, action, triggered, reasoning, changed, skipped in st.reviews:
             if skipped:
@@ -4219,15 +4400,16 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
                     f"<p class='prov'>{esc(when)} &mdash; review skipped: "
                     f"{esc(str(skipped))}</p>")
                 continue
-            said = {"hold": "keep holding",
-                    "exit_now": "close it now",
-                    "exit_sooner": "bring the exit forward"}.get(
-                        str(action), str(action))
+            said = {"hold": ("good", "kept holding"),
+                    "exit_now": ("crit", "closed it now"),
+                    "exit_sooner": ("warn", "brought the exit forward")}.get(
+                        str(action), ("idle", str(action)))
             out.append(
-                f'<blockquote class="said"><b>{esc(when)} &mdash; '
-                f"it decided to {esc(said)}"
-                + (" (its invalidation had triggered)" if triggered else "")
-                + f":</b><br>{esc(reasoning)}"
+                f'<blockquote class="said"><b>{esc(when)}</b> '
+                + pill(said[0], said[1])
+                + (" " + pill("crit", "invalidation triggered")
+                   if triggered else "")
+                + f"<br>{esc(reasoning)}"
                 + ("<br><span class='prov'>What changed: "
                    + esc("; ".join(str(c) for c in changed)) + "</span>"
                    if changed else "")
@@ -4236,11 +4418,8 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
         out.append(note(
             f"<b>Next.</b> The stop at ${esc(st.stop_price or '?')} sells "
             "automatically if reached; otherwise it closes on "
-            f"<b>{esc(st.planned_exit_date)}</b>. A review can bring that "
-            "date FORWARD but never push it out &mdash; a losing position "
-            "always has a story, and that rule is what stops "
-            "&ldquo;days to weeks&rdquo; becoming &ldquo;until it comes "
-            "back&rdquo;."))
+            f"<b>{esc(st.planned_exit_date)}</b>. A review can only bring "
+            "that date FORWARD, never push it out."))
 
     open_or_closed = ("still open" if st.status == "open"
                       else f"closed {esc(st.closed_at or '')}")
@@ -4281,26 +4460,25 @@ def trades_panel(db: Db, params: dict | None = None, p: str = "tr") -> str:
         ("Open now", f"{d.n_open}", "positions the bot is holding"),
         ("Closed", f"{d.n_closed}", "finished trades, with their result"),
     ]))
-    # FOLDED BY DEFAULT, and this is a rule rather than a preference.
-    # Owner-reported: "its already uncollapsed which will get messy as
-    # there are many open and closed trades". Each story is several
-    # screens long, so at a few trades a month the page becomes
-    # unnavigable within weeks and the newest trade - the one anybody
-    # opens the page for - ends up furthest down.
+    # ALWAYS FOLDED. Owner-reported twice: "its already uncollapsed which
+    # will get messy as there are many open and closed trades", and then
+    # "for the trades tab its auto expanded". The first version kept an
+    # exception for a lone trade, on the reasoning that folding buys
+    # nothing when there is nothing to scroll past. The owner disagreed,
+    # and they are the one reading it - a page whose behaviour changes
+    # depending on how many rows it has is a page you cannot learn.
     #
-    # The exception is the case where folding buys nothing: a single
-    # trade, or one asked for by id. Nothing to scroll past means
-    # nothing to collapse.
-    single = len(d.stories) == 1 or bool(wanted)
-    out.append(note(
-        "Each trade opens into the order a person would ask: why this "
-        "company, what Claude concluded <b>in its own words</b>, what the "
-        "risk engine did with that, whether the stop is really resting at "
-        "the broker, every order including rejected ones, and what happens "
-        "next."
-        + ("" if single else " <b>Click a trade to open it.</b>")))
+    # The one remaining exception is a trade asked for BY ID: following a
+    # link to one specific trade must not land on a shut box.
+    #
+    # What that costs is a page that opens showing nothing, so the shut
+    # state has to carry real information - hence the timeline and the
+    # summary line below, which is where the answer to "add more detail"
+    # went.
+    out.append(_hold_timeline(d.stories, p))
+    out.append(note("<b>Click any trade for the full story.</b>"))
     for i, st in enumerate(d.stories):
-        out.append(_trade_story(st, p, i, folded=not single))
+        out.append(_trade_story(st, p, i, folded=st.position_id != wanted))
     return section(f"{p}-section", "Trades: what was bought and why",
                    "".join(out))
 

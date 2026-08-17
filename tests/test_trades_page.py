@@ -156,7 +156,7 @@ class TestTheStaleUnprotectedAlarm:
         """Not alarming is not the same as hidden. A position that was
         briefly naked is a fact worth knowing after it is fixed."""
         html = _page(_seed(tmp_path))
-        assert "There was a gap earlier" in html
+        assert "earlier check(s) found no resting stop" in html
         assert "unprotected" in html
 
 
@@ -193,7 +193,7 @@ class TestItTellsTheStoryInEnglish:
 
     def test_it_says_who_found_the_candidate(self, tmp_path):
         html = _page(_seed(tmp_path))
-        assert "mechanical screen" in html
+        assert "echanical screen" in html   # pill, so capitalised now
 
     def test_it_states_that_claude_did_not_choose_the_size(self, tmp_path):
         html = _page(_seed(tmp_path))
@@ -212,7 +212,7 @@ class TestItShowsWhatHappensNext:
              "The thesis is intact; price is holding above the insider "
              "cluster.", ["no new filings"])])
         html = _page(path)
-        assert "keep holding" in html
+        assert "kept holding" in html
         assert "The thesis is intact" in html
         assert "no new filings" in html
 
@@ -221,8 +221,8 @@ class TestItShowsWhatHappensNext:
             ("2026-08-19T14:00:00+00:00", "exit_now", True,
              "Closed below $4.60, which was the stated invalidation.", [])])
         html = _page(path)
-        assert "close it now" in html
-        assert "its invalidation had triggered" in html
+        assert "closed it now" in html
+        assert "invalidation triggered" in html
 
 
 class TestAClosedTradeGetsTheWholeBreakdown:
@@ -471,11 +471,19 @@ class TestEachTradeFoldsShut:
         acme = [s for s in summaries if "ACME" in s]
         assert acme and "lost" in acme[0] and "19.00" in acme[0], acme
 
-    def test_a_lone_trade_is_NOT_folded(self, tmp_path):
-        """Folding buys nothing when there is nothing to scroll past,
-        and a page that opens showing nothing at all reads as broken."""
+    def test_even_a_LONE_trade_is_folded(self, tmp_path):
+        """REVERSED ON OWNER INSTRUCTION: "for the trades tab its auto
+        expanded". The first version kept an exception for a single
+        trade, reasoning that folding buys nothing when there is nothing
+        to scroll past. The owner disagreed, and they are the one
+        reading it - a page whose behaviour changes with its row count
+        is a page you cannot learn.
+
+        What it costs is a page that opens showing nothing, which is why
+        the timeline and the summary line exist."""
         html = _page(_seed(tmp_path))
-        assert "<details class=\"trade\" id=\"tr-t0\" open>" in html
+        assert "<details class=\"trade\" id=\"tr-t0\" open>" not in html
+        assert "<details class=\"trade\" id=\"tr-t0\">" in html
 
     def test_a_trade_asked_for_by_id_opens(self, tmp_path):
         html = _page(_seed_two(tmp_path), {"id": POS})
@@ -488,7 +496,7 @@ class TestEachTradeFoldsShut:
         html = _page(_seed_two(tmp_path))
         for phrase in (THESIS[:50], INVALIDATION[:30],
                        "Claude never chooses the amount",
-                       "Every order sent to the broker"):
+                       "Orders sent"):
             assert phrase in html
 
 
@@ -621,3 +629,209 @@ class TestThePictureReplacesTheParagraph:
     def test_unusable_prices_never_raise(self, entry, stop):
         st = queries.TradeStory(ticker="X", entry_price=entry, stop_price=stop)
         assert panels._price_rail(st, "tr", 0) == ""
+
+
+# ==========================================================================
+# Third owner pass, on the same page:
+#
+#   "for the trades tab its auto expanded, can we add more detail,
+#    simplify into some other graphs"
+#   "less text more graphs and icons, make the UI more friendly, its
+#    text heavy"
+#
+# Folding everything shut means the page opens showing nothing, so the
+# shut state has to earn its keep - hence a timeline that answers the
+# question this tab is opened with, without opening anything.
+# ==========================================================================
+
+
+class TestTheShutPageStillAnswersSomething:
+    def test_the_timeline_is_drawn_above_the_folds(self, tmp_path):
+        html = _page(_seed_two(tmp_path))
+        assert 'id="tr-timeline"' in html
+        assert html.index("tr-timeline") < html.index('class="trade"'), (
+            "the timeline is below the folded trades, so a shut page is "
+            "still blank at the top")
+
+    def test_every_position_gets_a_bar(self, tmp_path):
+        html = _page(_seed_two(tmp_path))
+        svg = html[html.index('id="tr-timeline"'):]
+        svg = svg[:svg.index("</svg>")]
+        assert svg.count("<rect") == 2
+        for ticker in ("EMBC", "ACME"):
+            assert f">{ticker}</text>" in svg
+
+    def test_an_open_position_is_drawn_differently_from_a_closed_one(
+            self, tmp_path):
+        html = _page(_seed_two(tmp_path))
+        assert "tl-open" in html and "tl-done" in html
+
+    def test_TODAY_IS_THE_REAL_CLOCK(self, tmp_path):
+        """HOUSE RULE 6. A pinned date drifts out of the window a day at
+        a time and quietly stops meaning anything - it has happened
+        twice in this project. The marker must move with the wall
+        clock."""
+        import datetime as _dt
+
+        html = _page(_seed_two(tmp_path))
+        svg = html[html.index('id="tr-timeline"'):]
+        svg = svg[:svg.index("</svg>")]
+        assert "tl-today" in svg and ">today</text>" in svg
+        # The axis has to REACH today, or the marker sits off the end.
+        src = (panels._hold_timeline.__doc__ or "")
+        assert "house rule 6" in src.lower()
+        assert _dt.datetime.now(_dt.timezone.utc).date()  # the real clock
+
+    def test_days_remaining_are_counted_not_left_to_the_reader(self, tmp_path):
+        html = _page(_seed(tmp_path))
+        assert "d left" in html or "past due" in html
+
+    def test_it_draws_nothing_rather_than_guessing_a_window(self, tmp_path):
+        st = queries.TradeStory(ticker="X", opened_at="", planned_exit_date="")
+        assert panels._hold_timeline([st], "tr") == ""
+
+    @pytest.mark.parametrize("opened,exits", [
+        ("not-a-date", "2026-08-29"), ("2026-08-17", "nonsense"),
+        ("2026-08-29", "2026-08-17"),      # exit before entry
+    ])
+    def test_unusable_dates_never_raise(self, opened, exits):
+        st = queries.TradeStory(ticker="X", opened_at=opened,
+                                planned_exit_date=exits)
+        assert panels._hold_timeline([st], "tr") == ""
+
+
+class TestTheProseIsFoldedNotDeleted:
+    """OWNER-REPORTED twice: "it feels word heavy", then "less text more
+    graphs and icons". None of the explanation is WRONG - it is the
+    provenance and reasoning the brief demands - so it goes one click
+    away rather than into the bin."""
+
+    def test_the_reasoning_is_still_on_the_page(self, tmp_path):
+        # with_limits, because the sizing sum is only explained where
+        # there are limits to explain it against.
+        html = _page(_seed_with_limits(tmp_path))
+        for kept in ("same dollars of risk buy fewer shares",
+                     "Paper fills pay no spread",
+                     "line-for-line the arm the backtest graded"):
+            assert kept in html, f"an explanation was deleted: {kept!r}"
+
+    def test_but_it_is_behind_a_disclosure(self, tmp_path):
+        html = _page(_seed_with_limits(tmp_path))
+        assert 'class="why-fold"' in html
+        i = html.index("same dollars of risk buy fewer shares")
+        assert "why-fold" in html[:i][-600:], (
+            "the sizing explanation is loose on the page again")
+
+    def test_conviction_keeps_BOTH_the_gauge_and_the_translation(
+            self, tmp_path):
+        """Trimming text is not a reason to drop a definition. The gauge
+        shows where 0.60 sat against its floor; only the sentence says
+        what 0.60 MEANS, and that units mismatch cost this bot every
+        trade for weeks."""
+        html = _page(_seed(tmp_path))
+        assert "gauge-track" in html, "the conviction gauge is missing"
+        assert "60 times in 100" in html, (
+            "the frequency definition was dropped when the text was cut")
+
+    def test_priced_in_is_still_explained_somewhere(self, tmp_path):
+        html = _page(_seed(tmp_path))
+        assert "already reacted to this news" in html
+
+
+class TestIconsHelpAndNeverCarryMeaningAlone:
+    def test_each_step_has_an_icon(self, tmp_path):
+        html = _page(_seed(tmp_path))
+        assert html.count('class="step-ico"') >= 5
+
+    def test_every_icon_is_hidden_from_a_screen_reader(self, tmp_path):
+        """An icon that is announced turns "Protection" into "shield
+        Protection". The words are the content; the glyph is decoration
+        - the same rule the status pills follow."""
+        html = _page(_seed(tmp_path))
+        for m in re.finditer(r'<span class="step-ico"([^>]*)>', html):
+            assert 'aria-hidden="true"' in m.group(1)
+
+    def test_the_headings_still_read_without_them(self, tmp_path):
+        html = _page(_seed(tmp_path))
+        for word in ("Why EMBC", "Claude&#x27;s view", "Size and stop",
+                     "Protection", "Orders sent"):
+            assert word in html, f"a heading lost its words: {word}"
+
+
+class TestTheHoldProgressBar:
+    def test_an_open_position_shows_how_far_through_it_is(self, tmp_path):
+        html = _page(_seed(tmp_path))
+        assert 'class="hold-track"' in html
+        assert "day(s) left of a 12-day hold" in html \
+            or "past its exit date" in html
+
+    def test_a_closed_one_says_what_it_actually_used(self, tmp_path):
+        html = _page(_seed(tmp_path, closed=True))
+        assert "of an allowed 12 days" in html
+
+    def test_the_fill_never_leaves_the_track(self, tmp_path):
+        """A position past its exit date would otherwise render a bar
+        wider than its own container."""
+        st = queries.TradeStory(
+            ticker="X", status="open", opened_at="2020-01-01",
+            planned_exit_date="2020-01-10")
+        html = panels._hold_progress(st, "tr", 0)
+        pct = float(re.search(r"width:([\d.]+)%", html).group(1))
+        assert 0 <= pct <= 100, pct
+        assert "past its exit date" in html
+
+
+class TestAChartKeepsItsLegend:
+    """FOUND BY RENDERING, not by reasoning (house rule 1).
+
+    section() lifts every <p class="prov"> into a disclosure at the foot
+    of the panel - the right call for "where this number came from", and
+    the wrong one for the legend of a chart. The first version of the
+    graphs used prov for their captions, and the rendered page put all
+    three of them stacked together at the bottom, thousands of
+    characters from the drawings they explained. Every test still
+    passed, because every test asked whether the words were on the page
+    and none asked whether they were in the right place.
+    """
+
+    def caption_distance(self, html, svg_id, phrase):
+        end = html.index("</svg>", html.index(f'id="{svg_id}"'))
+        return html.index(phrase) - end
+
+    def test_the_timeline_legend_stays_with_the_timeline(self, tmp_path):
+        html = _page(_seed(tmp_path))
+        d = self.caption_distance(html, "tr-timeline",
+                                  "Every position carries a hard exit date")
+        assert 0 < d < 40, f"the legend is {d} characters from its chart"
+
+    def test_the_price_rail_caption_stays_with_the_rail(self, tmp_path):
+        html = _page(_seed(tmp_path))
+        d = self.caption_distance(html, "tr-t0-rail", "The stop sits")
+        assert 0 < d < 40, f"the caption is {d} characters from its chart"
+
+    def test_the_hold_bar_caption_stays_with_the_bar(self, tmp_path):
+        html = _page(_seed(tmp_path))
+        i = html.index('class="hold-track"')
+        assert "fig-cap" in html[i:i + 260], (
+            "the hold bar's caption has been lifted away from it")
+
+    def test_figure_captions_are_not_swept_into_the_workings_fold(
+            self, tmp_path):
+        html = _page(_seed(tmp_path))
+        if "workings" not in html:
+            pytest.skip("nothing to sweep in this fixture")
+        fold = html[html.index('class="workings"'):]
+        assert "fig-cap" not in fold
+        for legend in ("The stop sits", "day(s) left of a",
+                       "Every position carries a hard exit date"):
+            assert legend not in fold, (
+                f"{legend!r} was lifted out of its chart and into the fold")
+
+    def test_real_provenance_IS_still_swept(self, tmp_path):
+        """The distinction has to cut both ways, or this is just an
+        excuse to stop folding prose."""
+        from catalyst.dashboard.render import section
+
+        out = section("s", "T", '<p class="prov">a</p><p class="prov">b</p>')
+        assert "workings" in out
+        assert out.index("workings") < out.index(">a<")
