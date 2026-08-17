@@ -152,8 +152,14 @@ def route_performance(db: Db, params: dict) -> str:
 
 
 def route_funnel(db: Db, params: dict) -> str:
-    return render_page("Funnel", panels.funnel_panel(db, p="funnel"), "/funnel",
-                       db.path, db=db)
+    # The origin split sits UNDER the funnel because it answers the
+    # question the funnel raises: candidates stopped here - whose
+    # candidates? Its own tab would hide it from the person already
+    # looking at exactly the right page.
+    return render_page("Funnel",
+                       panels.funnel_panel(db, p="funnel")
+                       + panels.origin_panel(db, p="origin"),
+                       "/funnel", db.path, db=db)
 
 
 def route_costs(db: Db, params: dict) -> str:
@@ -448,6 +454,7 @@ _TIME_COLUMNS = (
     "submitted_at", "filled_at", "confirmed_at", "replaced_at", "set_at",
     "first_seen_at", "asserted_at", "recorded_at", "created_at", "run_at",
     "repriced_at", "taken_at", "triggered_at", "checked_at",
+    "nominated_at",
 )
 
 

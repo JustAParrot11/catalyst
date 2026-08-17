@@ -644,6 +644,60 @@ def _owner_cap_cents(budget_usd):
     return cents
 
 
+#: A hunt is a DAILY act, not a per-cycle one. The feed does not change
+#: materially between 15-minute cycles, so hunting every cycle would pay
+#: to re-read the same digest ~26 times a day for the same nominations.
+#: The marker lives in the loop's once-a-day state dict, beside the
+#: benchmark refresh which works the same way.
+def _hunt_due(daily_state: dict | None, owner_cap, as_of) -> bool:
+    """Has today's hunt allowance been used?
+
+    Returns False when the budget affords none - a nomination nobody can
+    afford to research is worse than no nomination, so a small budget
+    spends everything judging what the screen already found.
+    """
+    from catalyst.discovery.hunt import hunts_per_day
+
+    allowed = hunts_per_day(owner_cap)
+    if allowed <= 0:
+        return False
+    if daily_state is None:
+        return True
+    day = as_of.date().isoformat()
+    if daily_state.get("hunt_day") != day:
+        daily_state["hunt_day"] = day
+        daily_state["hunt_count"] = 0
+    if daily_state.get("hunt_count", 0) >= allowed:
+        return False
+    daily_state["hunt_count"] = daily_state.get("hunt_count", 0) + 1
+    return True
+
+
+def _record_origin(conn, candidates, origin: str, rationales, as_of) -> None:
+    """Stamp where each candidate came from.
+
+    Written BEFORE research, so a candidate that never gets researched
+    still carries its provenance - otherwise the only hunted candidates
+    on record would be the ones that got far enough to be interesting,
+    which is the shape of every survivorship bias.
+
+    Never raises: provenance is observability, and losing it must not
+    cost a trade.
+    """
+    if not candidates:
+        return
+    try:
+        conn.executemany(
+            "INSERT OR IGNORE INTO candidate_origin "
+            "(candidate_id, origin, rationale, nominated_at) "
+            "VALUES (?,?,?,?)",
+            [(c.id, origin, (rationales or {}).get(c.id), as_of.isoformat())
+             for c in candidates])
+        conn.commit()
+    except sqlite3.Error:
+        _log.debug("candidate origin could not be recorded", exc_info=True)
+
+
 def _run_one_cycle(db_file: str, daily_state: dict | None = None):
     """Wire the live dependencies and run exactly one cycle. Thin by
     design: every piece here is constructed, none is decided.
@@ -812,6 +866,55 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
                 "Conjunction discovery failed; the Form 4 candidates from "
                 "this pass are unaffected.")
 
+        # CLAUDE'S OWN HUNT over the raw feed, once the mechanical
+        # builders have had their say.
+        #
+        # OWNER-ASKED: "surely to make this properly agentic we want
+        # claude go out and finds its own trades". The two builders
+        # above only make Form 4 clusters and cross-feed conjunctions,
+        # so most of what the feeds collect - EDGAR full-text hits, news
+        # - is fetched, stored, paid for and then discarded. The hunt
+        # reads that leftover and nominates from it.
+        #
+        # It runs LAST and merges, so it can never displace the graded
+        # arm: the Form 4 candidates from this pass are already in `out`
+        # before the hunt is asked, and a hunted duplicate of a ticker
+        # the screen already found is dropped rather than the reverse.
+        # A hunt that fails, is refused by the governor or returns
+        # nothing leaves this list exactly as the screen built it.
+        try:
+            from catalyst.discovery.hunt import hunt
+
+            if _hunt_due(daily_state, owner_cap, as_of):
+                from catalyst.research.boundary import CostContext
+                from catalyst.risk.adaptive_params import current_values
+
+                share = Decimal(str(current_values(conn)[
+                    "governor_profit_share"]))
+                known = {c.ticker for c in out}
+                res = hunt(raw_events, as_of, transport,
+                           CostContext(conn=conn,
+                                       governor_profit_share=share,
+                                       cycle_id=None, kind="scheduled",
+                                       owner_monthly_cap_cents=owner_cap),
+                           already_known=known)
+                fresh = [c for c in res.candidates if c.ticker not in known]
+                out.extend(fresh)
+                _record_origin(conn, fresh, "hunt", res.rationales, as_of)
+                if res.skipped_reason:
+                    _log.info("Hunt did not run: %s", res.skipped_reason)
+                else:
+                    _log.info(
+                        "Hunt: %d nomination(s), %d new candidate(s), "
+                        "%d rejected against the evidence.",
+                        res.nominations, len(fresh), len(res.rejected))
+                    for ticker, why in res.rejected[:10]:
+                        _log.info("Hunt rejected %s: %s", ticker, why)
+        except Exception:  # noqa: BLE001 - never lose the graded strategy
+            _log.exception(
+                "The hunt failed; the mechanically screened candidates "
+                "from this pass are unaffected.")
+
         # THE UNIVERSE RULE, APPLIED WHERE NOTHING CAN GO ROUND IT
         # (ESCALATION-4). Each builder already applies it, but this is
         # the one place every candidate from every source passes
@@ -829,6 +932,10 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
             else:
                 _log.info("Candidate %s excluded from the universe: %s",
                           cand.ticker, why)
+        # BOTH SIDES STAMPED, or the comparison is worthless. Anything
+        # the hunt did not already claim came from the mechanical
+        # screen, and INSERT OR IGNORE leaves the hunt's own rows alone.
+        _record_origin(conn, kept, "screen", {}, as_of)
         return kept
 
     conn = sqlite3.connect(db_file)

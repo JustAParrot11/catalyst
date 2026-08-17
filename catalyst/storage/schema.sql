@@ -31,6 +31,31 @@ CREATE TABLE IF NOT EXISTS candidates (
     correlation_tags          TEXT NOT NULL    -- JSON array
 );
 
+-- WHERE A CANDIDATE CAME FROM, and why it was nominated.
+--
+-- A SIDE TABLE, not a tenth column on `candidates`. That table is
+-- written with positional INSERTs in a great many places and adding a
+-- column silently shifts every one of them - learned by doing it the
+-- other way first and breaking 157 tests at once.
+--
+-- Needed because two different things now produce candidates: the
+-- mechanical screen (Form 4 clusters and cross-feed conjunctions, which
+-- is line-for-line the backtested arm) and Claude's own hunt over the
+-- raw feed. They must be TELLABLE APART for the rest of the bot's life,
+-- or the backtest's measured edge silently stops describing what is
+-- running, and nobody can answer "are the model's own picks any good?"
+-- with anything but an opinion.
+--
+-- `rationale` is the model's two-sentence reason for nominating. It is
+-- audit trail only: no arithmetic reads it, and it is NOT the trade
+-- thesis, which a full research pass writes afterwards.
+CREATE TABLE IF NOT EXISTS candidate_origin (
+    candidate_id  TEXT PRIMARY KEY REFERENCES candidates(id),
+    origin        TEXT NOT NULL,     -- 'screen' | 'hunt'
+    rationale     TEXT,
+    nominated_at  TEXT NOT NULL
+);
+
 -- research/ layer
 CREATE TABLE IF NOT EXISTS research_calls (
     id              TEXT PRIMARY KEY,

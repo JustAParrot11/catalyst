@@ -2220,6 +2220,70 @@ class DataIntegrity:
     quotes_q: QueryResult | None = None
 
 
+@dataclass
+class OriginSplit:
+    """Screened vs hunted, side by side, at every stage of the funnel.
+
+    THE REASON THIS EXISTS AT ALL. Letting the model nominate its own
+    candidates is the change most likely to make the backtest stop
+    describing the running system - the graded arm is the mechanical
+    screen, and nothing about a hunted candidate was ever measured. The
+    only honest answer is to keep them tellable apart from the first row
+    and let the record settle it.
+    """
+
+    rows: list = field(default_factory=list)   # [(origin, counts...)]
+    origins_q: QueryResult | None = None
+    recent: list = field(default_factory=list)  # newest hunted nominations
+    recent_q: QueryResult | None = None
+    n_hunted: int = 0
+    n_screened: int = 0
+
+
+def origin_split(db: Db) -> OriginSplit:
+    """How far each source's candidates got, and what the hunt said."""
+    d = OriginSplit()
+    d.origins_q = db.q(
+        "SELECT o.origin, "
+        "  COUNT(*) AS candidates, "
+        "  SUM(CASE WHEN v.candidate_id IS NOT NULL THEN 1 ELSE 0 END) "
+        "    AS researched, "
+        "  SUM(CASE WHEN v.direction IS NOT NULL AND v.direction != 'no_trade' "
+        "    THEN 1 ELSE 0 END) AS directional, "
+        "  SUM(CASE WHEN r.action = 'trade' THEN 1 ELSE 0 END) AS traded "
+        "FROM candidate_origin o "
+        "LEFT JOIN research_views v ON v.candidate_id = o.candidate_id "
+        "LEFT JOIN risk_decisions r ON r.candidate_id = o.candidate_id "
+        "GROUP BY o.origin ORDER BY o.origin")
+    for row in d.origins_q.rows:
+        r = dict(row)
+        d.rows.append((r.get("origin"), int(r.get("candidates") or 0),
+                       int(r.get("researched") or 0),
+                       int(r.get("directional") or 0),
+                       int(r.get("traded") or 0)))
+        if r.get("origin") == "hunt":
+            d.n_hunted = int(r.get("candidates") or 0)
+        elif r.get("origin") == "screen":
+            d.n_screened = int(r.get("candidates") or 0)
+
+    d.recent_q = db.q(
+        "SELECT o.nominated_at, c.ticker, c.catalyst_type, c.catalyst_date, "
+        "       o.rationale, v.direction, v.conviction "
+        "FROM candidate_origin o "
+        "JOIN candidates c ON c.id = o.candidate_id "
+        "LEFT JOIN research_views v ON v.candidate_id = o.candidate_id "
+        "WHERE o.origin = 'hunt' "
+        "ORDER BY o.nominated_at DESC LIMIT 25")
+    for row in d.recent_q.rows:
+        r = dict(row)
+        d.recent.append((
+            str(r.get("nominated_at") or "")[:16], r.get("ticker"),
+            r.get("catalyst_type"), r.get("catalyst_date"),
+            r.get("rationale") or "", r.get("direction"),
+            r.get("conviction")))
+    return d
+
+
 def data_integrity(db: Db) -> DataIntegrity:
     """Fill against intended, and the state of the evidence behind it.
 

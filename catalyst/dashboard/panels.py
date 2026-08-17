@@ -3762,6 +3762,90 @@ def data_integrity_panel(db: Db, p: str = "integ") -> str:
                    "".join(out))
 
 
+def origin_panel(db: Db, p: str = "origin") -> str:
+    """Where candidates came from, and whether the model's own picks
+    are any better than the screen's.
+
+    OWNER-ASKED: "surely to make this properly agentic we want claude go
+    out and finds its own trades".
+
+    It now does - and this page exists because that is the change most
+    likely to make the backtest quietly stop describing the running
+    system. The graded arm is the mechanical screen; nothing about a
+    hunted candidate has ever been measured. Keeping the two tellable
+    apart is what turns "are the model's own picks good?" from an
+    opinion into a number, and the number needs months, so the counting
+    starts now.
+    """
+    d = queries.origin_split(db)
+    out: list[str] = []
+
+    out.append(note(
+        "<b>Two things now produce candidates.</b> The <b>screen</b> is "
+        "mechanical - Form 4 clusters and cross-feed agreement - and is "
+        "line-for-line the arm that was backtested, so its measured edge "
+        "means something. The <b>hunt</b> is Claude reading the raw feed "
+        "once a day and nominating what the screen has no rule for. Both "
+        "go through the identical research, pricing and risk path; "
+        "nothing downstream knows which is which. They are counted "
+        f"separately here so the record can eventually say which is "
+        "worth the money."))
+
+    if not d.rows:
+        out.append(zero_block(
+            f"{p}-none", d.origins_q,
+            meaning=("no candidate has been stamped with an origin yet. "
+                     "Stamping happens as candidates are built, so this "
+                     "fills in on the next discovery pass.")))
+        return section(f"{p}-section", "Who found it: screen or Claude",
+                       "".join(out))
+
+    out.append(tiles(f"{p}-tiles", [
+        ("From the screen", f"{d.n_screened:,}",
+         "mechanical, and the arm the backtest graded"),
+        ("From Claude's hunt", f"{d.n_hunted:,}",
+         "nominated from the raw feed, then validated against it"),
+    ]))
+
+    rows = []
+    for origin, cands, researched, directional, traded in d.rows:
+        label = {"screen": "screen (mechanical)",
+                 "hunt": "hunt (Claude)"}.get(str(origin), str(origin))
+        rows.append([esc(label), f"{cands:,}", f"{researched:,}",
+                     f"{directional:,}", f"{traded:,}"])
+    out.append(table(
+        f"{p}-funnel",
+        ["origin", "candidates", "researched", "directional view", "traded"],
+        rows, numeric_cols={1, 2, 3, 4}))
+    out.append(caveat(
+        "These counts are NOT a verdict and will not be one for months. "
+        "A source that produced three candidates and one trade has told "
+        f"you nothing yet {DASH} the refusals page is where this "
+        "eventually gets settled, by scoring what each source's declined "
+        "candidates went on to do."))
+
+    if d.recent:
+        rows = [[esc(when), esc(ticker or DASH), esc(ctype or DASH),
+                 esc(str(cdate or DASH)),
+                 esc(direction or "not researched yet"),
+                 (f"{float(conv):.2f}" if conv is not None else DASH),
+                 esc((rationale or "")[:400])]
+                for when, ticker, ctype, cdate, rationale, direction, conv
+                in d.recent]
+        out.append(f'<h3 id="{p}-recent-h">What Claude nominated, and why</h3>')
+        out.append(table(
+            f"{p}-recent",
+            ["nominated", "ticker", "type", "resolves", "view", "conviction",
+             "why it was worth researching"],
+            rows, numeric_cols={5}))
+        out.append(prov(
+            "The reason is the model's own, written before any research "
+            "happened. It is not the trade thesis - a full research pass "
+            "writes that afterwards, and it is on the decision page."))
+    return section(f"{p}-section", "Who found it: screen or Claude",
+                   "".join(out))
+
+
 def _quote_cross_check_block(d, p: str) -> str:
     """Did anything DISAGREE with the live quote?
 
