@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from html.parser import HTMLParser
 
+import catalyst
 from catalyst.dashboard.build import BUILD_HASH, build_manifest
 
 #: Where the RUNNING dashboard was loaded from. Printed in the sidebar
@@ -27,6 +28,11 @@ from catalyst.dashboard.build import BUILD_HASH, build_manifest
 #: service actually imports can be different things - and when they are,
 #: the page is the only place that can say which one you are reading.
 _SOURCE_DIR = build_manifest()["directory"]
+#: major.minor.patch, the number a person reads. The patch is counted
+#: from the repository, so it moves without anyone remembering to.
+_VERSION = catalyst.__version__
+#: The commit, for when two machines disagree about what they run.
+_BUILD = catalyst.__build__
 from catalyst.dashboard.db import QueryResult
 from catalyst.dashboard.redact import redact
 
@@ -797,7 +803,15 @@ def page(title: str, body: str, active: str, db_path: str, notes: str = "",
         '<a class="brand" href="/"><span class="brand-mark" aria-hidden="true">'
         "&#9679;</span>catalyst</a>"
         f'<nav aria-label="Sections">{"".join(groups)}</nav>'
-        f'<p class="sidebar-foot">build <code>{esc(BUILD_HASH)}</code><br>'
+        # THE VERSION FIRST, the fingerprints under it. Owner-reported:
+        # "the version numbering is crazy complicated". A twelve-
+        # character hash is the right thing to quote when two machines
+        # disagree and the wrong thing to lead with - version 0.3.14 is
+        # what a person reads to know what they are looking at.
+        f'<p class="sidebar-foot">v<code>{esc(_VERSION)}</code><br>'
+        f'<span title="the exact commit this code was built from">'
+        f'code <code>{esc(_BUILD)}</code></span><br>'
+        f'build <code>{esc(BUILD_HASH)}</code><br>'
         # THE DIRECTORY, not just the hash. Owner-reported 2026-08-11: the
         # repo on disk was byte-for-byte current while the service ran an
         # older copy from somewhere else, and the page could not say so.

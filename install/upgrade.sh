@@ -146,6 +146,28 @@ service_do() {
   run systemctl "$1" "${CATALYST_SERVICE_NAME}"
 }
 
+# THE PATCH NUMBER: commits since catalyst/VERSION last changed, which
+# is what turns the hand-set series 0.3 into 0.3.14. Counted here rather
+# than at import time because the installed copy in site-packages has no
+# git to count with.
+#
+# Defined up here, above rollback(), because rollback re-stamps too: a
+# rolled-back machine that kept the new version's number would report
+# the version it FAILED to install while running the previous code.
+#
+# Failure is never fatal. With no number the version reads 0.3.x, which
+# is visibly not a digit and so cannot be mistaken for one.
+stamp_build_number() {
+  _base="$(git -C "${REPO_DIR}" log -1 --format=%H -- catalyst/VERSION 2>/dev/null || true)"
+  if [ -n "${_base}" ]; then _span="${_base}..HEAD"; else _span="HEAD"; fi
+  _n="$(git -C "${REPO_DIR}" rev-list --count "${_span}" 2>/dev/null || true)"
+  if [ -n "${_n}" ]; then
+    printf '%s\n' "${_n}" > "${REPO_DIR}/.build_number" 2>>"${LOG_FILE}" || true
+  else
+    rm -f "${REPO_DIR}/.build_number" 2>>"${LOG_FILE}" || true
+  fi
+}
+
 # --------------------------------------------------------------------------
 # Rollback - the whole point of this script
 # --------------------------------------------------------------------------
@@ -187,6 +209,9 @@ rollback() {
   if [ -n "${OLD_COMMIT:-}" ]; then
     printf '%s\n' "${OLD_COMMIT}" > "${REPO_DIR}/.build_commit" 2>>"${LOG_FILE}" || true
   fi
+  # The working tree is back at OLD_COMMIT by now, so recounting gives
+  # the old patch number rather than the one being abandoned.
+  stamp_build_number
 
   if run "${VENV_PY}" -m pip install --quiet "${REPO_DIR}[dev]"; then
     note "previous version reinstalled"
@@ -416,21 +441,27 @@ fi
 phase "Installing the new version"
 # --------------------------------------------------------------------------
 
-# STAMP THE COMMIT BEFORE INSTALLING, so the installed package can
+# STAMP THE VERSION BEFORE INSTALLING, so the installed package can
 # report which code it is. The version used to be a hand-maintained
 # string that nobody bumped, so every upgrade printed the same "0.2.0"
 # and told the owner nothing had changed (owner-reported). It is derived
-# from this file now - but the service user on a VPS may have no git,
-# and site-packages has no .git at all, so the commit is written down
-# here where it is still known.
+# now - but the service user on a VPS may have no git, and site-packages
+# has no .git at all, so both numbers are written down here, where the
+# repository still is.
+#
+#   .build_commit  the exact code, for when two machines disagree
+#   .build_number  the patch: commits since catalyst/VERSION changed,
+#                  which is what turns 0.3 into 0.3.14
 if [ -n "${NEW_COMMIT:-}" ]; then
   printf '%s\n' "${NEW_COMMIT}" > "${REPO_DIR}/.build_commit" 2>>"${LOG_FILE}" || true
 fi
+stamp_build_number
 
 if ! run "${VENV_PY}" -m pip install --quiet "${REPO_DIR}[dev]"; then
   rollback "The new version could not be installed." "$(log_tail)"
 fi
 NEW_VERSION="$(cd / && CATALYST_BUILD_COMMIT="${NEW_COMMIT:-}" "${VENV_PY}" -c 'import catalyst; print(catalyst.__version__)' 2>>"${LOG_FILE}" || echo unknown)"
+NEW_BUILD="$(cd / && CATALYST_BUILD_COMMIT="${NEW_COMMIT:-}" "${VENV_PY}" -c 'import catalyst; print(catalyst.__build__)' 2>>"${LOG_FILE}" || echo unknown)"
 # THE INSTALLED COPY, not the repo. `cd repo && python -m pytest` puts
 # the repo first on sys.path, so the tests exercise the working tree
 # while the SERVICE runs whatever pip put in site-packages. If those two
@@ -528,6 +559,7 @@ printf ' Upgrade complete.\n'
 printf '================================================================\n\n'
 printf '   version before:  %s\n' "${OLD_VERSION}"
 printf '   version now:     %s\n' "${NEW_VERSION}"
+printf '   build:           %s\n' "${NEW_BUILD}"
 printf '   code before:     %s\n' "${OLD_COMMIT:0:12}"
 printf '   code now:        %s  (branch %s)\n' "${NEW_COMMIT:0:12}" "${UPGRADE_BRANCH}"
 printf '   dashboard build: %s\n' "${NEW_BUILD_HASH}"
@@ -535,11 +567,12 @@ printf '   running from:    %s\n' "${INSTALLED_DIR}"
 printf '   tests:           all passed\n'
 printf '   backup kept at:  %s\n\n' "${BACKUP_PATH}"
 
-# The version string is hand-maintained and can sit still across many
-# real changes, so it must never be the only thing reported. The COMMIT
-# always moves when the code does - and when it has not moved, saying
-# "Upgrade complete" is a lie the owner then spends an evening chasing
-# through browser caches (owner-reported 2026-08-10).
+# The version's patch number is COUNTED from the repository, so it now
+# moves on its own whenever code ships - but only the series is chosen
+# by a person, and the count could still fail to be taken. The COMMIT
+# always moves when the code does, so both are printed; when neither has
+# moved, saying "Upgrade complete" is a lie the owner then spends an
+# evening chasing through browser caches (owner-reported 2026-08-10).
 if [ "${NOTHING_FETCHED}" -eq 1 ]; then
   printf ' NOTHING CHANGED. There was no new version to fetch on branch\n'
   printf " '%s', so the code you are running is exactly what\n" "${UPGRADE_BRANCH}"

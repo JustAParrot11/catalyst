@@ -4,7 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "catalyst"
-version = "0.2.0"
+# Read from catalyst/VERSION, so the packaging metadata cannot drift
+# away from what `catalyst.__version__` reports. A second hand-typed
+# copy of the series is exactly the thing the owner reported: two
+# numbers, one of them stale, and no way to tell which.
+#
+# The SERIES only (0.3, not 0.3.14): the patch is counted from git at
+# import time, and doing that here would run subprocesses during every
+# pip install, on a machine that may be mid-rollback.
+dynamic = ["version"]
 description = "Autonomous catalyst trading bot - the model proposes, deterministic code disposes"
 requires-python = ">=3.11"
 dependencies = [
@@ -16,6 +24,9 @@ dev = [
     "pytest>=8.0",
     "pytest-timeout>=2.3",
 ]
+
+[tool.setuptools.dynamic]
+version = {file = "catalyst/VERSION"}
 
 [tool.setuptools.packages.find]
 include = ["catalyst*"]
@@ -36,8 +47,13 @@ include = ["catalyst*"]
 # A recursive glob now, so a new .sql file ships by existing rather than
 # by being remembered. tests/test_install.py asserts every .sql in the
 # tree is covered.
+#
+# VERSION is here for the same reason and it is not optional: catalyst/
+# __init__.py READS it at import time, so an installed copy without it
+# does not merely lose its version, it fails to import at all - and
+# upgrade.sh reads that as "will not even start" and rolls back.
 [tool.setuptools.package-data]
-catalyst = ["**/*.sql"]
+catalyst = ["**/*.sql", "VERSION"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

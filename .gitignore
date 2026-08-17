@@ -6,4 +6,8 @@ __pycache__/
 .env
 /data/
 build/
+# Per-deploy stamps written by install/upgrade.sh. Committing either
+# would make every machine claim whichever build a developer stamped
+# last, in exactly the number the owner checks after an upgrade.
 .build_commit
+.build_number

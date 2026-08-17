@@ -1366,28 +1366,26 @@ def test_the_release_series_and_the_project_version_agree():
     installs another.
 
     WAS: compared two hand-maintained strings, `__version__` and
-    pyproject's `version`. `__version__` is no longer hand-maintained -
-    it derives from the commit, because a number nobody remembered to
-    bump printed the same "0.2.0" after every upgrade and told the owner
-    nothing had changed (owner-reported).
+    pyproject's `version`. Neither is hand-maintained now. The series
+    lives in catalyst/VERSION, pyproject READS that file, and the patch
+    is counted from git - so there is no longer a second copy to drift.
 
-    The requirement is unchanged and still asserted; only the
-    hand-maintained half moved. `__release__` is now the series, and it
-    is that which must match pyproject.
+    The requirement is unchanged and still asserted; there is simply
+    only one place left where it can be got wrong.
     """
     import re
 
-    src = (REPO_ROOT / "catalyst" / "__init__.py").read_text()
-    release = re.search(r'__release__ = "([^"]+)"', src)
-    assert release, "catalyst.__release__ is gone; pyproject has nothing to agree with"
-    proj = re.search(r'^version = "([^"]+)"',
-                     (REPO_ROOT / "pyproject.toml").read_text(),
-                     re.M).group(1)
-    assert proj.startswith(release.group(1)), (
-        f"catalyst.__release__ is {release.group(1)}, pyproject says {proj}")
+    proj = (REPO_ROOT / "pyproject.toml").read_text()
+    assert 'version = {file = "catalyst/VERSION"}' in proj, (
+        "pyproject no longer reads the series from catalyst/VERSION, so "
+        "the packaging metadata can drift from what the bot reports")
+    assert not re.search(r'^version = "', proj, re.M), (
+        "pyproject has a hand-typed version again - two numbers, one of "
+        "them stale, and no way to tell which")
 
     # And the derived half must still be derived, or this whole change
     # quietly reverts to the defect it fixed.
+    src = (REPO_ROOT / "catalyst" / "__init__.py").read_text()
     assert '__version__ = f"' in src, (
         "__version__ is a literal again, so it will sit still across "
         "every commit exactly as it did before")
@@ -1504,6 +1502,71 @@ class TestEveryDataFileActuallyShips:
         import fnmatch
         assert any(fnmatch.fnmatch("dashboard/schema_logs.sql", g)
                    for g in self._declared_globs())
+
+    def test_the_VERSION_file_ships(self):
+        """The worst case of this class, and the newest. catalyst/
+        __init__.py READS this file at import time, so an installed copy
+        without it does not merely lose its version - it raises
+        FileNotFoundError on `import catalyst`, which upgrade.sh reads as
+        "the new version will not even start" and rolls back.
+
+        Caught by deliberately removing it from package-data (house rule
+        4) and finding that nothing in the suite noticed: the repo copy
+        is always present, so every test passed while a fresh install
+        would have been dead on arrival.
+        """
+        import fnmatch
+
+        assert (REPO_ROOT / "catalyst" / "VERSION").exists()
+        assert any(fnmatch.fnmatch("VERSION", g)
+                   for g in self._declared_globs()), (
+            "catalyst/VERSION is not declared as package data, so a pip "
+            "install produces a package that cannot be imported")
+
+    def test_the_shipped_set_alone_can_be_imported(self, tmp_path):
+        """The check above reads a declaration. This one ACTS on it:
+        build a directory holding only what pip would install - the .py
+        files plus whatever the declared globs match - and import
+        catalyst from there.
+
+        That is the difference the suite has twice been unable to see.
+        Every test runs against the repo, where every file is present,
+        so a data file that fails to ship breaks nothing here and
+        everything on the owner's machine.
+
+        Simulated rather than pip-built on purpose: a wheel build needs
+        the network and the right setuptools, and a test that skips on
+        the day it matters is not a test.
+        """
+        import fnmatch
+        import shutil
+        import subprocess
+        import sys
+
+        globs = self._declared_globs()
+        src, dst = REPO_ROOT / "catalyst", tmp_path / "catalyst"
+        for path in sorted(src.rglob("*")):
+            if not path.is_file() or "__pycache__" in path.parts:
+                continue
+            rel = path.relative_to(src).as_posix()
+            ships = path.suffix == ".py" or any(
+                fnmatch.fnmatch(rel, g)
+                or fnmatch.fnmatch(rel, g.replace("**/", ""))
+                for g in globs)
+            if ships:
+                (dst / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, dst / rel)
+
+        out = subprocess.run(
+            [sys.executable, "-c",
+             "import catalyst, catalyst.dashboard.render, catalyst.storage; "
+             "print(catalyst.__version__)"],
+            capture_output=True, text=True, cwd=str(tmp_path), timeout=60,
+            env={"PATH": "/nonexistent", "PYTHONPATH": str(tmp_path)})
+        assert out.returncode == 0, (
+            "the files pip would install cannot be imported on their own:\n"
+            + out.stderr[-1500:])
+        assert out.stdout.strip().startswith("0."), out.stdout
 
 
 class TestReRunningTheInstallerIsSafe:
