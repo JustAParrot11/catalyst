@@ -3762,6 +3762,282 @@ def data_integrity_panel(db: Db, p: str = "integ") -> str:
                    "".join(out))
 
 
+def _plain_conviction(c) -> str:
+    """The number, said in words. Conviction is defined as a frequency,
+    so the English is a translation and not a gloss."""
+    if c is None:
+        return "no conviction recorded"
+    pct = int(round(float(c) * 100))
+    return (f"{float(c):.2f} &mdash; Claude expected this to be right "
+            f"about {pct} times in 100 similar setups")
+
+
+def _money(cents) -> str:
+    if cents is None:
+        return DASH
+    return dollars(cents)
+
+
+def _trade_story(st, p: str, index: int) -> str:
+    """One trade told as a story, in the order a person asks.
+
+    OWNER-ASKED: "I also want it breaking into english, chat responses
+    claude gives, I want to understand in plain text."
+
+    So every machine value is followed by what it MEANS, and Claude's
+    own words are quoted rather than summarised - a summary of a thesis
+    is just another opinion, and the point of keeping the text is that
+    the owner can judge the reasoning themselves.
+    """
+    pid = esc(st.position_id[:8])
+    out: list[str] = [f'<div class="trade" id="{p}-t{index}">']
+
+    open_or_closed = ("still open" if st.status == "open"
+                      else f"closed {esc(st.closed_at or '')}")
+    out.append(
+        f'<h3 id="{p}-t{index}-h">{esc(st.ticker)} '
+        f'<span class="prov">position {pid} &middot; {open_or_closed}</span></h3>')
+
+    # ---- 1. what happened, in one sentence, before any detail
+    if st.entry_price and st.qty:
+        headline = (f"The bot bought <b>{esc(st.qty)} shares of "
+                    f"{esc(st.ticker)}</b> at <b>${esc(st.entry_price)}</b> on "
+                    f"{esc(st.opened_at)}, about "
+                    f"<b>{esc(st.notional_usd or '?')} dollars</b> of a "
+                    "position.")
+    else:
+        headline = (f"A position in {esc(st.ticker)} was opened on "
+                    f"{esc(st.opened_at)}; the fill has not been "
+                    "reconciled yet.")
+    if st.stop_price:
+        headline += (f" If it falls to <b>${esc(st.stop_price)}</b> a resting "
+                     "stop order sells it automatically.")
+    if st.planned_exit_date:
+        headline += (f" Whatever happens, it closes on "
+                     f"<b>{esc(st.planned_exit_date)}</b> &mdash; every "
+                     "position carries a hard exit date.")
+    out.append(note(headline))
+
+    if st.realized_pnl_cents is not None:
+        won = st.realized_pnl_cents >= 0
+        out.append(tiles(f"{p}-t{index}-tiles", [
+            ("Result", _money(st.realized_pnl_cents),
+             ("a profit" if won else "a loss") + " after the exit"),
+            ("Exit", f"${esc(st.exit_price or '?')}",
+             esc(st.exit_reason or "no reason recorded")),
+            ("Held", f"{st.actual_holding_days}d"
+             if st.actual_holding_days is not None else DASH,
+             f"expected {st.expected_holding_days}d"
+             if st.expected_holding_days else "no expectation recorded"),
+        ]))
+
+    # ---- 2. why this company at all
+    out.append(f'<h4>1. Why {esc(st.ticker)} was looked at</h4>')
+    if st.origin == "hunt":
+        who = ("<b>Claude found this one itself</b>, reading the raw feed "
+               "and nominating it &mdash; the mechanical screen had no rule "
+               "for it.")
+        if st.nomination_why:
+            who += f' Its reason at the time: &ldquo;{esc(st.nomination_why)}&rdquo;'
+    elif st.origin == "screen":
+        who = ("The <b>mechanical screen</b> found this &mdash; the same "
+               "rule that was backtested, so its edge is a measured one "
+               "rather than a judgement.")
+    else:
+        who = "The origin of this candidate was not recorded."
+    out.append(f"<p>{who}</p>")
+    if st.catalyst_type:
+        out.append(
+            f"<p class='prov'>Catalyst type <b>{esc(st.catalyst_type)}</b>"
+            + (f", resolving around {esc(st.catalyst_date)}"
+               if st.catalyst_date else "")
+            + ". The type decides how the risk engine sizes it: a binary "
+              "event gets a smaller position than a slow re-rating.</p>")
+
+    # ---- 3. what Claude concluded, in its own words
+    out.append("<h4>2. What Claude concluded, in its own words</h4>")
+    if not st.thesis:
+        out.append(caveat("No research view is on record for this position."))
+    else:
+        verdict = {"long": "buy it", "short": "short it",
+                   "no_trade": "leave it alone"}.get(st.direction,
+                                                     st.direction or "?")
+        out.append(
+            f"<p>It decided to <b>{esc(verdict)}</b>, with a conviction of "
+            f"{_plain_conviction(st.conviction)}.</p>")
+        out.append(
+            '<blockquote class="said"><b>Its reasoning:</b><br>'
+            f"{esc(st.thesis)}</blockquote>")
+        out.append(
+            '<blockquote class="said"><b>What would prove it wrong:</b><br>'
+            f"{esc(st.invalidation)}</blockquote>")
+        if st.priced_in_reasoning:
+            already = ("It judged the move <b>already priced in</b>"
+                       if st.priced_in else
+                       "It judged the move <b>not yet priced in</b>")
+            out.append(
+                f'<blockquote class="said">{already} &mdash; meaning '
+                "whether the market had already reacted to this news "
+                f"before the bot could:<br>{esc(st.priced_in_reasoning)}"
+                "</blockquote>")
+        if st.expected_holding_days:
+            out.append(
+                f"<p class='prov'>It expected the thesis to need about "
+                f"<b>{st.expected_holding_days} trading days</b> to play "
+                "out.</p>")
+
+    # ---- 4. what the code then did with that
+    out.append("<h4>3. What the risk engine did with that</h4>")
+    out.append(
+        "<p>Claude never chooses the amount. Deterministic code takes the "
+        "account balance, the most it is allowed to lose on one position, "
+        "and how far this particular stock has historically gapped "
+        "overnight, and works the size out from those.</p>")
+    if st.notional_usd:
+        line = (f"It committed <b>{esc(st.notional_usd)} dollars</b>"
+                + (f" &mdash; {esc(st.qty)} shares" if st.qty else "")
+                + (f" &mdash; and placed the stop at <b>${esc(st.stop_price)}</b>"
+                   if st.stop_price else "") + ".")
+        out.append(f"<p>{line}</p>")
+    else:
+        out.append(caveat("No risk decision is on record for this position."))
+    if st.entry_intended and st.entry_price:
+        out.append(
+            f"<p class='prov'>It was sized from a live quote of "
+            f"${esc(st.entry_intended)} and filled at ${esc(st.entry_price)}. "
+            "The modelled spread it would have paid on a real account was "
+            f"{esc(st.modeled_slippage or '?')} cents &mdash; paper fills "
+            "pay no spread, so that figure is recorded beside the real "
+            "fill rather than instead of it.</p>")
+
+    # ---- 5. protection, told as a timeline
+    out.append("<h4>4. Was the stop actually resting at the broker?</h4>")
+    if not st.stop_events:
+        out.append(caveat(
+            "No stop check has run for this position yet. Checks happen "
+            "every cycle, so this fills in within about fifteen minutes."))
+    else:
+        gaps = [e for e in st.stop_events if e[1] != "ok"]
+        latest = st.stop_events[-1]
+        if latest[1] == "ok":
+            out.append(ok(
+                f"<b>Protected now.</b> The most recent check "
+                f"({esc(latest[0])}) found the stop resting at the broker."))
+        else:
+            out.append(alarm(
+                f"<b>NOT protected.</b> The latest check ({esc(latest[0])}) "
+                f"found no resting stop: {esc(str(latest[1]))}."))
+        if gaps and latest[1] == "ok":
+            out.append(caveat(
+                f"There was a gap earlier: {len(gaps)} check(s) found no "
+                "resting stop, the first at "
+                f"{esc(gaps[0][0])}. It was resolved, and it is kept here "
+                "because a position that was briefly unprotected is a fact "
+                "worth knowing even once it is fixed."))
+        rows = [[esc(when), esc(status),
+                 esc(str(ids) if ids not in ("[]", None) else "none")]
+                for when, status, ids in st.stop_events[-12:]]
+        out.append(table(f"{p}-t{index}-stops",
+                         ["checked", "status", "resting stop order"], rows))
+
+    # ---- 6. every order, including the ones that failed
+    if st.orders:
+        out.append("<h4>5. Every order sent to the broker</h4>")
+        out.append(
+            "<p class='prov'>Including rejected ones. A rejection is part "
+            "of the record, and hiding it is how a gap goes unnoticed.</p>")
+        rows = []
+        for when, side, otype, qty, status, raw in st.orders:
+            plain = {"filled": "filled", "rejected": "REJECTED",
+                     "new": "resting at the broker",
+                     "accepted": "accepted"}.get(str(status), str(status))
+            rows.append([esc(when), esc(f"{side} {otype}"), esc(qty),
+                         esc(plain), esc(raw[:220])])
+        out.append(table(f"{p}-t{index}-orders",
+                         ["sent", "order", "qty", "what happened",
+                          "broker's own words"], rows))
+
+    # ---- 7. re-reads, and what it will do next
+    out.append("<h4>6. What Claude has said since, and what happens next</h4>")
+    if not st.reviews:
+        out.append(
+            "<p>Claude re-reads its own thesis against the live price on a "
+            "schedule while a position is open. Nothing is on record for "
+            "this one yet.</p>")
+    else:
+        for when, action, triggered, reasoning, changed, skipped in st.reviews:
+            if skipped:
+                out.append(
+                    f"<p class='prov'>{esc(when)} &mdash; review skipped: "
+                    f"{esc(str(skipped))}</p>")
+                continue
+            said = {"hold": "keep holding",
+                    "exit_now": "close it now",
+                    "exit_sooner": "bring the exit forward"}.get(
+                        str(action), str(action))
+            out.append(
+                f'<blockquote class="said"><b>{esc(when)} &mdash; '
+                f"it decided to {esc(said)}"
+                + (" (its invalidation had triggered)" if triggered else "")
+                + f":</b><br>{esc(reasoning)}"
+                + ("<br><span class='prov'>What changed: "
+                   + esc("; ".join(str(c) for c in changed)) + "</span>"
+                   if changed else "")
+                + "</blockquote>")
+    if st.status == "open" and st.planned_exit_date:
+        out.append(note(
+            f"<b>What happens next.</b> The stop sits at "
+            f"${esc(st.stop_price or '?')} and sells automatically if the "
+            "price reaches it. Otherwise the position closes on "
+            f"<b>{esc(st.planned_exit_date)}</b>. A review can bring that "
+            "date FORWARD but never push it out &mdash; a losing position "
+            "always has a story, and that rule is what stops "
+            "&ldquo;days to weeks&rdquo; becoming &ldquo;until it comes "
+            "back&rdquo;."))
+    out.append("</div>")
+    return "".join(out)
+
+
+def trades_panel(db: Db, params: dict | None = None, p: str = "tr") -> str:
+    """Every trade, past and present, explained in English.
+
+    OWNER-ASKED after the first ever trade: "I want a tab to be actually
+    getting data about past and present trades like every thing, if i
+    traded i want to know why, the decisions its taking and will take,
+    for complete trades an entire breakdown. I also want it breaking
+    into english."
+    """
+    params = params or {}
+    wanted = (params.get("id") or [None])[0] if isinstance(
+        params.get("id"), list) else params.get("id")
+    d = queries.trades(db, wanted)
+    out: list[str] = []
+
+    if not d.stories:
+        out.append(zero_block(
+            f"{p}-none", d.positions_q,
+            meaning=("no position has been opened yet. This page fills in "
+                     "the moment the first order fills - it reads the "
+                     "positions table, which is written at entry.")))
+        return section(f"{p}-section", "Trades: what was bought and why",
+                       "".join(out))
+
+    out.append(tiles(f"{p}-tiles", [
+        ("Open now", f"{d.n_open}", "positions the bot is holding"),
+        ("Closed", f"{d.n_closed}", "finished trades, with their result"),
+    ]))
+    out.append(note(
+        "Each trade below is told in the order a person would ask: why "
+        "this company, what Claude concluded <b>in its own words</b>, what "
+        "the risk engine did with that, whether the stop is really resting "
+        "at the broker, every order including rejected ones, and what "
+        "happens next."))
+    for i, st in enumerate(d.stories):
+        out.append(_trade_story(st, p, i))
+    return section(f"{p}-section", "Trades: what was bought and why",
+                   "".join(out))
+
+
 def origin_panel(db: Db, p: str = "origin") -> str:
     """Where candidates came from, and whether the model's own picks
     are any better than the screen's.

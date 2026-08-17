@@ -522,6 +522,18 @@ button { background: var(--series-1); color: #fff; border-color: transparent;
 /* A reason not seen for days is history and must stop wearing the colour
    that means "wrong right now" (owner-reported: a wall of 400s read as a
    live fault days after the bug behind them was fixed). */
+/* CLAUDE'S OWN WORDS, set apart from the page's narration. The owner
+   asked to read the model's reasoning directly rather than a summary of
+   it, so it has to be visibly a QUOTE - a summary of a thesis is just
+   another opinion. */
+.said { margin: 10px 0; padding: 10px 14px; border-left: 3px solid
+  var(--accent); background: var(--surface-2); border-radius: 0 4px 4px 0;
+  color: var(--ink); font-size: 0.97em; line-height: 1.55; }
+.said b { color: var(--ink-2); font-weight: 600; }
+.trade { border: 1px solid var(--hairline); border-radius: 6px;
+  padding: 4px 16px 16px; margin: 18px 0; background: var(--surface); }
+.trade h4 { margin: 18px 0 6px; font-size: 0.95em; color: var(--ink-2);
+  letter-spacing: .01em; }
 .funnel-why li.drop-live { color: var(--ink-2); }
 .funnel-why li.drop-stale, .funnel-why li.drop-stale .funnel-why-n {
   color: var(--muted); }
@@ -705,6 +717,7 @@ NAV_GROUPS = [
     ("Monitor", [
         ("/", "Overview", "Everything at a glance"),
         ("/performance", "Performance", "Account value against the S&P"),
+        ("/trades", "Trades", "Every position, and why it was taken"),
         ("/funnel", "Pipeline", "Raw filings through to orders"),
     ]),
     ("Investigate", [

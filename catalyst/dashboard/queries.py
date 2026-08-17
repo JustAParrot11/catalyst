@@ -1880,9 +1880,25 @@ def alerts(db: Db) -> Alerts:
                           f"kill switch ACTIVE: {row['switch_name']} since "
                           f"{row['triggered_at']}",
                           row["portfolio_state_snapshot"]))
+    # ONLY THE LATEST CHECK PER POSITION COUNTS. Owner-reported on the
+    # first ever trade: "the dashboard throws this error - position
+    # 85fb5edc... is unprotected". It had been unprotected, for about
+    # fifteen minutes, and the ten checks after it all said ok - but the
+    # query asked for every non-ok row that had ever been written, so a
+    # resolved gap alarmed forever.
+    #
+    # Same class as the 400s and the reconciliation prompt: a historical
+    # fact rendered as a live one. The row is not deleted - it is real,
+    # it matters, and the trade page shows it in the timeline. It just
+    # stops being an ALARM once a later check found the stop resting.
     unprotected_q = db.q(
-        "SELECT position_id, checked_at, status, live_stop_order_ids "
-        "FROM stop_confirmations WHERE status != 'ok' ORDER BY checked_at DESC LIMIT 10"
+        "SELECT c.position_id, c.checked_at, c.status, c.live_stop_order_ids "
+        "FROM stop_confirmations c "
+        "JOIN (SELECT position_id, MAX(checked_at) AS newest "
+        "      FROM stop_confirmations GROUP BY position_id) latest "
+        "  ON latest.position_id = c.position_id "
+        " AND latest.newest = c.checked_at "
+        "WHERE c.status != 'ok' ORDER BY c.checked_at DESC LIMIT 10"
     )
     for row in unprotected_q.rows:
         items.append(("alarm",
@@ -2238,6 +2254,199 @@ class OriginSplit:
     recent_q: QueryResult | None = None
     n_hunted: int = 0
     n_screened: int = 0
+
+
+@dataclass
+class TradeStory:
+    """One trade, end to end, in the order a person would ask about it."""
+
+    position_id: str = ""
+    ticker: str = ""
+    candidate_id: str = ""
+    catalyst_type: str = ""
+    catalyst_date: str = ""
+    origin: str = ""
+    nomination_why: str = ""
+    #: the model, verbatim
+    direction: str = ""
+    conviction: float | None = None
+    thesis: str = ""
+    invalidation: str = ""
+    priced_in: bool = False
+    priced_in_reasoning: str = ""
+    expected_holding_days: int | None = None
+    #: what code then did
+    notional_usd: str = ""
+    qty: str = ""
+    stop_price: str = ""
+    planned_exit_date: str = ""
+    #: what happened
+    opened_at: str = ""
+    entry_price: str = ""
+    entry_intended: str = ""
+    modeled_slippage: str = ""
+    status: str = ""
+    exit_price: str = ""
+    exit_reason: str = ""
+    realized_pnl_cents: int | None = None
+    actual_holding_days: int | None = None
+    closed_at: str = ""
+    #: the record of protection and re-reads
+    stop_events: list = field(default_factory=list)
+    reviews: list = field(default_factory=list)
+    orders: list = field(default_factory=list)
+
+
+@dataclass
+class Trades:
+    stories: list = field(default_factory=list)
+    positions_q: QueryResult | None = None
+    n_open: int = 0
+    n_closed: int = 0
+
+
+def trades(db: Db, position_id: str | None = None) -> Trades:
+    """Every trade the bot has made, with everything behind each one.
+
+    OWNER-ASKED, on the first ever trade: "if i traded i want to know
+    why, the decisions its taking and will take, for complete trades an
+    entire breakdown."
+
+    BUILD-BRIEF's test for this has always been that "someone who was
+    not there can read a single trade and understand why it was made".
+    The decision page already reconstructed a CANDIDATE; this assembles
+    a POSITION - which is the thing the owner actually has money in, and
+    the thing they open the dashboard to look at.
+
+    Everything here is joined from rows already written. Nothing is
+    recomputed, and no figure is invented: where a fact was never
+    recorded the field stays empty and the panel says so.
+    """
+    out = Trades()
+    where = "WHERE p.id = ?" if position_id else ""
+    args = (position_id,) if position_id else ()
+    out.positions_q = db.q(
+        "SELECT p.id, p.ticker, p.opened_at, p.planned_exit_date, p.status, "
+        "       p.entry_order_ids, p.stop_order_id "
+        f"FROM positions p {where} ORDER BY p.opened_at DESC LIMIT 50", args)
+
+    for prow in out.positions_q.rows:
+        pr = dict(prow)
+        st = TradeStory(position_id=str(pr["id"]), ticker=str(pr["ticker"]),
+                        opened_at=str(pr["opened_at"] or "")[:19],
+                        planned_exit_date=str(pr["planned_exit_date"] or ""),
+                        status=str(pr["status"] or ""))
+        entry_ids = jload(pr["entry_order_ids"], []) or []
+
+        # candidate + decision, via the entry order
+        if entry_ids:
+            row = db.q(
+                "SELECT o.id AS order_id, o.decision_id, c.ticker, "
+                "       c.catalyst_type, c.catalyst_date "
+                "FROM orders o LEFT JOIN candidates c ON c.id = o.decision_id "
+                "WHERE o.id = ?", (str(entry_ids[0]),))
+            if row.rows:
+                r = dict(row.rows[0])
+                st.candidate_id = str(r.get("decision_id") or "")
+                st.catalyst_type = str(r.get("catalyst_type") or "")
+                st.catalyst_date = str(r.get("catalyst_date") or "")
+
+        if st.candidate_id:
+            v = db.q("SELECT * FROM research_views WHERE candidate_id = ?",
+                     (st.candidate_id,))
+            if v.rows:
+                r = dict(v.rows[0])
+                st.direction = str(r.get("direction") or "")
+                try:
+                    st.conviction = float(r.get("conviction"))
+                except (TypeError, ValueError):
+                    st.conviction = None
+                st.thesis = str(r.get("thesis") or "")
+                st.invalidation = str(r.get("invalidation") or "")
+                st.priced_in = bool(r.get("priced_in"))
+                st.priced_in_reasoning = str(r.get("priced_in_reasoning") or "")
+                try:
+                    st.expected_holding_days = int(r.get("expected_holding_days"))
+                except (TypeError, ValueError):
+                    pass
+            dq = db.q("SELECT * FROM risk_decisions WHERE candidate_id = ? "
+                      "AND action = 'trade' ORDER BY decided_at DESC LIMIT 1",
+                      (st.candidate_id,))
+            if dq.rows:
+                r = dict(dq.rows[0])
+                st.notional_usd = str(r.get("notional_usd") or "")
+                st.qty = str(r.get("qty") or "")
+                st.stop_price = str(r.get("stop_price") or "")
+            oq = db.q("SELECT origin, rationale FROM candidate_origin "
+                      "WHERE candidate_id = ?", (st.candidate_id,))
+            if oq.rows:
+                st.origin = str(dict(oq.rows[0]).get("origin") or "")
+                st.nomination_why = str(dict(oq.rows[0]).get("rationale") or "")
+
+            oq = db.q(
+                "SELECT id, side, qty, order_type, status, submitted_at, "
+                "       raw_response FROM orders WHERE decision_id = ? "
+                "ORDER BY submitted_at", (st.candidate_id,))
+            for r in oq.rows:
+                r = dict(r)
+                st.orders.append((
+                    str(r.get("submitted_at") or "")[:19], r.get("side"),
+                    r.get("order_type"), r.get("qty"), r.get("status"),
+                    str(r.get("raw_response") or "")[:400]))
+
+        if entry_ids:
+            f = db.q("SELECT broker_reported_price, modeled_slippage "
+                     "FROM fills WHERE order_id = ? LIMIT 1",
+                     (str(entry_ids[0]),))
+            if f.rows:
+                st.entry_price = str(dict(f.rows[0]).get(
+                    "broker_reported_price") or "")
+                st.modeled_slippage = str(dict(f.rows[0]).get(
+                    "modeled_slippage") or "")
+            e = db.q("SELECT last_close FROM entry_market_context "
+                     "WHERE order_id = ?", (str(entry_ids[0]),))
+            if e.rows:
+                st.entry_intended = str(dict(e.rows[0]).get("last_close") or "")
+
+        sc = db.q("SELECT checked_at, status, live_stop_order_ids "
+                  "FROM stop_confirmations WHERE position_id = ? "
+                  "ORDER BY checked_at", (st.position_id,))
+        st.stop_events = [(str(dict(r)["checked_at"])[:19], dict(r)["status"],
+                           dict(r)["live_stop_order_ids"]) for r in sc.rows]
+
+        rv = db.q("SELECT reviewed_at, action, invalidation_triggered, "
+                  "       reasoning, what_changed_json, skipped_reason "
+                  "FROM position_reviews WHERE position_id = ? "
+                  "ORDER BY reviewed_at", (st.position_id,))
+        for r in rv.rows:
+            r = dict(r)
+            st.reviews.append((
+                str(r.get("reviewed_at") or "")[:19], r.get("action"),
+                bool(r.get("invalidation_triggered")),
+                str(r.get("reasoning") or ""),
+                jload(r.get("what_changed_json"), []) or [],
+                r.get("skipped_reason")))
+
+        ct = db.q("SELECT * FROM closed_trades WHERE position_id = ?",
+                  (st.position_id,))
+        if ct.rows:
+            r = dict(ct.rows[0])
+            st.exit_price = str(r.get("exit_price") or "")
+            st.exit_reason = str(r.get("exit_reason") or "")
+            try:
+                st.realized_pnl_cents = int(r.get("realized_pnl_cents"))
+            except (TypeError, ValueError):
+                pass
+            try:
+                st.actual_holding_days = int(r.get("actual_holding_days"))
+            except (TypeError, ValueError):
+                pass
+            st.closed_at = str(r.get("closed_at") or "")[:19]
+            out.n_closed += 1
+        else:
+            out.n_open += 1
+        out.stories.append(st)
+    return out
 
 
 def origin_split(db: Db) -> OriginSplit:
