@@ -33,7 +33,18 @@ import pytest
 
 from catalyst.data import bar_history as bh
 
-NOW = datetime(2026, 8, 16, 12, 0, tzinfo=timezone.utc)
+#: ANCHORED TO THE REAL CLOCK. `is_fresh` measures a file's age from
+#: its MTIME, which is stamped by the operating system at the moment the
+#: test writes it - the real now, never this constant. Pinned to a
+#: calendar date, the gap between the two widens by a day per day, and
+#: the staleness probe at NOW + MAX_CACHE_AGE_DAYS + 1 measures one day
+#: less of age each morning until it drops under the threshold and the
+#: refetch test fails.
+#:
+#: It went red exactly one day after the constant was written: probing
+#: at 2026-09-16 against a file stamped 2026-08-17 measured 29 days
+#: against a 30-day limit.
+NOW = datetime.now(timezone.utc)
 
 
 #: Deterministic, and crucially it goes DOWN sometimes. A generator that

@@ -513,6 +513,42 @@ FAULT_MARKERS = (
     "no order was recorded", "http 4", "http 5",
 )
 
+#: THE PREFIX cycle._note_not_attempted stamps on every deliberate skip.
+#: It means a precondition was not met so NOTHING WAS TRIED - no request
+#: was sent, no money was spent, nothing failed.
+#:
+#: Matching the prefix instead of listing its members is the point.
+#: Enumerating them one string at a time is how `no_market_quote` came
+#: to be tagged FAULT in red beside its own siblings `market_closed` and
+#: `deferred_max_research_per_cycle` (owner-reported) - the second time
+#: this classifier mislabelled ordinary behaviour, and the second time
+#: the cause was a vocabulary I had written out by hand. A new
+#: not_attempted reason added next year is covered without anyone
+#: remembering this file exists.
+#:
+#: A fault-SHAPED reason still wins: FAULT_MARKERS is matched first, so
+#: "not_attempted: transport_error ..." stays a fault.
+#:
+#: SAFE BECAUSE THE SYSTEMIC CASE CANNOT HIDE HERE. If Alpaca were down,
+#: build_portfolio_state would return None and the kill switch would
+#: stand the whole cycle down as portfolio_state_unreliable long before
+#: any candidate reached a quote. So `no_market_quote` is always a
+#: per-ticker fact - an illiquid name with no recent print - and never
+#: the shape a broken feed makes.
+NOT_ATTEMPTED_PREFIX = "not_attempted:"
+
+#: The exceptions to that rule: deliberate skips that nevertheless need
+#: somebody to DO something. `no_model_transport_configured` means there
+#: is no Anthropic key, so nothing can ever be researched - the bot is
+#: alive, spending nothing, and achieving nothing. Filing that under
+#: "nothing went wrong" would be true and useless: the whole purpose of
+#: the three tags is that one of them means "look at this", and a bot
+#: that can never research is exactly that.
+NOT_ATTEMPTED_STILL_NEEDS_YOU = (
+    "no_model_transport_configured",
+    "no_anthropic_key",
+)
+
 #: Nothing went wrong. The bot worked exactly as designed and these
 #: recur every day.
 ROUTINE_SKIPS = (
@@ -560,6 +596,10 @@ def skip_kind(reason: str, stage_key: str = "researched") -> str:
     text = str(reason or "").lower()
     if any(m in text for m in FAULT_MARKERS):
         return "FAULT"
+    if NOT_ATTEMPTED_PREFIX in text:
+        if any(k in text for k in NOT_ATTEMPTED_STILL_NEEDS_YOU):
+            return "FAULT"
+        return "ROUTINE"
     if any(k in text for k in ROUTINE_SKIPS):
         return "ROUTINE"
     if any(k in text for k in LIMIT_SKIPS):

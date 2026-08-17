@@ -18,7 +18,7 @@ cannot authorize spend on top of a ledger with holes.
 
 import sqlite3
 from datetime import date, datetime, timezone
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 
 from catalyst.cost import CostEstimate, GovernorDecision
 from catalyst.cost.ledger import (
@@ -53,6 +53,53 @@ GOVERNOR_MAX_CAP_CENTS = Decimal("800")
 #: strategy that only trades the first days of a month cannot be
 #: compared to a backtest that trades all of it.
 DAILY_CAP_CENTS = Decimal("500")
+
+#: How many days of even spending one day is allowed to take. The point
+#: of a rate ceiling is that a runaway stops within a day instead of a
+#: month; three days' worth does that while leaving room for the lumpy
+#: reality - insider filings arrive in clusters, and a Tuesday with six
+#: fresh candidates should not be rationed to a Sunday's allowance.
+DAILY_BURST_DAYS = Decimal("3")
+
+#: Days in the budget month, for turning a monthly cap into a daily one.
+BUDGET_MONTH_DAYS = Decimal("30")
+
+
+def daily_cap_cents(monthly_cap_cents=None) -> Decimal:
+    """The rate ceiling in force, DERIVED from the monthly cap.
+
+    THE FLAT $5 WAS A NUMBER FROM A SMALLER BUDGET, and it stayed put
+    when the owner raised their cap. Owner-reported: "my new monthly
+    limit is 100, ensure the bot doesnt still try stick to lower
+    standards and hinder its effectiveness."
+
+    That is the same defect the monthly cap already had and had fixed -
+    the dashboard printing BASE_CAP_CENTS while the governor spent
+    against something else - so it gets the same answer: one source of
+    truth, derived, never a second constant to remember.
+
+    NEVER TIGHTER THAN THE ORIGINAL. The floor is the owner's own
+    2026-08-14 figure, so raising the monthly cap can only ever loosen
+    this and lowering it cannot silently strangle the bot below what was
+    already agreed.
+    """
+    if monthly_cap_cents is None:
+        return DAILY_CAP_CENTS
+    try:
+        monthly = Decimal(str(monthly_cap_cents))
+    except (ArithmeticError, TypeError, ValueError):
+        return DAILY_CAP_CENTS
+    if not monthly.is_finite() or monthly <= 0:
+        return DAILY_CAP_CENTS
+    # QUANTIZED TO WHOLE CENTS. Decimal division is exact-but-repeating -
+    # 10000 / 30 * 3 lands on 999.9999999999999999999999999, not 1000 -
+    # and a ceiling a hundredth of a cent under the intended figure is
+    # the kind of thing that shows up months later as an off-by-one
+    # refusal nobody can explain. Rounded UP, so deriving never makes
+    # the ceiling tighter than the arithmetic says.
+    derived = ((monthly / BUDGET_MONTH_DAYS) * DAILY_BURST_DAYS).quantize(
+        Decimal("1"), rounding=ROUND_CEILING)
+    return max(DAILY_CAP_CENTS, derived)
 
 # The owner sets their own budget, and there is deliberately NO fixed
 # ceiling on it. The two limits do different jobs and only one of them
@@ -180,12 +227,13 @@ def authorize(
     # nobody.
     if estimate.kind == "scheduled":
         today = day_to_date_cents(estimate.kind, conn, as_of)
-        if today + estimate.estimated_cents > DAILY_CAP_CENTS:
+        rate_ceiling = daily_cap_cents(owner_monthly_cap_cents)
+        if today + estimate.estimated_cents > rate_ceiling:
             decision = GovernorDecision(
                 authorized=False, kind=estimate.kind, estimate=estimate,
-                cap_cents=DAILY_CAP_CENTS, period_to_date_cents=today,
+                cap_cents=rate_ceiling, period_to_date_cents=today,
                 shortfall_cents=today + estimate.estimated_cents
-                - DAILY_CAP_CENTS,
+                - rate_ceiling,
                 reason="daily_cap_exceeded",
             )
             _log(decision, conn, cycle_id)

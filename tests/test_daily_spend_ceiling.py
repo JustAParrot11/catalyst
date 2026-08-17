@@ -126,7 +126,20 @@ class TestItStopsARunaway:
             authorised += 1
             _spend(db, 51, today)
         assert authorised < 288, "the runaway was not bounded at all"
-        assert day_to_date_cents("scheduled", db, today) <= gov.DAILY_CAP_CENTS
+        # JUDGED AGAINST THE CEILING THIS CAP DERIVES, not the flat
+        # constant. The ceiling stopped being a fixed $5 when it started
+        # following the owner's budget - this test hands it $1,000/month,
+        # which derives $100/day (three days of even spending, the same
+        # rule at any size). The REQUIREMENT is unchanged and is what is
+        # asserted: a runaway stops inside a day instead of eating the
+        # month.
+        ceiling = gov.daily_cap_cents(Decimal("100000"))
+        assert ceiling > gov.DAILY_CAP_CENTS, (
+            "the derivation is not loosening for a large budget, so this "
+            "test is no longer exercising what it claims to")
+        assert day_to_date_cents("scheduled", db, today) <= ceiling
+        # And still a small fraction of the month, which is the point.
+        assert day_to_date_cents("scheduled", db, today) <= Decimal("100000") / 5
 
     def test_tomorrow_starts_clean_without_anyone_doing_anything(self, db):
         """It is a rate limit, not a fault. Nothing should need

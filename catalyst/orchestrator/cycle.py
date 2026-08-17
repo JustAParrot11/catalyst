@@ -39,6 +39,64 @@ from catalyst.risk.kill_switches import check as kill_check
 MAX_RESEARCH_PER_CYCLE = 3     # bounds worst-case spend per cycle; the
                                # governor is the real cap, this is belt
 
+#: The most this belt is ever loosened to, whatever the budget. A cycle
+#: is 900 seconds, so 12 investigations in one is already a burst; the
+#: point is to spread a day's research across the day rather than spend
+#: it all in the first cycle after the open.
+MAX_RESEARCH_PER_CYCLE_CEILING = 12
+
+#: A cautious per-call cost for turning a daily allowance into a count.
+#: Measured from the owner's own bundle 2026-08-17: 84 recorded API
+#: turns, 3.55M input tokens and 197k output, averaging ~19c a call with
+#: a worst case of 45c. The WORST case is used, so the derived count
+#: under-reaches rather than over-commits - and the governor refuses
+#: anything beyond the cap regardless, which is what actually bounds it.
+TYPICAL_RESEARCH_CALL_CENTS = 50
+
+
+def research_per_cycle(owner_monthly_cap_cents=None) -> int:
+    """How many candidates one cycle may investigate.
+
+    OWNER-REPORTED, from a day where 51 of 60 candidates were deferred
+    with `not_attempted: deferred_max_research_per_cycle` while one
+    single call ran: "my new monthly limit is 100, ensure the bot doesnt
+    still try stick to lower standards and hinder its effectiveness."
+
+    The flat 3 was sized for a 20-pound month. It is documented right
+    here as a BELT - the governor is the real cap - and a belt that does
+    not move when the budget quadruples is just a smaller budget wearing
+    the new one's name.
+
+    WHAT THIS DOES NOT DO IS AUTHORISE SPEND. Every call still goes
+    through the governor, which refuses on the monthly cap, the derived
+    daily rate ceiling, an unacknowledged discrepancy or unpriced rows.
+    Raising this only decides how many candidates are CONSIDERED before
+    those gates; it cannot spend a cent the gates would not allow.
+
+    Never below the original 3, so a small or unset budget behaves
+    exactly as it did.
+    """
+    # DERIVED FROM THE EVEN DAILY RATE, not from the burst ceiling.
+    # The rate ceiling has a $5 floor that exists so a runaway stops
+    # inside a day; reading a per-cycle allowance off it would let a
+    # single cycle of a $5 MONTHLY budget try to spend the whole month.
+    # The governor would refuse - but a belt whose job is to prevent
+    # that shape should not be the thing proposing it.
+    from catalyst.cost.governor import BUDGET_MONTH_DAYS
+
+    if owner_monthly_cap_cents is None:
+        return MAX_RESEARCH_PER_CYCLE
+    try:
+        monthly = Decimal(str(owner_monthly_cap_cents))
+        if not monthly.is_finite() or monthly <= 0:
+            return MAX_RESEARCH_PER_CYCLE
+        per_day = monthly / BUDGET_MONTH_DAYS
+    except (ArithmeticError, TypeError, ValueError):
+        return MAX_RESEARCH_PER_CYCLE
+    derived = int(per_day // TYPICAL_RESEARCH_CALL_CENTS)
+    return max(MAX_RESEARCH_PER_CYCLE,
+               min(MAX_RESEARCH_PER_CYCLE_CEILING, derived))
+
 # Broker statuses that mean "this order will never fill". An entry in
 # one of these with nothing filled bought nothing, so it opens nothing.
 _TERMINAL_UNFILLED = {"canceled", "expired", "done_for_day", "rejected",
@@ -554,6 +612,11 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
               owner_monthly_cap_cents=None,
               bars_dir: str | None = None) -> CycleReport:
     now = now or datetime.now(timezone.utc)
+    # A caller that named a number meant it; otherwise scale the belt to
+    # the budget actually in force rather than to the one this constant
+    # was written for.
+    if max_research == MAX_RESEARCH_PER_CYCLE:
+        max_research = research_per_cycle(owner_monthly_cap_cents)
     cycle_id = str(uuid.uuid4())
     params = current_values(conn)
     report = CycleReport(cycle_id=cycle_id, started_at=now,

@@ -584,3 +584,90 @@ class TestTheOwnersScreenshotIsNoLongerRed:
             "an unrecognised RISK-ENGINE reason rendered as a fault - the "
             "renderer is not passing the stage to skip_kind, so every new "
             "skip reason will read as damage")
+
+
+# ------------------- the not_attempted family, matched by its prefix
+#
+# OWNER-REPORTED, the THIRD mislabelling from this classifier:
+#
+#   3  [FAULT]  research skipped: not_attempted: no_market_quote
+#              last seen today - nothing has succeeded since, so treat
+#              it as live
+#
+# `no_market_quote` sat in red beside its own siblings `market_closed`
+# and `deferred_max_research_per_cycle`, both correctly routine, because
+# I had written the routine list out by hand and simply not thought of
+# it. That is twice the same mistake with a different string.
+#
+# So the rule is now the PREFIX, not the membership. `not_attempted: `
+# is stamped by cycle._note_not_attempted on every deliberate skip and
+# means a precondition was not met, so nothing was tried, nothing was
+# sent and nothing was spent. A reason invented next year is covered
+# without anyone remembering this file exists.
+#
+# It is safe to call `no_market_quote` routine specifically because the
+# systemic case cannot hide there: if Alpaca were down,
+# build_portfolio_state returns None and the kill switch stands the
+# whole cycle down as portfolio_state_unreliable long before any
+# candidate reaches a quote. So it is always a per-ticker fact.
+#
+# Two carve-outs keep the rule honest: a fault-SHAPED reason still wins,
+# and a deliberate skip that nevertheless needs somebody to act - no
+# Anthropic key - is not filed under "nothing went wrong".
+
+class TestTheNotAttemptedFamily:
+    @pytest.mark.parametrize("reason", [
+        "not_attempted: no_market_quote",
+        "not_attempted: market_closed",
+        "not_attempted: deferred_max_research_per_cycle",
+        "not_attempted: ticker_already_entered_this_cycle",
+        "not_attempted: a_precondition_nobody_has_written_yet",
+    ])
+    def test_a_deliberate_skip_is_routine(self, reason):
+        assert queries.skip_kind(reason, "researched") == "ROUTINE"
+
+    def test_the_prefix_covers_reasons_nobody_enumerated(self):
+        """The actual defect: the routine list was hand-written, so any
+        reason missing from it came out red. Matching the prefix is what
+        stops that recurring a fourth time."""
+        assert queries.skip_kind(
+            "not_attempted: invented_in_2029", "researched") == "ROUTINE"
+
+    def test_a_fault_shaped_skip_is_still_a_fault(self):
+        """The prefix must not launder a real failure."""
+        for reason in ("not_attempted: transport_error: HTTP 400",
+                       "not_attempted: AnthropicHTTPError: HTTP 500",
+                       "not_attempted: Traceback (most recent call last)"):
+            assert queries.skip_kind(reason, "researched") == "FAULT", reason
+
+    def test_a_missing_anthropic_key_still_demands_attention(self):
+        """A bot that can NEVER research is not "working as designed".
+        It is alive, spending nothing and achieving nothing, and filing
+        that under routine would be true and useless."""
+        assert queries.skip_kind(
+            "not_attempted: no_model_transport_configured",
+            "researched") == "FAULT"
+
+    def test_no_market_quote_stops_being_dated_as_a_live_fault(
+            self, tmp_path):
+        """The owner's exact line. Routine reasons get a plain date, not
+        "nothing has succeeded since, so treat it as live" - which read
+        as an alarm about an illiquid ticker having no recent print."""
+        path = str(tmp_path / "q.db")
+        conn = init_db(path)
+        now = TODAY.isoformat()
+        for i in range(3):
+            conn.execute("INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?,?)",
+                         (f"c{i}", "AAA", "insider_cluster", "2026-09-01",
+                          "estimated", "[]", now, "tech", "[]"))
+            conn.execute("INSERT INTO research_calls VALUES (?,?,?,?,?,?,?,?,?)",
+                         (f"r{i}", f"c{i}", "", "", "[]", "0", 0,
+                          "not_attempted: no_market_quote", now))
+        conn.commit()
+        conn.close()
+        block = _drops_block(path)
+        assert "no_market_quote" in block
+        assert "drop-live" not in block, (
+            "an illiquid ticker with no recent print is tagged as a fault")
+        assert "treat it as live" not in block, (
+            "routine attrition is being dated as though something broke")
