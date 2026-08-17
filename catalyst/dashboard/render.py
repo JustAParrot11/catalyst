@@ -540,6 +540,28 @@ button { background: var(--series-1); color: #fff; border-color: transparent;
   padding: 4px 16px 16px; margin: 18px 0; background: var(--surface); }
 .trade h4 { margin: 18px 0 6px; font-size: 0.95em; color: var(--ink-2);
   letter-spacing: .01em; }
+/* FOLDED BY DEFAULT. Owner-reported: "its already uncollapsed which
+   will get messy as there are many open and closed trades". Each story
+   runs several screens, so the summary line has to carry enough to
+   decide whether to open it - it is styled as a row of facts, not as a
+   link. */
+.trade > summary { cursor: pointer; padding: 12px 0; font-size: 1.02em;
+  color: var(--ink); list-style-position: outside; }
+.trade > summary:hover { color: var(--accent); }
+.trade[open] > summary { border-bottom: 1px solid var(--hairline);
+  margin-bottom: 4px; }
+/* THE RISK BAND, DRAWN. Owner-asked: "Simplify data maybe with
+   prediction graphs, it feels word heavy". The shaded span between the
+   stop and the fill IS the exposure - and it is the divisor the
+   position size came out of, so seeing its width is seeing the sizing.
+   Nothing here is forecast: only prices that actually exist are drawn. */
+.rail-chart { width: 100%; max-width: 640px; height: auto; margin: 10px 0 2px; }
+.rail-axis { stroke: var(--hairline); stroke-width: 1; }
+.rail-risk { fill: var(--accent); opacity: .16; }
+.rail-stop { stroke: var(--critical); stroke-width: 2; }
+.rail-entry { stroke: var(--ink-2); stroke-width: 2; }
+.rail-exit { stroke: var(--accent); stroke-width: 2; stroke-dasharray: 3 2; }
+.rail-label { fill: var(--muted); font-size: 11px; }
 .funnel-why li.drop-live { color: var(--ink-2); }
 .funnel-why li.drop-stale, .funnel-why li.drop-stale .funnel-why-n {
   color: var(--muted); }
