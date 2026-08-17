@@ -162,10 +162,13 @@ class TestTheStaleUnprotectedAlarm:
 
 class TestItTellsTheStoryInEnglish:
     def test_it_opens_with_what_actually_happened(self, tmp_path):
+        """The FACTS, not the sentence they were once written in. These
+        four numbers moved from a paragraph into tiles when the owner
+        reported the page "feels word heavy" - asserting the prose would
+        have made a layout change look like a data loss."""
         html = _page(_seed(tmp_path))
-        for phrase in ("79.1295 shares", "$5.06", "400.00 dollars",
-                       "$4.55", "2026-08-29"):
-            assert phrase in html, f"the headline omits {phrase}"
+        for phrase in ("79.1295", "$5.06", "400.00", "$4.55", "2026-08-29"):
+            assert phrase in html, f"the summary omits {phrase}"
         assert "hard exit date" in html
 
     def test_conviction_is_translated_not_just_printed(self, tmp_path):
@@ -200,7 +203,7 @@ class TestItTellsTheStoryInEnglish:
 class TestItShowsWhatHappensNext:
     def test_an_open_position_says_what_will_happen(self, tmp_path):
         html = _page(_seed(tmp_path))
-        assert "What happens next" in html
+        assert "<b>Next.</b>" in html
         assert "never push it out" in html
 
     def test_reviews_are_quoted_with_their_action_in_english(self, tmp_path):
@@ -392,3 +395,229 @@ class TestItExplainsTheSize:
         html = _page(_seed_with_limits(
             tmp_path, limits=[("max_hold_days", "hard", "12", "31", 0)]))
         assert "Nothing bound" in html
+
+
+# ==========================================================================
+# Second owner pass, once there was a trade to look at:
+#
+#   "Where it shows logic for each trade, its already uncollapses which
+#    will get messy as there are many open and closed trades. Simplify
+#    data maybe with prediction graphs, it feels word heavy and also the
+#    data at the bottom appears to just be raw json not easily
+#    understandable"
+#
+# Three separate complaints, three classes below.
+# ==========================================================================
+
+
+def _seed_two(tmp_path):
+    """The real trade, plus a second one, so folding has something to
+    fold. One position is a page nobody scrolls; the complaint is about
+    what happens at a few trades a month."""
+    path = _seed(tmp_path)
+    conn = init_db(path)
+    cid2 = "insider_cluster-ACME-2026-08-10-deadbeef"
+    conn.execute("INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?,?)",
+                 (cid2, "ACME", "insider_cluster", "2026-08-10", "confirmed",
+                  "[]", "2026-08-10T16:00:00+00:00", "tech", "[]"))
+    conn.execute("INSERT INTO research_views VALUES (?,?,?,?,?,?,?,?)",
+                 (cid2, "long", 0.71, "A different thesis entirely.",
+                  "A different invalidation.", 9, 0, "why"))
+    conn.execute("INSERT INTO risk_decisions VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                 ("d2", cid2, "trade", "long", "250.00", "10", "22.00",
+                  "2026-08-24", "[]", "{}", "2026-08-10T16:00:00+00:00"))
+    conn.execute("INSERT INTO orders VALUES (?,?,?,?,?,?,?,?,?,?)",
+                 ("e2", cid2, "b2", "buy", "10", "market", "day",
+                  "2026-08-10T16:00:00+00:00", "filled", "{}"))
+    conn.execute("INSERT INTO fills VALUES (?,?,?,?,?,?)",
+                 ("e2", "25.00", "10", "2026-08-10T16:00:05+00:00",
+                  "25.00", "0.5"))
+    conn.execute("INSERT INTO positions VALUES (?,?,?,?,?,?,?)",
+                 ("pos-2", "ACME", json.dumps(["e2"]), "s2",
+                  "2026-08-10T16:00:00+00:00", "2026-08-24", "closed"))
+    conn.execute("INSERT INTO closed_trades VALUES (?,?,?,?,?,?,?,?,?)",
+                 ("pos-2", "paper", "25.00", "23.10", "hard_exit_date",
+                  -1900, 9, 9, "2026-08-24T20:00:00+00:00"))
+    conn.commit()
+    conn.close()
+    return path
+
+
+class TestEachTradeFoldsShut:
+    """OWNER-REPORTED: "its already uncollapsed which will get messy as
+    there are many open and closed trades"."""
+
+    def test_two_trades_are_both_folded(self, tmp_path):
+        html = _page(_seed_two(tmp_path))
+        assert html.count("<details class=\"trade\"") == 2
+        assert "<details class=\"trade\" id=\"tr-t0\" open>" not in html, (
+            "a trade is still open by default, so at a few trades a month "
+            "the page becomes unnavigable - the reported complaint")
+
+    def test_the_summary_alone_says_whether_to_open_it(self, tmp_path):
+        """A fold is only useful if the closed state carries enough to
+        decide. Ticker, state, size, date, conviction - the five things
+        that answer "is this the one I am looking for"."""
+        html = _page(_seed_two(tmp_path))
+        head = html[html.index("<summary"):html.index("</summary>")]
+        for fact in ("EMBC", "open", "$400.00", "2026-08-17", "0.60"):
+            assert fact in head, f"the folded summary omits {fact}"
+
+    def test_a_closed_trade_shows_its_result_while_folded(self, tmp_path):
+        """The single most useful thing about a finished trade, and the
+        reason to open it or not."""
+        html = _page(_seed_two(tmp_path))
+        summaries = re.findall(r"<summary.*?</summary>", html, re.S)
+        acme = [s for s in summaries if "ACME" in s]
+        assert acme and "lost" in acme[0] and "19.00" in acme[0], acme
+
+    def test_a_lone_trade_is_NOT_folded(self, tmp_path):
+        """Folding buys nothing when there is nothing to scroll past,
+        and a page that opens showing nothing at all reads as broken."""
+        html = _page(_seed(tmp_path))
+        assert "<details class=\"trade\" id=\"tr-t0\" open>" in html
+
+    def test_a_trade_asked_for_by_id_opens(self, tmp_path):
+        html = _page(_seed_two(tmp_path), {"id": POS})
+        assert " open>" in html, (
+            "following a link to one specific trade lands on a shut box")
+
+    def test_the_body_is_still_all_there(self, tmp_path):
+        """Folded is not dropped. Everything the previous version said
+        must survive inside the disclosure."""
+        html = _page(_seed_two(tmp_path))
+        for phrase in (THESIS[:50], INVALIDATION[:30],
+                       "Claude never chooses the amount",
+                       "Every order sent to the broker"):
+            assert phrase in html
+
+
+class TestTheRawJsonIsTranslated:
+    """OWNER-REPORTED: "the data at the bottom appears to just be raw
+    json not easily understandable". It was a broker response object,
+    truncated mid-object at 220 characters, in a table cell."""
+
+    def test_the_wash_trade_rejection_is_in_english(self, tmp_path):
+        html = _page(_seed(tmp_path))
+        assert "possible wash trade" in html
+        assert "while a buy for the same stock is still working" in html
+
+    def test_the_brokers_own_message_is_still_quoted(self, tmp_path):
+        """The translation adds to the broker's words, never replaces
+        them - the message is the authoritative part."""
+        html = _page(_seed(tmp_path))
+        assert "potential wash trade detected." in html
+
+    def test_the_exact_response_is_kept_but_folded(self, tmp_path):
+        """House rule 3: the raw response goes BESIDE the answer, not
+        instead of it. It just stops being the largest thing on screen."""
+        html = _page(_seed(tmp_path))
+        assert "the broker&#x27;s exact response" in html \
+            or "the broker's exact response" in html
+        assert "reject_reason" in html, "the exact response was thrown away"
+        assert 'class="raw-fold"' in html
+
+    def test_it_is_no_longer_truncated_mid_object(self, tmp_path):
+        html = _page(_seed(tmp_path))
+        assert "opposite side market/stop order exists" in html, (
+            "the response is still being cut off part-way through")
+
+    def test_an_unknown_code_falls_back_to_the_brokers_words(self):
+        """HOUSE RULE 7 - classify by the rule, not by enumeration. The
+        code table is a convenience; a code nobody listed must still
+        produce English, because the broker names its own reason."""
+        said, exact = panels._broker_said(json.dumps(
+            {"code": 99999999, "message": "account is restricted"}))
+        assert "account is restricted" in said
+        assert exact
+
+    def test_a_nested_body_is_unwrapped(self):
+        """Rejections arrive wrapped: {"submit_error":..,"body":{..}}."""
+        said, _ = panels._broker_said(json.dumps(
+            {"submit_error": "400", "status_code": 400,
+             "body": json.dumps({"code": 40310000, "message": "no"})}))
+        assert "wash trade" in said
+
+    @pytest.mark.parametrize("bad", ["", "{oops", "null", "[]", "42", None])
+    def test_unparseable_input_never_raises(self, bad):
+        """This runs on stored text from a broker. It may be anything."""
+        said, exact = panels._broker_said(bad)
+        assert isinstance(said, str) and isinstance(exact, str)
+
+    def test_an_empty_object_offers_no_fold(self):
+        """"{}" is not a response worth a disclosure widget."""
+        assert panels._broker_said("{}") == ("", "")
+
+    def test_a_fill_is_said_as_a_fill(self):
+        said, _ = panels._broker_said(json.dumps(
+            {"status": "filled", "filled_qty": "79.1295",
+             "filled_avg_price": "5.0600"}))
+        assert "79.1295" in said and "5.06" in said
+
+
+class TestThePictureReplacesTheParagraph:
+    """OWNER-ASKED: "Simplify data maybe with prediction graphs, it feels
+    word heavy"."""
+
+    def test_the_stop_and_the_fill_are_drawn(self, tmp_path):
+        html = _page(_seed(tmp_path))
+        assert 'class="rail-chart"' in html
+        assert "rail-stop" in html and "rail-entry" in html
+        assert "4.55" in html and "5.06" in html
+
+    def test_the_exposure_is_drawn_as_a_band_not_two_ticks(self, tmp_path):
+        """The width of that band IS the divisor the position size came
+        out of. Seeing it is seeing the sizing."""
+        html = _page(_seed(tmp_path))
+        assert 'class="rail-risk"' in html
+        m = re.search(r'<rect x="([\d.]+)"[^>]*width="([\d.]+)"[^>]*'
+                      r'class="rail-risk"', html)
+        assert m and float(m.group(2)) > 0, "the risk band has no width"
+
+    def test_the_distance_to_the_stop_is_stated_as_a_percentage(self, tmp_path):
+        """(5.06 - 4.55) / 5.06 = 10.08%."""
+        html = _page(_seed(tmp_path))
+        assert "10.1% below" in html
+
+    def test_a_closed_trade_draws_where_it_was_sold(self, tmp_path):
+        html = _page(_seed(tmp_path, closed=True))
+        assert "rail-exit" in html
+        assert "sold $5.62" in html
+
+    def test_NOTHING_IS_FORECAST(self, tmp_path):
+        """The one line this drawing must never cross. A "where it might
+        go" projection would be a prediction the bot does not make,
+        drawn with the same authority as a measured price - which is the
+        thing this dashboard refuses to do everywhere else.
+
+        Only prices that exist may be marked, so every number inside the
+        SVG has to be one of them."""
+        html = _page(_seed(tmp_path, closed=True))
+        svg = html[html.index("<svg id=\"tr-t0-rail\""):]
+        svg = svg[:svg.index("</svg>")]
+        real = {"4.55", "5.06", "5.62"}
+        drawn = set(re.findall(r"\$([\d.]+)", svg))
+        assert drawn <= real, f"prices nobody paid are drawn: {drawn - real}"
+
+    def test_every_label_stays_inside_the_drawing(self, tmp_path):
+        """A label past the viewBox edge is invisible, and an invisible
+        label is a number that silently is not there."""
+        from catalyst.dashboard import charts
+
+        html = _page(_seed(tmp_path, closed=True))
+        svg = html[html.index("<svg id=\"tr-t0-rail\""):]
+        svg = svg[:svg.index("</svg>") + 6]
+        assert not charts.labels_outside_viewbox(svg)
+
+    def test_a_missing_stop_draws_nothing_rather_than_guessing(self, tmp_path):
+        """No stop price means no risk band. An empty chart area is
+        better than one drawn from a value that was never recorded."""
+        st = queries.TradeStory(ticker="X", entry_price="10", stop_price="")
+        assert panels._price_rail(st, "tr", 0) == ""
+
+    @pytest.mark.parametrize("entry,stop", [
+        ("0", "1"), ("10", "0"), ("", "1"), ("abc", "1"), ("10", "nan"),
+    ])
+    def test_unusable_prices_never_raise(self, entry, stop):
+        st = queries.TradeStory(ticker="X", entry_price=entry, stop_price=stop)
+        assert panels._price_rail(st, "tr", 0) == ""

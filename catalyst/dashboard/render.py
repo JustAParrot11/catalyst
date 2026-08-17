@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from html.parser import HTMLParser
 
+import catalyst
 from catalyst.dashboard.build import BUILD_HASH, build_manifest
 
 #: Where the RUNNING dashboard was loaded from. Printed in the sidebar
@@ -27,6 +28,11 @@ from catalyst.dashboard.build import BUILD_HASH, build_manifest
 #: service actually imports can be different things - and when they are,
 #: the page is the only place that can say which one you are reading.
 _SOURCE_DIR = build_manifest()["directory"]
+#: major.minor.patch, the number a person reads. The patch is counted
+#: from the repository, so it moves without anyone remembering to.
+_VERSION = catalyst.__version__
+#: The commit, for when two machines disagree about what they run.
+_BUILD = catalyst.__build__
 from catalyst.dashboard.db import QueryResult
 from catalyst.dashboard.redact import redact
 
@@ -534,6 +540,28 @@ button { background: var(--series-1); color: #fff; border-color: transparent;
   padding: 4px 16px 16px; margin: 18px 0; background: var(--surface); }
 .trade h4 { margin: 18px 0 6px; font-size: 0.95em; color: var(--ink-2);
   letter-spacing: .01em; }
+/* FOLDED BY DEFAULT. Owner-reported: "its already uncollapsed which
+   will get messy as there are many open and closed trades". Each story
+   runs several screens, so the summary line has to carry enough to
+   decide whether to open it - it is styled as a row of facts, not as a
+   link. */
+.trade > summary { cursor: pointer; padding: 12px 0; font-size: 1.02em;
+  color: var(--ink); list-style-position: outside; }
+.trade > summary:hover { color: var(--accent); }
+.trade[open] > summary { border-bottom: 1px solid var(--hairline);
+  margin-bottom: 4px; }
+/* THE RISK BAND, DRAWN. Owner-asked: "Simplify data maybe with
+   prediction graphs, it feels word heavy". The shaded span between the
+   stop and the fill IS the exposure - and it is the divisor the
+   position size came out of, so seeing its width is seeing the sizing.
+   Nothing here is forecast: only prices that actually exist are drawn. */
+.rail-chart { width: 100%; max-width: 640px; height: auto; margin: 10px 0 2px; }
+.rail-axis { stroke: var(--hairline); stroke-width: 1; }
+.rail-risk { fill: var(--accent); opacity: .16; }
+.rail-stop { stroke: var(--critical); stroke-width: 2; }
+.rail-entry { stroke: var(--ink-2); stroke-width: 2; }
+.rail-exit { stroke: var(--accent); stroke-width: 2; stroke-dasharray: 3 2; }
+.rail-label { fill: var(--muted); font-size: 11px; }
 .funnel-why li.drop-live { color: var(--ink-2); }
 .funnel-why li.drop-stale, .funnel-why li.drop-stale .funnel-why-n {
   color: var(--muted); }
@@ -797,7 +825,15 @@ def page(title: str, body: str, active: str, db_path: str, notes: str = "",
         '<a class="brand" href="/"><span class="brand-mark" aria-hidden="true">'
         "&#9679;</span>catalyst</a>"
         f'<nav aria-label="Sections">{"".join(groups)}</nav>'
-        f'<p class="sidebar-foot">build <code>{esc(BUILD_HASH)}</code><br>'
+        # THE VERSION FIRST, the fingerprints under it. Owner-reported:
+        # "the version numbering is crazy complicated". A twelve-
+        # character hash is the right thing to quote when two machines
+        # disagree and the wrong thing to lead with - version 0.3.14 is
+        # what a person reads to know what they are looking at.
+        f'<p class="sidebar-foot">v<code>{esc(_VERSION)}</code><br>'
+        f'<span title="the exact commit this code was built from">'
+        f'code <code>{esc(_BUILD)}</code></span><br>'
+        f'build <code>{esc(BUILD_HASH)}</code><br>'
         # THE DIRECTORY, not just the hash. Owner-reported 2026-08-11: the
         # repo on disk was byte-for-byte current while the service ran an
         # older copy from somewhere else, and the page could not say so.
