@@ -45,7 +45,18 @@ from catalyst.dashboard import panels, queries
 from catalyst.dashboard.db import Db
 from catalyst.storage import init_db
 
-TODAY = datetime(2026, 8, 16, 12, 0, tzinfo=timezone.utc)
+#: ANCHORED TO THE REAL CLOCK, not to a fixed date. The collapse rule
+#: compares each reason's last-seen date against
+#: `datetime.now() - FEED_FAULT_WINDOW_DAYS`, so a fixture pinned to a
+#: calendar date drifts out of the window as the days pass and the file
+#: goes red for a reason that has nothing to do with what it tests.
+#:
+#: This repo already carries that lesson - tests/test_position_review_
+#: wiring.py says it in as many words, "a fixed wall-clock hour goes
+#: stale as the day passes it, which is how a suite rots with the
+#: calendar" - and I wrote this file pinned to 2026-08-16 anyway. It
+#: failed the next morning.
+TODAY = datetime.now(timezone.utc)
 
 TOOL_400 = (
     "transport_error: AnthropicHTTPError: HTTP 400 from the Messages API: "
@@ -54,7 +65,11 @@ TOOL_400 = (
 
 #: The owner's real funnel: (reason, count, first_days_ago, last_days_ago)
 OWNER_ROWS = [
-    ("budget_denied", 74, 4, 3),
+    # Two days, not the three the owner actually saw: at exactly
+    # FEED_FAULT_WINDOW_DAYS the row sits ON the cutoff, and a test
+    # balanced on an edge reports on the edge rather than on the
+    # behaviour. Two days is unambiguously "still current".
+    ("budget_denied", 74, 4, 2),
     ("not_attempted: deferred_max_research_per_cycle", 63, 2, 0),
     ("not_attempted: market_closed", 5, 1, 0),
     ("transport_error: HTTPStatusError: Client error '400 Bad Request'",
@@ -142,6 +157,37 @@ def funnel_with_a_live_fault(tmp_path):
     conn.commit()
     conn.close()
     return path
+
+
+class TestThisFileCannotRotWithTheCalendar:
+    """The bug that made this file go red overnight.
+
+    Every fixture here dates its rows relative to TODAY, and the code
+    files a reason away when its last-seen date falls outside
+    `datetime.now() - FEED_FAULT_WINDOW_DAYS`. Those two only stay in
+    step while TODAY tracks the clock. Pinned to a literal date, the
+    fixture drifts out of the window one day at a time and the file
+    starts failing for a reason that has nothing to do with what it
+    tests - which is exactly what happened.
+    """
+
+    def test_TODAY_follows_the_clock(self):
+        drift = abs((datetime.now(timezone.utc) - TODAY).total_seconds())
+        assert drift < 3600, (
+            f"TODAY is {drift / 86400:.1f} days from now. It has been pinned "
+            "to a literal date, so every fixture in this file will drift out "
+            "of the collapse window and fail on a date nobody chose.")
+
+    def test_the_fixtures_straddle_the_window_on_purpose(self):
+        """The offsets must stay meaningfully either side of the cutoff.
+        A row sitting exactly ON it tests the boundary, not the rule."""
+        window = queries.FEED_FAULT_WINDOW_DAYS
+        last_seen = [last for _r, _n, _first, last in OWNER_ROWS]
+        assert any(d < window for d in last_seen), "nothing is current"
+        assert any(d > window for d in last_seen), "nothing is settled"
+        assert window not in last_seen, (
+            f"a fixture row sits exactly on the {window}-day cutoff; move it "
+            "either side so the test reports on the rule, not the edge")
 
 
 class TestTheThreeKindsAreToldApart:
