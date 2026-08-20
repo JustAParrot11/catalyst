@@ -367,6 +367,9 @@ class ReconciliationResult:
 
 
 RECONCILE_REL_THRESHOLD = Decimal("0.10")
+#: The SINGLE-DAY floor. Kept as the published relative threshold's
+#: partner, and no longer the thing that pauses spending on its own -
+#: see the note on RECONCILE_PAUSE_FLOOR_CENTS below.
 RECONCILE_FLOOR_CENTS = Decimal("5")
 #: Below this, NOTHING pauses spending, whatever the proportion. The
 #: pause test used RECONCILE_FLOOR_CENTS - five cents - against drift
@@ -492,7 +495,25 @@ def reconcile_day(
     api_total = sum((Decimal(str(rec["amount"])) for rec in page.records), Decimal("0"))
     signed = local_total - api_total
     discrepancy = signed.copy_abs()
-    threshold = max(RECONCILE_FLOOR_CENTS,
+    # THE SAME TWO-PART TEST THE DRIFT PATH USES, and for the identical
+    # reason. OWNER-REPORTED 2026-08-20: "on 17th we spent $2.95 yet
+    # dashboard says $3.36 ... its yet again paused the bot".
+    #
+    # Reproduced: 41c on a 336c day is 12.2%, over the 10% relative
+    # threshold, and the old floor was five cents - so the day check
+    # halted the bot. The ACCUMULATED-DRIFT check, which carries the
+    # owner's 2026-08-14 "block only if large" decision, would not have:
+    # its floor is 50c.
+    #
+    # Two pause paths, and the decision had only been applied to one of
+    # them. A rule the owner explicitly chose was being overridden by
+    # the path nobody re-read - which is how "reconciliation is a
+    # correction, not an alarm" turned back into an alarm.
+    #
+    # Both parts still have to be true, so a SYSTEMATIC mispricing is
+    # caught exactly as before: a wrong rate table showing 40% on the
+    # same day is 134c, over both bars.
+    threshold = max(RECONCILE_PAUSE_FLOOR_CENTS,
                     RECONCILE_REL_THRESHOLD * max(local_total, api_total))
 
     drift = signed + _trailing_signed_drift(conn, target_date)
