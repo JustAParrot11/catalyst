@@ -3312,3 +3312,163 @@ def next_actions(db: Db, now=None) -> NextActions:
     # Soonest first; undated last, since "not scheduled" is not a time.
     out.actions.sort(key=lambda a: (a.when == "", a.when))
     return out
+
+
+# ==========================================================================
+# Trade metrics
+#
+# OWNER-REPORTED: "The trades part doesnt feel professional enough, i
+# want better metrics, i feels like a robot made it".
+#
+# The page had figures but not METRICS: it printed what was stored -
+# price, quantity, dollars - and left every derived number to the
+# reader. A trading blotter is defined by the derived ones, and the two
+# that matter most were both computable from data already on disk:
+#
+#   RISK. qty x (entry - stop) is the dollars actually at stake, which
+#   is the number the position was sized FROM. Showing notional without
+#   it says how much was spent and not how much can be lost - and those
+#   differ by a factor of ten here.
+#
+#   R MULTIPLE. Realised P&L divided by that initial risk. It is how a
+#   discretionary book is graded, because it makes a $40 win on a $10
+#   risk and a $400 win on a $100 risk the same result - which they are.
+#   Raw P&L flatters whichever trade happened to be biggest.
+#
+# EVERY ONE OF THESE IS None WHEN ITS INPUTS ARE MISSING. A metric
+# computed from a default is worse than a blank: it looks like a
+# measurement.
+# ==========================================================================
+
+
+@dataclass
+class TradeMetrics:
+    risk_usd: Decimal | None = None        # qty x (entry - stop)
+    risk_pct: Decimal | None = None        # of equity at entry
+    exposure_pct: Decimal | None = None    # notional as % of equity
+    stop_pct: Decimal | None = None        # how far the stop sits below
+    pnl_usd: Decimal | None = None
+    pnl_pct: Decimal | None = None         # against the entry price
+    r_multiple: Decimal | None = None      # pnl / initial risk
+
+
+@dataclass
+class BookMetrics:
+    n_open: int = 0
+    n_closed: int = 0
+    open_exposure_usd: Decimal | None = None
+    open_risk_usd: Decimal | None = None
+    deployed_pct: Decimal | None = None
+    equity_usd: Decimal | None = None
+    wins: int = 0
+    losses: int = 0
+    win_rate: Decimal | None = None
+    avg_r: Decimal | None = None
+    best_r: Decimal | None = None
+    worst_r: Decimal | None = None
+    expectancy_r: Decimal | None = None
+    #: Closed trades that could be graded in R at all. Some cannot -
+    #: a position with no recorded stop has no initial risk to divide
+    #: by - and quietly averaging over the rest would overstate the
+    #: sample the average rests on.
+    graded: int = 0
+    enough_sample: bool = False
+
+
+def _metric_dec(value):
+    """A Decimal or None. NOT the module's _dec(), which defaults to
+    zero - and redefining that name here silently turned every cost
+    figure on the /costs page into None, because the second definition
+    won for the whole module. Caught by the stress suite; the same
+    shadowing class as `note` in panels.py and `held` in cycle.py."""
+    try:
+        d = Decimal(str(value))
+    except (ArithmeticError, TypeError, ValueError):
+        return None
+    return d if d.is_finite() else None
+
+
+def trade_metrics(st) -> TradeMetrics:
+    """Everything derivable about one trade. Never raises."""
+    m = TradeMetrics()
+    qty, entry = _metric_dec(st.qty), _metric_dec(st.entry_price)
+    stop, equity = _metric_dec(st.stop_price), _metric_dec(st.equity_at_entry)
+    notional = _metric_dec(st.notional_usd)
+
+    if entry is not None and entry > 0 and stop is not None and stop > 0:
+        m.stop_pct = (entry - stop) / entry * 100
+        if qty is not None and qty > 0:
+            m.risk_usd = qty * (entry - stop)
+    if m.risk_usd is not None and equity and equity > 0:
+        m.risk_pct = m.risk_usd / equity * 100
+    if notional is not None and equity and equity > 0:
+        m.exposure_pct = notional / equity * 100
+
+    if st.realized_pnl_cents is not None:
+        m.pnl_usd = Decimal(st.realized_pnl_cents) / 100
+        exit_px = _metric_dec(st.exit_price)
+        if entry is not None and entry > 0 and exit_px is not None:
+            m.pnl_pct = (exit_px - entry) / entry * 100
+        # R needs a POSITIVE initial risk. A zero or absent one is not a
+        # denominator, and inventing one would grade the trade against
+        # nothing.
+        if m.risk_usd is not None and m.risk_usd > 0:
+            m.r_multiple = m.pnl_usd / m.risk_usd
+    return m
+
+
+def book_metrics(stories, equity=None) -> BookMetrics:
+    """The book as a whole: what is at stake now, and how the finished
+    trades actually went.
+
+    The averages are the ones that decide whether this is working, so
+    they carry their own sample size and a flag saying whether it is
+    large enough to mean anything. MIN_TRADES_FOR_MEANING is the same
+    floor the rest of the dashboard uses.
+    """
+    from catalyst.dashboard.render import MIN_TRADES_FOR_MEANING
+
+    b = BookMetrics(equity_usd=_metric_dec(equity))
+    exposure, risk, rs = Decimal("0"), Decimal("0"), []
+    saw_exposure = saw_risk = False
+    for st in stories:
+        m = trade_metrics(st)
+        if st.status == "open":
+            b.n_open += 1
+            notional = _metric_dec(st.notional_usd)
+            if notional is not None:
+                exposure += notional
+                saw_exposure = True
+            if m.risk_usd is not None:
+                risk += m.risk_usd
+                saw_risk = True
+            if b.equity_usd is None:
+                b.equity_usd = _metric_dec(st.equity_at_entry)
+        else:
+            b.n_closed += 1
+            if m.pnl_usd is not None:
+                if m.pnl_usd >= 0:
+                    b.wins += 1
+                else:
+                    b.losses += 1
+            if m.r_multiple is not None:
+                rs.append(m.r_multiple)
+
+    b.open_exposure_usd = exposure if saw_exposure else None
+    b.open_risk_usd = risk if saw_risk else None
+    if b.open_exposure_usd is not None and b.equity_usd and b.equity_usd > 0:
+        b.deployed_pct = b.open_exposure_usd / b.equity_usd * 100
+    settled = b.wins + b.losses
+    if settled:
+        b.win_rate = Decimal(b.wins) / Decimal(settled) * 100
+    if rs:
+        b.graded = len(rs)
+        b.avg_r = sum(rs) / Decimal(len(rs))
+        b.best_r, b.worst_r = max(rs), min(rs)
+        # Expectancy in R IS the average R over the graded sample. Named
+        # separately because it is the number that answers "does this
+        # make money", and calling it an average invites reading it as a
+        # description of the past rather than an estimate of the future.
+        b.expectancy_r = b.avg_r
+    b.enough_sample = b.graded >= MIN_TRADES_FOR_MEANING
+    return b

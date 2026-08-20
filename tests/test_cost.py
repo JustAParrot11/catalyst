@@ -323,6 +323,76 @@ class TestReconciliation:
         result = reconcile_day(YESTERDAY, tmp_db, lambda d: clean_page([]))
         assert result.action_taken == "scheduled_paused"
 
+    def test_THE_OWNER_S_OWN_NUMBERS_DO_NOT_HALT_THE_BOT(self, tmp_db):
+        """OWNER-REPORTED 2026-08-20: "on 17th we spent $2.95 yet
+        dashboard says $3.36 around there ... its yet again paused the
+        bot until we confirmed".
+
+        41c on a 336c day. The relative test alone calls that 12.2% and
+        halts; the owner's own 2026-08-14 decision - "block only if
+        large", floor 50c - says it is not large. Two pause paths
+        existed and the decision had only been applied to the drift one,
+        so the day path quietly overrode it.
+
+        This is the exact arithmetic, pinned, because the wrong answer
+        stops the bot trading and the owner has now been stopped twice.
+        """
+        self.seed_local(tmp_db, "336")
+        result = reconcile_day(YESTERDAY, tmp_db,
+                               lambda d: clean_page([{"amount": "295"}]))
+        assert result.discrepancy_cents == Decimal("41")
+        assert result.action_taken == "none", (
+            "a 41c difference on a $3 day halted the bot again")
+
+    def test_but_a_SYSTEMATIC_mispricing_on_the_same_day_still_halts(
+            self, tmp_db):
+        """The direction that matters. Raising the floor must not buy
+        quiet at the cost of missing a wrong rate table - which is the
+        failure the daily check exists for. Same day, same spend, 40%
+        out instead of 12%."""
+        self.seed_local(tmp_db, "336")
+        result = reconcile_day(YESTERDAY, tmp_db,
+                               lambda d: clean_page([{"amount": "202"}]))
+        assert result.action_taken == "scheduled_paused"
+
+    def test_both_bars_must_be_cleared_not_either(self):
+        """A big absolute difference that is a small proportion is a big
+        day, not a broken ledger - and vice versa.
+
+        Asserted on the threshold itself rather than end to end, because
+        end to end a fresh database ALSO trips the drift rule: with no
+        reconciled window behind it, _window_spend is zero and drift
+        deliberately fails closed. That is right, and it would hide what
+        this test is about.
+        """
+        from catalyst.cost.tracker import (
+            RECONCILE_PAUSE_FLOOR_CENTS, RECONCILE_REL_THRESHOLD,
+        )
+
+        def day_pauses(local, api):
+            local, api = Decimal(local), Decimal(api)
+            threshold = max(RECONCILE_PAUSE_FLOOR_CENTS,
+                            RECONCILE_REL_THRESHOLD * max(local, api))
+            return (local - api).copy_abs() > threshold
+
+        assert not day_pauses("336", "295")    # 41c, 12% - under the floor
+        assert day_pauses("336", "202")        # 134c, 40% - both bars
+        assert not day_pauses("10000", "9900")  # 100c but 1% - proportion
+        assert not day_pauses("40", "10")      # 30c and 75% - under floor
+
+    def test_the_day_floor_is_the_one_the_owner_chose(self):
+        """Two pause paths, one decision. If they diverge again the bot
+        halts on a number the owner explicitly said should not halt it."""
+        from catalyst.cost.tracker import RECONCILE_PAUSE_FLOOR_CENTS
+        import inspect
+        from catalyst.cost import tracker
+
+        src = inspect.getsource(tracker.reconcile_day)
+        assert "RECONCILE_PAUSE_FLOOR_CENTS" in src, (
+            "the daily check no longer uses the owner-chosen floor, so "
+            "it can halt on a discrepancy the drift check forgives")
+        assert RECONCILE_PAUSE_FLOOR_CENTS == Decimal("50")
+
     def test_empty_api_day_with_local_spend_never_auto_acks(self, tmp_db):
         """Audit F1/F6: 'the adapter returned nothing' is not agreement."""
         self.seed_local(tmp_db, "3")  # even below the 5c floor
