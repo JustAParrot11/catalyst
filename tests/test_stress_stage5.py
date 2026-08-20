@@ -1624,9 +1624,12 @@ class TestGovernorUnderTheBoundary:
         """SURVIVED: a paused reconciliation stops all model spend until
         a human acknowledges it."""
         db.execute(
-            "INSERT INTO cost_reconciliation_events VALUES "
-            "('r1','2026-08-09','all','{}','100','40','60','5','{}',1,"
-            "'scheduled_paused',NULL,NULL,'2026-08-10T00:00:00+00:00')")
+            # Columns NAMED, never positional (CLAUDE.md).
+            "INSERT INTO cost_reconciliation_events "
+            "(id, target_date, kind, component, local_total_cents, cost_api_total_cents, discrepancy_cents, threshold_cents, api_raw_response, api_record_count, action_taken, acknowledged_by, acknowledged_at, reconciled_at) "
+            "VALUES ('r1','2026-08-09','all','{}','100','40','60','5',"
+            "'{}',1,'scheduled_paused',NULL,NULL,"
+            "'2026-08-10T00:00:00+00:00')")
         db.commit()
         broker, state = broker_for()
         report = run(db, broker, model_transport(), [candidate()])

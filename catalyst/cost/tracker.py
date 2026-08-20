@@ -463,18 +463,19 @@ def reconcile_day(
 
     page = fetch_cost_api_day(target_date)
 
-    def _insert_row(api_total, discrepancy, threshold, drift, action, auto_ack):
+    def _insert_row(api_total, discrepancy, threshold, drift, action,
+                    auto_ack, reason=None):
         conn.execute(
             "INSERT INTO cost_reconciliation_events "
             "(id, target_date, kind, component, local_total_cents, cost_api_total_cents, "
             " discrepancy_cents, threshold_cents, api_raw_response, api_record_count, "
-            " action_taken, acknowledged_by, acknowledged_at, reconciled_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " action_taken, pause_reason, acknowledged_by, acknowledged_at, reconciled_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (str(uuid.uuid4()), target_date.isoformat(),
              "all", json.dumps({k: str(v) for k, v in by_kind.items()}),
              str(local_total), str(api_total), str(discrepancy), str(threshold),
              json.dumps(page.raw_response, sort_keys=True), len(page.records),
-             action,
+             action, reason,
              "auto" if auto_ack else None,
              datetime.now(timezone.utc).isoformat() if auto_ack else None,
              datetime.now(timezone.utc).isoformat()),
@@ -485,7 +486,10 @@ def reconcile_day(
         # The refusal itself is on the record BEFORE the raise (audit F4):
         # a caller that logs-and-continues still leaves a paused row behind.
         _insert_row(Decimal("0"), Decimal("0"), Decimal("0"), Decimal("0"),
-                    "scheduled_paused", auto_ack=False)
+                    "scheduled_paused", auto_ack=False,
+                    reason=("the Cost API answered with more pages than were "
+                            "read, so the day's bill was incomplete and "
+                            "nothing could be compared against it"))
         raise TruncatedCostPageError(
             f"Cost API page for {target_date} reports has_more=True; refusing to "
             "compare against a truncated reference. The adapter must drain "
@@ -518,11 +522,34 @@ def reconcile_day(
 
     drift = signed + _trailing_signed_drift(conn, target_date)
     suspicious_empty = (not page.records) and local_total > 0
-    paused = (discrepancy > threshold
-              or suspicious_empty
-              or drift_is_material(drift, conn, target_date))
+    # WHICH TEST FIRED, in the row itself. Owner-reported 2026-08-20:
+    # seven consecutive "scheduled_paused" rows, three of them with a
+    # $0.00 discrepancy, and nothing on the page saying why any of them
+    # stopped the bot. Three different conditions pause here and they
+    # need three different responses - a rounding difference, a broken
+    # query and a month of accumulated drift are not the same problem.
+    #
+    # Recorded rather than re-derived at render time: the trailing
+    # window moves, so a reason computed later is a reason for a
+    # different day.
+    reason = None
+    if discrepancy > threshold:
+        reason = (f"the day itself was out by {discrepancy}c, over the "
+                  f"{threshold}c allowed for a day of this size "
+                  f"(local {local_total}c vs billed {api_total}c)")
+    elif suspicious_empty:
+        reason = (f"the Cost API returned no records at all while the local "
+                  f"ledger recorded {local_total}c - an empty answer is not "
+                  "agreement, and the raw response is stored beside this row")
+    elif drift_is_material(drift, conn, target_date):
+        reason = (f"this day agreed, but {drift}c of drift has accumulated "
+                  f"over the trailing {DRIFT_WINDOW_DAYS} days, which is "
+                  "both over the absolute floor and a real fraction of what "
+                  "the window cost")
+    paused = reason is not None
     action = "scheduled_paused" if paused else "none"
-    _insert_row(api_total, discrepancy, threshold, drift, action, auto_ack=not paused)
+    _insert_row(api_total, discrepancy, threshold, drift, action,
+                auto_ack=not paused, reason=reason)
 
     return ReconciliationResult(
         target_date=target_date,

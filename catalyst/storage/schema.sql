@@ -325,6 +325,12 @@ CREATE TABLE IF NOT EXISTS cost_reconciliation_events (
     api_raw_response     TEXT NOT NULL,    -- verbatim payload beside the zero (house rule 3)
     api_record_count     INTEGER NOT NULL,
     action_taken         TEXT NOT NULL,
+    -- WHICH TEST FIRED. Owner-reported 2026-08-20: seven consecutive
+    -- rows reading "scheduled_paused", three of them with a $0.00
+    -- discrepancy, and nothing anywhere saying why. A pause that halts
+    -- trading is the last thing on this dashboard that should be
+    -- unexplained (house rule 3).
+    pause_reason         TEXT,
     acknowledged_by      TEXT,
     acknowledged_at      TEXT,
     reconciled_at        TEXT NOT NULL

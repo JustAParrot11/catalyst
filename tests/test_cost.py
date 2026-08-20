@@ -27,7 +27,9 @@ from catalyst.cost.ledger import (
 from catalyst.cost.pricing import (
     RATES_MAX_AGE_DAYS,
     RATES_VERIFIED_ON,
+    WEB_SEARCH_CENTS_PER_QUERY,
     UnknownModelError,
+    rates_for,
 )
 from catalyst.cost.tracker import (
     CostApiPage,
@@ -304,6 +306,84 @@ class TestGovernor:
         assert row[0] == "cyc-42"
 
 
+class TestAgainstTheRealBill:
+    """GROUND TRUTH, fetched from the Anthropic Admin Cost and Usage
+    APIs on 2026-08-20 for the day the owner queried.
+
+    OWNER-REPORTED: "on 17th we spent $2.95 yet dashboard says $3.36
+    around there ... Use admin API to ensure were correctly getting
+    data as it feels wrong again".
+
+    It was checked, against both endpoints, and the pricing is exact.
+    What the $2.95 turned out to be is the interesting part - see
+    test_the_owners_figure_was_the_token_subtotal below.
+
+    These are real numbers off a real bill, so they are worth far more
+    than a hand-made fixture: if our arithmetic ever stops reproducing
+    them, it has stopped reproducing Anthropic's.
+    """
+
+    #: /v1/organizations/usage_report/messages, 2026-08-17, group_by model
+    REAL_USAGE = {
+        "input_tokens": 1086881,          # uncached_input_tokens
+        "output_tokens": 77829,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cache_creation": {"ephemeral_1h_input_tokens": 0,
+                           "ephemeral_5m_input_tokens": 0},
+        "server_tool_use": {"web_search_requests": 69},
+    }
+    #: /v1/organizations/cost_report, same day, group_by description
+    REAL_INPUT_COST = Decimal("217.3762")
+    REAL_OUTPUT_COST = Decimal("77.829")
+    REAL_WEB_SEARCH_COST = Decimal("69")
+    REAL_TOTAL = REAL_INPUT_COST + REAL_OUTPUT_COST + REAL_WEB_SEARCH_COST
+
+    def test_our_price_reproduces_the_real_bill_to_the_cent(self):
+        got = price(make_usage_components(self.REAL_USAGE),
+                    "claude-sonnet-5", on_date=date(2026, 8, 17))
+        assert got == self.REAL_TOTAL, (
+            f"we price this day at {got}c; Anthropic charged "
+            f"{self.REAL_TOTAL}c")
+
+    def test_the_intro_rate_is_the_one_actually_billed(self):
+        """1,086,881 input tokens cost 217.3762c, which is $2/MTok. At
+        the standard $3 it would have been 326c. The intro rate is not
+        an assumption - it is what the bill says."""
+        implied = self.REAL_INPUT_COST / Decimal(
+            self.REAL_USAGE["input_tokens"]) * Decimal("1000000")
+        assert implied == Decimal("200"), f"{implied}c/MTok billed"
+        assert rates_for("claude-sonnet-5", date(2026, 8, 17))[0] == implied
+
+    def test_web_search_is_a_cent_a_query_on_the_real_bill(self):
+        """TRAPS.md says $10/1000 queries; the bill agrees exactly.
+        69 requests, 69 cents."""
+        per = self.REAL_WEB_SEARCH_COST / Decimal(
+            self.REAL_USAGE["server_tool_use"]["web_search_requests"])
+        assert per == WEB_SEARCH_CENTS_PER_QUERY == Decimal("1")
+
+    def test_the_owners_figure_was_the_token_subtotal(self):
+        """THE ANSWER. $2.95 is the bill with WEB SEARCH LEFT OUT - the
+        single trap TRAPS.md warns understated a previous run by 89%.
+        The real total for that day was $3.64, so the local ledger was
+        never overcharging; the figure it was being compared against was
+        missing a line."""
+        tokens_only = self.REAL_INPUT_COST + self.REAL_OUTPUT_COST
+        assert tokens_only.quantize(Decimal("0.01")) == Decimal("295.21")
+        assert self.REAL_TOTAL.quantize(Decimal("0.01")) == Decimal("364.21")
+        assert self.REAL_WEB_SEARCH_COST > 0, (
+            "if a real day ever bills no web search, this test stops "
+            "demonstrating anything and should be re-fetched")
+
+    def test_caching_was_not_in_use_that_day(self):
+        """Recorded because it is a live cost lead, not a defect: every
+        cache field on the real bill is zero, so the research prompt's
+        fixed preamble is being paid for in full on every call."""
+        assert self.REAL_USAGE["cache_read_input_tokens"] == 0
+        assert self.REAL_USAGE["cache_creation"] == {
+            "ephemeral_1h_input_tokens": 0, "ephemeral_5m_input_tokens": 0}
+
+
 class TestReconciliation:
     def seed_local(self, conn, cents="100"):
         insert_cost_row(
@@ -392,6 +472,49 @@ class TestReconciliation:
             "the daily check no longer uses the owner-chosen floor, so "
             "it can halt on a discrepancy the drift check forgives")
         assert RECONCILE_PAUSE_FLOOR_CENTS == Decimal("50")
+
+    def test_EVERY_PAUSE_SAYS_WHICH_TEST_FIRED(self, tmp_db):
+        """OWNER-REPORTED 2026-08-20: seven consecutive rows reading
+        "scheduled_paused", three of them with a $0.00 discrepancy, and
+        nothing anywhere saying why any of them stopped the bot.
+
+        Three different conditions pause here and they need three
+        different responses. A pause that halts trading is the last
+        thing on this dashboard that should be unexplained (house rule
+        3), and the governor table one section below has carried a
+        reason column all along."""
+        self.seed_local(tmp_db, "1000")
+        result = reconcile_day(YESTERDAY, tmp_db,
+                               lambda d: clean_page([{"amount": "1"}]))
+        assert result.action_taken == "scheduled_paused"
+        reason = tmp_db.execute(
+            "SELECT pause_reason FROM cost_reconciliation_events"
+        ).fetchone()[0]
+        assert reason and "out by" in reason, reason
+        assert "1000" in reason and "1" in reason, (
+            "the reason does not carry the two numbers that caused it")
+
+    def test_an_empty_api_answer_says_THAT_not_something_else(self, tmp_db):
+        """3c, deliberately: a bigger figure is caught by the size test
+        first and never reaches the empty-answer branch, which exists
+        precisely for spend too small to trip anything else."""
+        self.seed_local(tmp_db, "3")
+        reconcile_day(YESTERDAY, tmp_db, lambda d: clean_page([]))
+        reason = tmp_db.execute(
+            "SELECT pause_reason FROM cost_reconciliation_events"
+        ).fetchone()[0]
+        assert "no records at all" in reason, reason
+
+    def test_a_day_that_did_not_pause_carries_no_reason(self, tmp_db):
+        """A reason on an unpaused row would read as a problem that is
+        not there."""
+        self.seed_local(tmp_db, "364")
+        result = reconcile_day(YESTERDAY, tmp_db,
+                               lambda d: clean_page([{"amount": "364"}]))
+        assert result.action_taken == "none"
+        assert tmp_db.execute(
+            "SELECT pause_reason FROM cost_reconciliation_events"
+        ).fetchone()[0] is None
 
     def test_empty_api_day_with_local_spend_never_auto_acks(self, tmp_db):
         """Audit F1/F6: 'the adapter returned nothing' is not agreement."""

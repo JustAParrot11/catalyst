@@ -1110,6 +1110,12 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
         [esc(r["target_date"]), esc(r["kind"]), dollars(r["local_total_cents"]),
          dollars(r["cost_api_total_cents"]), dollars(r["discrepancy_cents"]),
          esc(r["api_record_count"]), esc(r["action_taken"]),
+         # WHY IT PAUSED, in the row that paused. Owner-reported: seven
+         # consecutive "scheduled_paused" rows and nothing saying why
+         # any of them stopped the bot. The governor table one section
+         # below has had a reason column all along.
+         (f'<span class="prov-inline">{esc(r["pause_reason"])}</span>'
+          if r["pause_reason"] else DASH),
          esc(r["acknowledged_by"] or "-"),
          details(f"{p}-recon-raw-{i}", "raw payload", pre(json_pretty(r["api_raw_response"])))]
         for i, r in enumerate(c.reconciliation_q.rows)
@@ -1121,7 +1127,7 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
         out.append(table(
             f"{p}-recon",
             ["day", "kind", "local", "billed", "discrepancy", "API records",
-             "action", "acknowledged by", "raw"],
+             "action", "why it paused", "acknowledged by", "raw"],
             recon_rows, numeric_cols={2, 3, 4, 5},
         ))
     else:

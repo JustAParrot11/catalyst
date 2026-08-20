@@ -101,7 +101,12 @@ def seeded(tmp_path):
                      (f"ce{i}", json.dumps({"input_tokens": 1}), "claude-haiku-4-5",
                       kind, "research", cents, _iso(d1), None))
     conn.execute(
-        "INSERT INTO cost_reconciliation_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        # Columns NAMED, never positional: a new column silently shifts a
+        # positional INSERT, which is how adding pause_reason broke this
+        # fixture (CLAUDE.md). Both production writers already name theirs.
+        "INSERT INTO cost_reconciliation_events "
+        "(id, target_date, kind, component, local_total_cents, cost_api_total_cents, discrepancy_cents, threshold_cents, api_raw_response, api_record_count, action_taken, acknowledged_by, acknowledged_at, reconciled_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         ("recon-1", d1.isoformat(), "all", "{}", "21.5", "0", "21.5", "5",
          json.dumps({"data": [], "x-api-key": FAKE_ANTHROPIC_KEY}), 0,
          "scheduled_paused", None, None, _iso(d1)))
