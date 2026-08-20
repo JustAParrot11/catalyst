@@ -1386,7 +1386,8 @@ def cost_panel(db: Db, as_of: date | None = None) -> CostPanel:
     recon_q = db.q(
         "SELECT id, target_date, kind, component, local_total_cents, "
         "cost_api_total_cents, discrepancy_cents, threshold_cents, api_record_count, "
-        "action_taken, acknowledged_by, acknowledged_at, api_raw_response "
+        "action_taken, acknowledged_by, acknowledged_at, api_raw_response, "
+        "pause_reason "
         "FROM cost_reconciliation_events ORDER BY target_date DESC LIMIT 30"
     )
     unacked_q = db.q(
