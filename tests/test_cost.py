@@ -306,6 +306,99 @@ class TestGovernor:
         assert row[0] == "cyc-42"
 
 
+class TestTheOwnerDoesNotHaveToValidatePricingEveryDay:
+    """OWNER-ASKED 2026-08-20: "is it going to keep pausing spending? I
+    dont want to need to validate pricing each day".
+
+    Three things have to hold for the answer to be no, and each is a
+    test here rather than a promise:
+
+      1. the seven rows already blocking their bot clear themselves;
+      2. a corrected day reconciles to zero, so no NEW pause is written;
+      3. a genuine systematic fault still stops the bot, because "never
+         pauses" would be a worse answer than "pauses too often".
+    """
+
+    #: The owner's real reconciliation history, cents, from the
+    #: dashboard screenshot: (day, api_total, discrepancy).
+    THEIR_ROWS = [("2026-08-19", "0", "0"), ("2026-08-18", "306", "0"),
+                  ("2026-08-17", "364", "0"), ("2026-08-16", "0", "0"),
+                  ("2026-08-15", "46", "46"), ("2026-08-14", "193", "0"),
+                  ("2026-08-13", "0", "0")]
+
+    def seed_local(self, conn, cents="100"):
+        insert_cost_row(
+            conn, cents=cents,
+            at=datetime.combine(YESTERDAY, datetime.min.time(), timezone.utc))
+
+    def seed_their_pauses(self, conn):
+        import uuid
+        for day, api, disc in self.THEIR_ROWS:
+            conn.execute(
+                "INSERT INTO cost_reconciliation_events "
+                "(id,target_date,kind,component,local_total_cents,"
+                " cost_api_total_cents,discrepancy_cents,threshold_cents,"
+                " api_raw_response,api_record_count,action_taken,"
+                " acknowledged_by,acknowledged_at,reconciled_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (str(uuid.uuid4()), day, "all", "{}", api, api, disc, "5",
+                 "{}", 3, "scheduled_paused", None, None, day))
+        conn.commit()
+
+    def test_all_seven_of_their_pauses_clear_themselves(self, tmp_db):
+        """They should not have to click acknowledge seven times for
+        discrepancies the current rule says are not large."""
+        from catalyst.cost.tracker import clear_pauses_that_no_longer_qualify
+
+        self.seed_their_pauses(tmp_db)
+        assert has_unacknowledged_discrepancy(tmp_db)
+        assert clear_pauses_that_no_longer_qualify(tmp_db) == 7
+        assert not has_unacknowledged_discrepancy(tmp_db), (
+            "the bot is still blocked after the upgrade, so the owner "
+            "sees 'spending was blocked' unchanged and concludes the fix "
+            "did nothing")
+
+    def test_a_day_the_backfill_corrected_writes_no_new_pause(self, tmp_db):
+        """The forward-looking half. The nightly backfill makes the
+        ledger equal the bill BEFORE the comparison runs, so the
+        discrepancy is zero and nothing pauses."""
+        self.seed_local(tmp_db, "364.2052")
+        result = reconcile_day(
+            YESTERDAY, tmp_db,
+            lambda d: clean_page([{"amount": "364.2052"}]))
+        assert result.discrepancy_cents == Decimal("0.0000")
+        assert result.action_taken == "none"
+
+    def test_but_a_REAL_fault_still_stops_it(self, tmp_db):
+        """The direction that matters. A rule that never pauses is worse
+        than one that pauses too often: the whole point of the check is
+        to catch a ledger that has stopped describing the bill."""
+        self.seed_local(tmp_db, "364")
+        result = reconcile_day(YESTERDAY, tmp_db,
+                               lambda d: clean_page([{"amount": "50"}]))
+        assert result.action_taken == "scheduled_paused"
+
+    def test_a_still_material_old_pause_is_NOT_auto_cleared(self, tmp_db):
+        """Clearing is a re-judgement, not an amnesty."""
+        import uuid
+
+        from catalyst.cost.tracker import clear_pauses_that_no_longer_qualify
+
+        tmp_db.execute(
+            "INSERT INTO cost_reconciliation_events "
+            "(id,target_date,kind,component,local_total_cents,"
+            " cost_api_total_cents,discrepancy_cents,threshold_cents,"
+            " api_raw_response,api_record_count,action_taken,"
+            " acknowledged_by,acknowledged_at,reconciled_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (str(uuid.uuid4()), "2026-08-01", "all", "{}", "1000", "100",
+             "900", "5", "{}", 3, "scheduled_paused", None, None,
+             "2026-08-01"))
+        tmp_db.commit()
+        assert clear_pauses_that_no_longer_qualify(tmp_db) == 0
+        assert has_unacknowledged_discrepancy(tmp_db)
+
+
 class TestAgainstTheRealBill:
     """GROUND TRUTH, fetched from the Anthropic Admin Cost and Usage
     APIs on 2026-08-20 for the day the owner queried.

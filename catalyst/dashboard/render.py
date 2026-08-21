@@ -302,6 +302,21 @@ h3 { font-size: 11px; margin: 14px 0 5px 0; text-transform: uppercase;
 /* THE ACCOUNT-VALUE BRIDGE. Segment widths are proportional to the
    STARTING capital, never rescaled to fill the bar - a $3 API bill
    against $2,000 should look like a sliver, because it is one. */
+/* AN ACTION THAT DESTROYS SOMETHING. Styled to look deliberate rather
+   than convenient: it discards real history, so it should never be the
+   easiest thing on the page to click. */
+.danger-form { border: 1px solid var(--critical); border-radius: 6px;
+  padding: 12px 16px; margin: 12px 0; background: var(--crit-wash);
+  max-width: 640px; }
+.danger-form p { margin: 0 0 8px; font-size: var(--t-base); }
+.danger-form label { font-size: var(--t-fine); color: var(--ink-2); }
+.danger-form input { font-family: ui-monospace, SFMono-Regular, Menlo,
+  monospace; padding: 4px 8px; margin: 0 8px; border-radius: 4px;
+  border: 1px solid var(--hairline); }
+.danger-form button { padding: 5px 12px; border-radius: 4px;
+  border: 1px solid var(--critical); background: transparent;
+  color: var(--critical); cursor: pointer; font-weight: 600; }
+.danger-form button:hover { background: var(--critical); color: #fff; }
 .bridge { border: 1px solid var(--hairline); border-radius: 6px;
   padding: 10px 16px 14px; margin: 14px 0; background: var(--surface); }
 .bridge h3 { margin: 0 0 8px; font-size: 0.95em; color: var(--ink-2); }

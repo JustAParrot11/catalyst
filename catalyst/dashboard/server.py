@@ -145,7 +145,14 @@ def route_overview(db: Db, params: dict) -> str:
 
 
 def route_performance(db: Db, params: dict) -> str:
-    return render_page("Performance",
+    banner = ""
+    if params.get("rebuilt") == ["ok"]:
+        banner = section(
+            "spy-rebuilt", "SPY series rebuilt",
+            "<p>The comparison was refetched on a feed your current Alpaca "
+            "keys can reach. The page below names which feed it is on - "
+            "the basis matters, so it is stated rather than implied.</p>")
+    return render_page("Performance", banner +
                        panels.performance_panel(db, p="perf")
                        + panels.value_reconciliation_panel(db, p="val"),
                        "/performance", db.path, db=db)
@@ -907,6 +914,46 @@ def set_benchmark(db_file: str, form: dict) -> tuple[bool, str]:
                   "below.")
 
 
+def rebuild_spy_series(confirm: str) -> tuple[bool, str]:
+    """Throw the SPY comparison away and refetch it on a feed the
+    current Alpaca keys can actually reach.
+
+    OWNER-REPORTED: "the SPY comparison line has disappeared so i cant
+    visually see if we're beating SPY", days after replacing the Alpaca
+    keys. The cache pins its feed on purpose - a series half
+    consolidated tape and half one exchange's prints makes every
+    comparison against it quietly wrong - so a key that loses the
+    subscription the cache was built on can never refresh again.
+
+    DESTRUCTIVE, AND BEHIND A TYPED CONFIRMATION. It discards real
+    history. Nothing calls it on a schedule and it cannot be triggered
+    by a stray click; the alternative on offer is a comparison that
+    never comes back, so the trade is worth OFFERING, not worth making
+    on the owner's behalf.
+    """
+    if confirm.strip().upper() != "REBUILD":
+        return False, ("type REBUILD to confirm: this discards the stored "
+                       "SPY history and fetches it again")
+    try:
+        from catalyst.data.benchmark import rebuild_benchmark
+        from catalyst.dashboard.db import bars_path
+        from catalyst.setup.credentials import load_credentials
+
+        creds = load_credentials()
+    except Exception as exc:  # noqa: BLE001 - shown, never raised
+        return False, f"could not read the Alpaca credentials: {exc}"
+    if not creds.alpaca_key or not creds.alpaca_secret:
+        return False, ("no Alpaca credentials are saved, so there is "
+                       "nothing to fetch the series with")
+    result = rebuild_benchmark(bars_path(), creds.alpaca_key,
+                               creds.alpaca_secret)
+    if result.skipped_reason and result.skipped_reason != "already_current":
+        return False, (f"the rebuild did not succeed ({result.skipped_reason}). "
+                       f"Upstream said: {(result.raw_response or '')[:400]}")
+    return True, (f"rebuilt on the {result.feed} feed, "
+                  f"{result.written} bar(s) written")
+
+
 def acknowledge(db_file: str, event_id: str, acknowledged_by: str) -> tuple[bool, str]:
     """The one write the dashboard owns. Opens its OWN read-write
     connection - the page-rendering handle is mode=ro and physically
@@ -1117,6 +1164,29 @@ class Handler(BaseHTTPRequestHandler):
                             alarm(esc(message))
                             + "<p><a href='/costs'>back to the cost page</a></p>"),
                     "/costs", db.path)
+            finally:
+                db.close()
+            return self._send_html(400, body)
+
+        if parsed.path == "/rebuild-benchmark":
+            okay, message = rebuild_spy_series(form.get("confirm", ""))
+            if okay:
+                self.send_response(303)
+                self.send_header("Location", "/performance?rebuilt=ok")
+                _no_store_headers(self, "text/plain", 0)
+                self.end_headers()
+                return
+            db = Db(db_file)
+            try:
+                body = render_page(
+                    "Rebuild failed",
+                    section("spy-fail", "The SPY series was not rebuilt",
+                            alarm(esc(message))
+                            + "<p>Nothing was discarded - the series is "
+                            "exactly as it was.</p>"
+                            "<p><a href='/performance'>back to "
+                            "performance</a></p>"),
+                    "/performance", db.path)
             finally:
                 db.close()
             return self._send_html(400, body)
