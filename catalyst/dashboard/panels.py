@@ -36,6 +36,7 @@ from catalyst.dashboard.render import (
     pill,
     pre,
     prov,
+    prov_html,
     raw,
     section,
     signed_pct,
@@ -941,7 +942,7 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
     # raises itself on evidence but never lowers itself - lowering the
     # seed is a human decision, and this is the number it needs.
     if c.search_tokens_observed is None:
-        out.append(prov(
+        out.append(prov_html(
             f'<span id="{p}-search-tokens">A web search is estimated to add '
             f"<b>{c.search_tokens_seed:,}</b> input tokens, from one measured "
             f"call. Only {c.search_tokens_sample} searching turn(s) have been "
@@ -953,7 +954,7 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
                      else "below the seed, and the estimate is deliberately "
                           "NOT lowered by itself - that is a change for you "
                           "to make, not for the bot to make on a quiet spell")
-        out.append(prov(
+        out.append(prov_html(
             f'<span id="{p}-search-tokens">A web search was seeded at '
             f"<b>{c.search_tokens_seed:,}</b> input tokens from a single call. "
             f"Measured across {c.search_tokens_sample} searching turns, the "
@@ -4458,7 +4459,7 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
         if gaps and latest[1] == "ok":
             out.append(caveat(
                 f"{len(gaps)} earlier check(s) found no resting stop, the "
-                f"first at {esc(gaps[0][0])} &mdash; resolved, and kept "
+                f"first at {gaps[0][0]} {DASH} resolved, and kept "
                 "because a position that was briefly unprotected is worth "
                 "knowing about even once it is fixed."))
         rows = [[esc(when), esc(status),
@@ -4820,7 +4821,10 @@ def story_panel(db: Db, params: dict | None = None, p: str = "story") -> str:
     headline_text = d.headline or "(the stored story carries no headline)"
     out.append(
         f'<p class="lead" id="{p}-headline">{esc(headline_text)}</p>')
-    out.append(prov(
+    # prov_html, not prov: the parts are already escaped and there is a
+    # <code> tag here. prov() would escape it all a second time and
+    # print the tag on the page.
+    out.append(prov_html(
         f"{esc(d.publisher or 'publisher not recorded')}, "
         f"{esc(d.when or 'date not recorded')}. Stored id "
         f"<code>{esc(d.source_id)}</code>. This is the feed's own text, "

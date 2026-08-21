@@ -447,11 +447,13 @@ h3 { font-size: 11px; margin: 14px 0 5px 0; text-transform: uppercase;
 .tiles { display: grid; gap: 1px; margin: 8px 0 10px 0;
          background: var(--hairline); border: 1px solid var(--hairline);
          grid-template-columns: repeat(auto-fit, minmax(158px, 1fr)); }
-.tile { background: var(--surface-2); padding: 7px 10px; }
+.tile { background: var(--surface-2); padding: 8px 11px;
+        border-top: 2px solid transparent; }
+.tile:hover { border-top-color: var(--accent); }
 .tile-label { font-size: var(--t-micro); text-transform: uppercase; letter-spacing: .13em;
               color: var(--muted); margin: 0 0 4px 0; font-weight: 700; }
 .tile-value { font-size: var(--t-fig); font-weight: 600; letter-spacing: -.02em;
-              margin: 0; line-height: 1.15; }
+              margin: 0; line-height: 1.15; color: var(--ink); }
 .tile-sub { font-size: var(--t-fine); color: var(--ink-2); margin: 5px 0 0 0; }
 /* A pill followed by prose on one line reads as a run-on. */
 .tile-sub .pill { display: flex; width: fit-content; margin-bottom: 3px; }
@@ -468,13 +470,20 @@ h3 { font-size: 11px; margin: 14px 0 5px 0; text-transform: uppercase;
              border-color: var(--baseline); }
 
 table { border-collapse: collapse; width: 100%; margin: 0; font-size: 12.5px; }
-th, td { border-bottom: 1px solid var(--hairline); padding: 5px 10px;
+th, td { border-bottom: 1px solid var(--hairline); padding: 4px 10px;
          text-align: left; vertical-align: top; }
+/* Alternating ground. On a blotter the eye tracks ACROSS a row while
+   comparing DOWN a column, and a hairline alone does not hold it. */
+tbody tr:nth-child(even) { background: var(--grid-head); }
+/* The first column is the row's identity - ticker, day, rule name -
+   so it carries the weight and everything else recedes to data. */
+tbody td:first-child { color: var(--ink); font-weight: 600; }
 th { background: var(--grid-head); font-weight: 700; font-size: 9.5px;
      text-transform: uppercase; letter-spacing: .12em; color: var(--muted);
      border-bottom: 1px solid var(--accent); position: sticky; top: 0; }
-tbody tr:hover { background: var(--surface-2); }
-tbody tr:hover td { border-bottom-color: var(--baseline); }
+tbody tr:hover, tbody tr:nth-child(even):hover {
+    background: var(--rail-active); }
+tbody tr:hover td { border-bottom-color: var(--accent); }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums;
                  font-feature-settings: "tnum" 1, "zero" 1; }
 /* Scanning a column is the core motion on this page, so the row under
@@ -489,8 +498,23 @@ pre { background: #14140f; color: #e8e8e0; padding: 10px; overflow-x: auto;
       font-size: 12px; border-radius: 2px; white-space: pre-wrap;
       word-break: break-word; max-height: 380px; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-details { margin: 7px 0; }
-summary { cursor: pointer; font-size: 13px; color: var(--series-1); }
+/* DISCLOSURES RECEDE. Owner-reported 2026-08-21 that the page felt
+   full of "why is this here or what does this do" dropdowns. Several
+   were genuinely empty (fixed in section/digest); the rest were styled
+   as blue links at body size, which on a page carrying a dozen of them
+   reads as a dozen primary actions. They are optional detail, and they
+   should look like it: micro-label register, muted, no link colour. */
+details { margin: 6px 0; }
+summary { cursor: pointer; font-size: var(--t-fine); color: var(--muted);
+          text-transform: uppercase; letter-spacing: .1em;
+          font-weight: 600; padding: 2px 0; user-select: none; }
+summary:hover { color: var(--accent); }
+summary::marker { color: var(--baseline); }
+details[open] > summary { margin-bottom: 6px;
+                          border-bottom: 1px solid var(--hairline); }
+/* A fold inside a fold is detail about detail: quieter again. */
+details details > summary { text-transform: none; letter-spacing: 0;
+                            font-weight: 400; }
 footer { color: var(--muted); font-size: 11.5px;
          padding: 12px 22px 26px 22px; margin-top: auto;
          border-top: 1px solid var(--hairline); }
@@ -955,6 +979,10 @@ def page(title: str, body: str, active: str, db_path: str, notes: str = "",
 
 #: Matches a provenance paragraph, including its id when it carries one.
 _PROV_RE = re.compile(r'<p class="prov"[^>]*>.*?</p>', re.S)
+#: A workings fold this module has already built. Masked out before the
+#: harvest so a nested section() cannot empty it - see section().
+_WORKINGS_RE = re.compile(
+    r'<details class="workings".*?</details>', re.S)
 #: Explanation that a SUMMARY page folds away. Every one of these is a
 #: flat element by construction (see note/caveat/prov below), so a
 #: non-greedy match cannot swallow a sibling.
@@ -963,6 +991,43 @@ _EXPLAIN_RE = re.compile(
     r'|<div class="note"[^>]*>.*?</div>'
     r'|<div class="caveat"[^>]*>.*?</div>'
     r'|<p class="funnel-plain"[^>]*>.*?</p>', re.S)
+
+
+def _mask_disclosures(html: str) -> str:
+    """A same-length copy of `html` with everything inside a <details>
+    blanked out.
+
+    OWNER-REPORTED 2026-08-21: "loads of why is this here or what does
+    this do dropdown with no data" - five on the Overview alone, each
+    promising "Where these N figures came from" and opening onto
+    nothing.
+
+    THE CAUSE, and it bit at two levels. section() folds a panel's
+    provenance away; digest() then folds a panel's explanation away for
+    the Overview. Both worked by finding explanation anywhere in the
+    HTML - including inside a fold the other one had just built. The
+    outer pass cut those lines out of the inner disclosure and moved
+    them into its own, leaving the first one with its promise and none
+    of its contents.
+
+    Masking rather than deleting, so every offset in the real string
+    still lines up and the caller can slice by index.
+    """
+    out = list(html)
+    depth, i = 0, 0
+    while i < len(html):
+        if html.startswith("<details", i):
+            depth += 1
+            i = html.find(">", i) + 1 or i + 8
+            continue
+        if html.startswith("</details>", i):
+            depth = max(0, depth - 1)
+            i += len("</details>")
+            continue
+        if depth:
+            out[i] = " "
+        i += 1
+    return "".join(out)
 
 
 def digest(html: str) -> str:
@@ -979,10 +1044,15 @@ def digest(html: str) -> str:
     not explanation, they are the page telling you something is wrong,
     and a summary that hides them is worse than no summary.
     """
-    parts = _EXPLAIN_RE.findall(html)
-    if len(parts) < 2:
+    # Only explanation still LOOSE on the page may be folded. Anything
+    # already inside a disclosure belongs to that disclosure.
+    masked = _mask_disclosures(html)
+    spans = [(m.start(), m.end()) for m in _EXPLAIN_RE.finditer(masked)]
+    if len(spans) < 2:
         return html
-    kept = _EXPLAIN_RE.sub("", html)
+    parts = [html[a:b] for a, b in spans]
+    kept = "".join(ch for i, ch in enumerate(html)
+                   if not any(a <= i < b for a, b in spans))
     fold = ('<details class="workings"><summary>'
             f"Why these {len(parts)} figures read as they do, and where they "
             "came from</summary>" + "".join(parts) + "</details>")
@@ -1011,9 +1081,27 @@ def section(sid: str, title: str, body: str) -> str:
     Done here, in the one place every panel already passes through, so
     no panel has to remember to do it.
     """
-    provs = _PROV_RE.findall(body)
+    # NEVER HARVEST OUT OF A FOLD THIS FUNCTION ALREADY MADE.
+    #
+    # OWNER-REPORTED 2026-08-21: "loads of why is this here or what does
+    # this do dropdown with no data". Five of them were on the Overview
+    # alone, each promising "Where these N figures came from" and then
+    # opening onto nothing.
+    #
+    # Cause: panels compose - a section inside a section. The inner call
+    # moved its provenance into a workings fold; the outer call then
+    # found those same lines INSIDE that fold, cut them out of it, and
+    # put them in a new one. The inner disclosure was left with its
+    # promise and none of its contents.
+    #
+    # So the already-folded region is masked before the harvest.
+    masked = _mask_disclosures(body)
+    provs = _PROV_RE.findall(masked)
     if len(provs) > 1:
-        body = _PROV_RE.sub("", body)
+        keep = [(m.start(), m.end()) for m in _PROV_RE.finditer(masked)]
+        body = "".join(
+            ch for i, ch in enumerate(body)
+            if not any(a <= i < b for a, b in keep))
         body += (f'<details class="workings" id="{esc(sid)}-workings">'
                  f"<summary>Where these {len(provs)} figures came from"
                  "</summary>" + "".join(provs) + "</details>")
@@ -1023,6 +1111,20 @@ def section(sid: str, title: str, body: str) -> str:
 def prov(text: str) -> str:
     """Provenance line. Every number on this dashboard gets one."""
     return f'<p class="prov">{esc(text)}</p>'
+
+
+def prov_html(html_text: str) -> str:
+    """A provenance line whose text is already HTML.
+
+    prov() escapes, which is right for the many callers passing plain
+    strings and silently turns <b> into visible &lt;b&gt; for anyone who
+    forgets. Three call sites had forgotten, printing raw span and b
+    tags on the Overview and the news map. Same trap as passing &mdash;
+    through esc(), which this dashboard has been bitten by before.
+
+    Still a .prov, so section() folds it away with the rest.
+    """
+    return f'<p class="prov">{html_text}</p>'
 
 
 def figcap(html_text: str) -> str:
@@ -1077,7 +1179,11 @@ def caveat_fold(cid: str, summary: str, texts: list) -> str:
     that one changes, and it is the one that stops a number being read
     as a verdict.
     """
-    inner = "".join(caveat(t) for t in texts)
+    inner = "".join(caveat(t) for t in texts if (t or "").strip())
+    if not inner:
+        # The summary said "Open for the full wording" and there was
+        # none. A caveat with no text is not a caveat.
+        return ""
     return (f'<details class="caveat" id="{esc(cid)}">'
             f"<summary>{esc(summary)}</summary>{inner}</details>")
 
@@ -1095,6 +1201,15 @@ def pre(text) -> str:
 
 
 def details(did: str, summary: str, inner_html: str) -> str:
+    """A disclosure, or nothing at all.
+
+    A <details> whose body is empty is the worst thing on a page: it
+    invites a click and answers with a blank. Owner-reported as
+    "dropdown with no data", and the fix belongs HERE rather than at
+    each call site, because every future caller gets it too.
+    """
+    if not (inner_html or "").strip():
+        return ""
     return (
         f'<details id="{esc(did)}"><summary>{esc(summary)}</summary>'
         f"{inner_html}</details>"
