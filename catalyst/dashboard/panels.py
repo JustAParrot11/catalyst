@@ -206,6 +206,11 @@ def performance_panel(db: Db, p: str = "perf") -> str:
          "needed before any number here means anything"),
     ]))
 
+    # THE ACCOUNT-VALUE TILE, TAKEN APART. One figure stood for the
+    # money you started with, paper trading profit and a real API bill;
+    # only one of those has actually left a card.
+    out.append(_equity_bridge(perf, p))
+
     # WHAT THE COMPARISON IS AGAINST, before any number is read.
     out.append(_baseline_block(perf, p))
 
@@ -4462,10 +4467,14 @@ def trades_panel(db: Db, params: dict | None = None, p: str = "tr") -> str:
         return section(f"{p}-section", "Trades: what was bought and why",
                        "".join(out))
 
-    out.append(tiles(f"{p}-tiles", [
-        ("Open now", f"{d.n_open}", "positions the bot is holding"),
-        ("Closed", f"{d.n_closed}", "finished trades, with their result"),
-    ]))
+    # THE BOOK FIRST, then the blotter, then the dossiers. Owner-
+    # reported the page "doesnt feel professional enough" and wanted
+    # "better metrics": counting open and closed positions is not a
+    # metric, it is an inventory. What is at stake, how much of the
+    # account is working, and what a unit of risk has actually returned
+    # are the three a book is judged on.
+    out.append(_book_strip(d.stories, p))
+    out.append(_blotter(d.stories, p))
     # ALWAYS FOLDED. Owner-reported twice: "its already uncollapsed which
     # will get messy as there are many open and closed trades", and then
     # "for the trades tab its auto expanded". The first version kept an
@@ -5098,3 +5107,190 @@ def next_actions_panel(db: Db, p: str = "na") -> str:
         "visible from a schedule. The Overview and Cost pages are where "
         "those live.</p>")))
     return section(f"{p}-section", "What happens next", "".join(out))
+
+
+def _equity_bridge(perf, p: str) -> str:
+    """What actually moved the account value, as parts rather than a sum.
+
+    OWNER-ASKED: the account-value tile is one figure standing for four
+    different things - the money you started with, trading profit that
+    is currently FICTIONAL because the account is paper, and an API bill
+    that is real money leaving a real card. The brief is explicit about
+    this ("Paper P&L is fictional; the API bill is real money") and the
+    tile was quietly averaging the two into a single number that read as
+    one kind of thing.
+
+    A bridge, because the question is never "what is the total" - it is
+    "what moved it, and which of those do I actually care about".
+
+    WHAT IT DELIBERATELY DOES NOT CONTAIN: unrealised profit on open
+    positions. net_equity_cents is built from CLOSED trades only, so an
+    open winner is invisible here. Said on the page rather than left for
+    the owner to discover by arithmetic.
+    """
+    start = Decimal(perf.start_capital_cents or 0)
+    pnl = Decimal(perf.gross_pnl_cents or 0)
+    sched = Decimal(perf.scheduled_cost_cents or 0)
+    manual = Decimal(perf.manual_cost_cents or 0)
+    net = Decimal(perf.net_equity_cents or 0)
+    api = sched + manual
+    if start <= 0:
+        return ""
+
+    # Widths are proportional to the START, so the bar reads as "how
+    # much of the account did this move" rather than being rescaled to
+    # make a tiny cost look large.
+    def pct(v):
+        return float(abs(v) / start * 100) if start else 0.0
+
+    segs = []
+    if pnl:
+        segs.append(("pnl", pnl, "trading" + (" profit" if pnl > 0 else " loss")))
+    if api:
+        segs.append(("api", -api, "API spend"))
+    bars = "".join(
+        f'<span class="bridge-seg bridge-{kind}" '
+        f'style="width:{min(pct(v), 100):.2f}%" '
+        f'title="{esc(label)}: {dollars(abs(v))}"></span>'
+        for kind, v, label in segs)
+
+    rows = [
+        ["Started with", dollars(start), "the baseline this is measured from"],
+        ["Trading profit or loss", dollars(pnl),
+         (f"{pill('idle', 'paper')} closed trades only &mdash; fictional "
+          "until the account is live")],
+        ["API spend", "-" + dollars(api),
+         (f"{pill('crit', 'real money')} {dollars(sched)} scheduled, "
+          f"{dollars(manual)} manual")],
+        ["<b>Account value</b>", f"<b>{dollars(net)}</b>",
+         "what the two above leave"],
+    ]
+    return (
+        f'<div class="bridge" id="{p}-bridge">'
+        "<h3>What moved the account value</h3>"
+        f'<div class="bridge-bar"><span class="bridge-seg bridge-start" '
+        f'style="width:100%"></span>{bars}</div>'
+        + table(f"{p}-bridge-t", ["", "amount", "what it is"], rows,
+                numeric_cols={1})
+        + figcap(
+            "<b>These are not the same kind of number.</b> The trading "
+            "line is paper and settles nothing; the API line has already "
+            "left a real card. Open positions are NOT in this - it is "
+            "built from closed trades, so an open winner is invisible "
+            "here until it closes.")
+        + "</div>")
+
+
+def _pct(value, places=1):
+    return DASH if value is None else f"{value:.{places}f}%"
+
+
+def _r(value):
+    """An R multiple. Signed always: +1.8R and -1.0R are the two things
+    a reader is scanning for, and an unsigned 1.8 hides which."""
+    return DASH if value is None else f"{value:+.2f}R"
+
+
+def _blotter(stories, p: str) -> str:
+    """Every position on one dense line, the way a book is actually read.
+
+    OWNER-REPORTED: "The trades part doesnt feel professional enough, i
+    want better metrics, i feels like a robot made it".
+
+    The page printed what was STORED - price, quantity, dollars - and
+    left every derived number to the reader. A blotter is defined by the
+    derived ones, and the two that matter were both sitting in the
+    database already:
+
+      RISK. qty x (entry - stop) is the money actually at stake. Showing
+      notional without it says how much was SPENT, not how much can be
+      LOST, and here those differ by a factor of ten. It is also the
+      number the position was sized from, so without it the sizing
+      cannot be checked.
+
+      R MULTIPLE. Result divided by that initial risk. It is how a
+      discretionary book is graded, because it makes a $40 win on $10 of
+      risk and a $400 win on $100 of risk the same result - which they
+      are. Raw P&L flatters whichever trade happened to be biggest.
+
+    Figures are right-aligned and tabular so columns can be compared
+    down the page rather than read across it.
+    """
+    if not stories:
+        return ""
+    rows = []
+    for i, st in enumerate(stories):
+        m = queries.trade_metrics(st)
+        live = st.status == "open"
+        rows.append([
+            f'<a href="/trades?id={esc(st.position_id)}">'
+            f"<b>{esc(st.ticker)}</b></a>",
+            pill("good" if live else "idle", "open" if live else "closed"),
+            esc(str(st.opened_at)[:10]),
+            esc(st.qty or DASH),
+            f"${esc(st.entry_price)}" if st.entry_price else DASH,
+            f"${esc(st.stop_price)}" if st.stop_price else DASH,
+            _pct(m.stop_pct),
+            dollars(m.risk_usd * 100) if m.risk_usd is not None else DASH,
+            _pct(m.exposure_pct, 0),
+            (dollars(m.pnl_usd * 100) if m.pnl_usd is not None else DASH),
+            _r(m.r_multiple),
+            f"{float(st.conviction):.2f}" if st.conviction is not None else DASH,
+        ])
+    return (
+        "<h3>Positions</h3>"
+        + table(f"{p}-blotter",
+                ["ticker", "state", "opened", "qty", "entry", "stop",
+                 "stop dist", "risk $", "exposure", "result", "R", "conv"],
+                rows, numeric_cols={3, 4, 5, 6, 7, 8, 9, 10, 11})
+        + figcap(
+            "<b>Risk $</b> is what this position can lose if the stop "
+            "does its job &mdash; quantity times the distance from the "
+            "fill to the stop, and the number the size was worked out "
+            "from. <b>R</b> is the result as a multiple of that risk, "
+            "which is how a book is graded: it makes a small win on a "
+            "small risk and a large win on a large risk read as the same "
+            "result, because they are."))
+
+
+def _book_strip(stories, p: str) -> str:
+    """The book, not the trades: what is at stake now and how the
+    finished ones actually went - with the sample size attached to every
+    average, because at this many trades none of them mean anything yet
+    and a page that implies otherwise is worse than a blank one."""
+    b = queries.book_metrics(stories)
+    at_risk = (dollars(b.open_risk_usd * 100)
+               if b.open_risk_usd is not None else DASH)
+    deployed = _pct(b.deployed_pct, 0)
+    tiles_ = [
+        ("At risk now", at_risk,
+         f"{b.n_open} open &mdash; the most the stops should let go"),
+        ("Deployed", deployed,
+         (dollars(b.open_exposure_usd * 100)
+          if b.open_exposure_usd is not None else DASH) + " of the account"),
+    ]
+    if b.graded:
+        state = "good" if b.enough_sample else "warn"
+        tiles_.append((
+            "Expectancy", _r(b.expectancy_r),
+            f"{pill(state, f'{b.graded} of {MIN_TRADES_FOR_MEANING}')} "
+            "graded trades &mdash; average result per unit of risk"))
+        tiles_.append((
+            "Win rate", _pct(b.win_rate, 0),
+            f"{b.wins} won, {b.losses} lost"))
+    else:
+        tiles_.append((
+            "Expectancy", DASH,
+            f"{pill('idle', 'no closed trades')} needs a finished trade "
+            "with a recorded stop to grade"))
+    out = [tiles(f"{p}-book", tiles_)]
+    if b.graded and not b.enough_sample:
+        out.append(caveat(
+            f"Expectancy and win rate rest on {b.graded} trade(s). "
+            f"{MIN_TRADES_FOR_MEANING} is the floor this dashboard uses "
+            "before a number like that is allowed to mean anything - "
+            "until then they describe what happened, not what to expect."))
+    if b.best_r is not None and b.graded > 1:
+        out.append(figcap(
+            f"Best {_r(b.best_r)}, worst {_r(b.worst_r)}."))
+    return "".join(out)

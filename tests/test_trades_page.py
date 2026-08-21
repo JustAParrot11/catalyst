@@ -835,3 +835,153 @@ class TestAChartKeepsItsLegend:
         out = section("s", "T", '<p class="prov">a</p><p class="prov">b</p>')
         assert "workings" in out
         assert out.index("workings") < out.index(">a<")
+
+
+# ==========================================================================
+# "The trades part doesnt feel professional enough, i want better
+#  metrics, i feels like a robot made it, re-design that page entirely"
+#
+# The page printed what was STORED and left every derived number to the
+# reader. These test the two that a book is actually judged on, both of
+# which were computable from data already on disk.
+# ==========================================================================
+
+
+class TestTheDerivedMetrics:
+    def test_risk_is_qty_times_the_distance_to_the_stop(self, tmp_path):
+        """79.1295 x (5.06 - 4.55) = $40.36. THE number the position was
+        sized from, and the page never showed it."""
+        d = queries.trades(Db(_seed(tmp_path)))
+        m = queries.trade_metrics(d.stories[0])
+        assert m.risk_usd is not None
+        assert round(float(m.risk_usd), 2) == 40.36
+
+    def test_risk_is_not_the_same_as_what_was_spent(self, tmp_path):
+        """$400 committed, $40 at stake. Showing only the first says how
+        much was spent, not how much can be lost."""
+        d = queries.trades(Db(_seed(tmp_path)))
+        m = queries.trade_metrics(d.stories[0])
+        assert float(m.risk_usd) < float(d.stories[0].notional_usd) / 5
+
+    def test_R_is_the_result_over_the_initial_risk(self, tmp_path):
+        """ACME lost $19.00 against $30.00 of risk = -0.63R."""
+        d = queries.trades(Db(_seed_two(tmp_path)))
+        acme = [s for s in d.stories if s.ticker == "ACME"][0]
+        m = queries.trade_metrics(acme)
+        assert round(float(m.r_multiple), 2) == -0.63
+
+    def test_R_is_None_rather_than_infinite_without_a_stop(self):
+        """A trade with no recorded stop has no initial risk to divide
+        by. Inventing one grades it against nothing."""
+        st = queries.TradeStory(ticker="X", qty="10", entry_price="10",
+                                stop_price="", realized_pnl_cents=500)
+        assert queries.trade_metrics(st).r_multiple is None
+
+    @pytest.mark.parametrize("field,bad", [
+        ("qty", "abc"), ("entry_price", ""), ("stop_price", "nan"),
+        ("entry_price", "0"),
+    ])
+    def test_unusable_inputs_give_None_not_a_wrong_number(self, field, bad):
+        st = queries.TradeStory(ticker="X", qty="10", entry_price="10",
+                                stop_price="9")
+        setattr(st, field, bad)
+        m = queries.trade_metrics(st)
+        assert m.risk_usd is None or m.r_multiple is None
+
+    def test_the_blotter_shows_them_both(self, tmp_path):
+        html = _page(_seed_two(tmp_path))
+        assert "risk $" in html and ">R<" in html
+        assert "$40.36" in html
+        assert "-0.63R" in html
+
+    def test_R_is_always_signed(self, tmp_path):
+        """+1.8R and -1.0R are what a reader scans for; an unsigned 1.8
+        hides which one it is."""
+        html = _page(_seed_two(tmp_path))
+        assert re.search(r"[-+]\d+\.\d\dR", html)
+
+    def test_figures_are_right_aligned_for_scanning(self, tmp_path):
+        html = _page(_seed_two(tmp_path))
+        blot = html[html.index('id="tr-blotter"'):]
+        assert blot.count('class="num"') >= 9, (
+            "the numeric columns are not right-aligned, so they cannot "
+            "be compared down the page")
+
+
+class TestTheBookNotJustTheTrades:
+    def test_it_says_what_is_at_stake_right_now(self, tmp_path):
+        html = _page(_seed_two(tmp_path))
+        assert "At risk now" in html and "$40.36" in html
+
+    def test_expectancy_carries_its_sample_size(self, tmp_path):
+        """One trade is not an expectancy. A page that implies otherwise
+        is worse than a blank one."""
+        html = _page(_seed_two(tmp_path))
+        assert "Expectancy" in html
+        assert f"1 of {panels.MIN_TRADES_FOR_MEANING}" in html
+        assert "describe what happened, not what to expect" in html
+
+    def test_with_no_closed_trades_it_refuses_to_show_one(self, tmp_path):
+        html = _page(_seed(tmp_path))
+        assert "no closed trades" in html
+
+    def test_book_metrics_never_average_ungradeable_trades(self):
+        """A closed trade with no stop cannot be expressed in R. Counting
+        it as 0R would drag the average toward nothing."""
+        ok = queries.TradeStory(ticker="A", status="closed", qty="10",
+                                entry_price="10", stop_price="9",
+                                realized_pnl_cents=1000)
+        no_stop = queries.TradeStory(ticker="B", status="closed", qty="10",
+                                     entry_price="10", stop_price="",
+                                     realized_pnl_cents=1000)
+        b = queries.book_metrics([ok, no_stop])
+        assert b.n_closed == 2
+        assert b.graded == 1, "an ungradeable trade entered the average"
+        assert round(float(b.expectancy_r), 2) == 1.0
+
+    def test_an_empty_book_produces_no_invented_figures(self):
+        b = queries.book_metrics([])
+        assert b.expectancy_r is None and b.win_rate is None
+        assert b.open_risk_usd is None
+
+
+class TestTheAccountValueIsBrokenIntoItsParts:
+    """The tile stood for four different things at once, and only one of
+    them has actually left a card."""
+
+    def _perf_page(self, tmp_path):
+        db = Db(_seed(tmp_path))
+        try:
+            return panels.performance_panel(db, p="perf")
+        finally:
+            db.close()
+
+    def test_the_api_bill_is_marked_as_real_money(self, tmp_path):
+        html = self._perf_page(tmp_path)
+        assert "API spend" in html
+        assert "real money" in html
+
+    def test_the_trading_line_is_marked_as_paper(self, tmp_path):
+        html = self._perf_page(tmp_path)
+        assert "paper" in html
+        assert "fictional until the account is live" in html
+
+    def test_it_says_open_positions_are_excluded(self, tmp_path):
+        """net_equity is built from CLOSED trades, so an open winner is
+        invisible. Better said than discovered by arithmetic."""
+        html = self._perf_page(tmp_path)
+        assert "an open winner is invisible" in html
+
+    def test_scheduled_and_manual_spend_stay_separate(self, tmp_path):
+        """TRAPS.md: mixing them makes every projection wrong."""
+        html = self._perf_page(tmp_path)
+        assert "scheduled" in html and "manual" in html
+
+    def test_the_bar_is_scaled_to_the_ACCOUNT_not_to_itself(self):
+        """A $3 API bill against $2,000 must look like a sliver. Scaling
+        each segment to fill the bar would make it look like a crisis."""
+        import inspect
+
+        src = inspect.getsource(panels._equity_bridge)
+        assert "abs(v) / start" in src, (
+            "segments are no longer proportional to the starting capital")
