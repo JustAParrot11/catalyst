@@ -181,7 +181,10 @@ def performance_panel(db: Db, p: str = "perf") -> str:
         excess = perf.excess_pp
         cls = "pos" if (excess or 0) >= 0 else "neg"
         if excess is not None:
-            excess_text = f'<span class="{cls}">{esc(signed_pp(excess))}</span>'
+            # signed_pct, not signed_pp. The "%" fix landed on the TILE
+            # and missed this sentence, so the headline still said "pp"
+            # - the exact jargon the owner asked to be rid of.
+            excess_text = f'<span class="{cls}">{esc(signed_pct(excess))}</span>'
         elif perf.spy_window_too_short:
             # The tile beside this already says "too early to compare".
             # The headline shouted "unavailable" in alarm red at the same
@@ -205,12 +208,20 @@ def performance_panel(db: Db, p: str = "perf") -> str:
             sides = (f' <b>You {you:+.2f}%</b>, '
                      f"<b>SPY {spy:+.2f}%</b>.")
             try:
+                # `excess`, NOT `excess_v`. excess_v is bound further
+                # down in the tiles block, so naming it here raised
+                # UnboundLocalError and took out BOTH /performance and
+                # the Overview on the owner's machine.
+                #
+                # It shipped because no test rendered this panel with a
+                # bot series AND a SPY series present - the only state
+                # in which this branch runs at all.
                 start = Decimal(perf.start_capital_cents or 0)
-                if start > 0 and excess_v is not None:
-                    diff = start * Decimal(str(excess_v)) / 100
+                if start > 0 and excess is not None:
+                    diff = start * Decimal(str(excess)) / 100
                     money = (" In money, that is "
                              f"<b>{dollars(diff.copy_abs())}</b> "
-                             + ("more" if excess_v >= 0 else "less")
+                             + ("more" if excess >= 0 else "less")
                              + " than the same cash in SPY would have been.")
             except (ArithmeticError, TypeError, ValueError):
                 money = ""
