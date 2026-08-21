@@ -118,6 +118,22 @@ def _find_unknown_fields(raw_usage: dict) -> list[str]:
     if isinstance(out_nested, dict):
         unknown += [f"output_tokens_details.{k}" for k in out_nested
                     if k not in _KNOWN_OUTPUT_DETAIL_KEYS]
+
+    # A KNOWN KEY CARRYING A NON-FINITE VALUE refuses too, and reports
+    # through this same channel rather than getting its own.
+    #
+    # json.loads("1e400") is inf, and int(inf) raises OverflowError -
+    # which the parser now survives by reading it as 0. Surviving is
+    # right; pricing it at zero is not. A row that silently costs
+    # nothing is the exact TRAPS.md failure this allowlist was built
+    # against, so an unreadable count leaves the row UNPRICED, which
+    # the governor already blocks on until a person looks.
+    for key, value in raw_usage.items():
+        if isinstance(value, float) and value != value:      # NaN
+            unknown.append(f"{key}=NaN")
+        elif isinstance(value, float) and value in (
+                float("inf"), float("-inf")):
+            unknown.append(f"{key}=non_finite")
     return sorted(unknown)
 
 
@@ -136,9 +152,20 @@ def make_usage_components(raw_usage: dict) -> UsageComponents:
         server_tool_use = {}
 
     def _int(value) -> int:
+        # OverflowError TOO. int(float("inf")) raises OverflowError, not
+        # ValueError, and json.loads turns "1e400" into inf quite
+        # happily - so a usage blob containing one got past every guard
+        # here and took the caller down. This function promises never to
+        # raise, and audit N1 depends on that promise: the row must be
+        # RECORDED before anything is loud, or a usage payload nobody
+        # anticipated costs us the record of the spend as well.
+        #
+        # Found by feeding the dashboard's own reader a hostile ledger;
+        # it crashed the whole detailed Overview, which is how a
+        # non-finite value would have reached a person.
         try:
             return int(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return 0
 
     return UsageComponents(

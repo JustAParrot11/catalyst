@@ -40,7 +40,6 @@ from catalyst.dashboard.render import (
     raw,
     section,
     signed_pct,
-    signed_pp,
     table,
     tiles,
 )
@@ -1024,9 +1023,17 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
         out.append('<div class="chart-wrap">' + charts.bar_chart(
             daily, chart_id=f"{p}-daily-chart",
             title="Billed spend per closed day (Anthropic Cost API)",
-            # Four decimals: a day can genuinely cost under a cent, and
-            # "$0.00" for every bar would look like a broken feed.
-            value_fmt=lambda v: f"${v:,.4f}",
+            # PRECISION MATCHED TO THE DATA, not fixed at four decimals.
+            # Four was chosen because a day can genuinely cost under a
+            # cent and "$0.00" on every bar would look like a broken
+            # feed - true, and it also formats the Y AXIS, which came
+            # out reading "$1.0005 / $0.7504 / $0.5002". Rendered and
+            # looked at.
+            #
+            # So: keep four decimals only while the biggest day really
+            # is sub-cent, which is the case the original note was
+            # about, and use ordinary money everywhere else.
+            value_fmt=_money_fmt(v for _l, v, _t in daily),
             reference=(float(c.base_cap_cents) / 100.0 / 30.0,
                        "cap, pro-rata per day"),
         ) + "</div>")
@@ -1415,7 +1422,8 @@ def _token_price_editor(db: Db, p: str, as_of) -> str:
         '<input type="number" step="0.01" min="0.01" '
         'name="output_cents_per_mtok" required></label> '
         '<label class="prov">your name <input type="text" name="set_by" '
-        'required placeholder="who is making this change"></label> '
+        'size="26" required placeholder="who is making this change">'
+        "</label> "
         '<label class="prov"><input type="checkbox" name="allow_large_change" '
         'value="1"> yes, the rate really did move more than 20x</label> '
         '<button type="submit">Record new rate</button></form>')
@@ -2718,8 +2726,12 @@ def logs_panel(db: Db, params: dict, p: str = "log") -> str:
         f'<label>level <select id="{p}-level" name="level">{level_opts}</select></label> '
         f'<label>component <select id="{p}-component" name="component">{comp_opts}'
         "</select></label> "
-        f'<label>text <input id="{p}-q" name="q" value="{esc(lg.filters["q"])}" '
-        'placeholder="substring of message, traceback or context"></label> '
+        f'<label>text <input id="{p}-q" name="q" size="32" '
+        f'value="{esc(lg.filters["q"])}" '
+        # SHORT ENOUGH TO FIT ITS OWN BOX. The old text needed 288px in a
+        # 172px field, so the reader saw "substring of message, traceb".
+        # What it searches is spelled out in the caption below instead.
+        'placeholder="message, traceback or context"></label> '
         f'<label>since <input id="{p}-since" name="since" '
         f'value="{esc(lg.filters["since"])}" placeholder="2026-08-01"></label> '
         f'<label>until <input id="{p}-until" name="until" '
@@ -3016,7 +3028,7 @@ def benchmark_panel(db: Db, p: str = "bench", message: str = "",
         "</label> "
         '<label class="prov">why (optional) '
         f'<input id="{p}-why" name="reason" type="text" maxlength="500" '
-        'placeholder="moving to the $2,000 account"></label> '
+        'size="30" placeholder="moving to the $2,000 account"></label> '
         f'<button id="{p}-submit" type="submit">Set the comparison</button>'
         "</form>")
     out.append(prov(
@@ -3891,6 +3903,28 @@ def _plain_conviction(c) -> str:
     pct = int(round(float(c) * 100))
     return (f"{float(c):.2f} &mdash; Claude expected this to be right "
             f"about {pct} times in 100 similar setups")
+
+
+def _money_fmt(values):
+    """A dollar formatter whose precision suits the numbers it is given.
+
+    A fixed four decimals was chosen so a sub-cent day would not render
+    as "$0.00" and look like a broken feed. That reasoning holds, but
+    the same formatter also labels the Y AXIS, which came out reading
+    "$1.0005 / $0.7504 / $0.5002 / $0.2501". Rendered and looked at.
+
+    So the rule, not a list of charts: while the largest value really is
+    under a cent, keep the extra places; otherwise show money the way
+    money is written.
+    """
+    try:
+        top = max((abs(float(v)) for v in values if v is not None),
+                  default=0.0)
+    except (TypeError, ValueError):
+        top = 0.0
+    if 0 < top < 0.01:
+        return lambda v: f"${v:,.4f}"
+    return lambda v: f"${v:,.2f}"
 
 
 def _money(cents) -> str:
@@ -5703,19 +5737,30 @@ def _range_bar(st, pa, p: str, index: int) -> str:
         return ""
     pct = max(0.0, min(100.0, float(pos)))
     entry = _num(st.entry_price)
-    W, H = 640, 40
+    # MARGINS WIDE ENOUGH FOR THE WORDS THAT GO IN THEM. "52w low" is
+    # ~41px at this size and was anchored end-at-36, so it started at
+    # x=-5 and the browser clipped the "5" off every one of them.
+    # Measured, not guessed: the SVG box check reported it on every
+    # trade on the page.
+    W, H, PAD = 640, 40, 4
+    L, R = 58, W - 44                     # where the track begins and ends
     parts = [f'<svg id="{p}-t{index}-range" class="range-chart" '
              f'viewBox="0 0 {W} {H}" role="img" aria-label="where '
              f'{esc(st.ticker)} sits in its own 52-week range">',
-             f'<rect x="40" y="16" width="{W - 80}" height="8" rx="4" '
+             f'<rect x="{L}" y="16" width="{R - L}" height="8" rx="4" '
              'class="range-track"/>']
-    x = 40 + pct / 100 * (W - 80)
+    x = L + pct / 100 * (R - L)
     parts.append(f'<circle cx="{x:.1f}" cy="20" r="5" class="range-now"/>')
-    parts.append('<text x="36" y="24" text-anchor="end" '
+    parts.append(f'<text x="{PAD}" y="24" text-anchor="start" '
                  'class="pos-label">52w low</text>')
-    parts.append(f'<text x="{W - 36}" y="24" text-anchor="start" '
+    parts.append(f'<text x="{W - PAD}" y="24" text-anchor="end" '
                  'class="pos-label">high</text>')
-    parts.append(f'<text x="{x:.1f}" y="12" text-anchor="middle" '
+    # THE FLOATING LABEL RIDES THE MARKER, so at 0% and 100% it hangs
+    # off both ends. Clamped to a middle it can be centred in: half of
+    # "100% up the range" at this size is about 48px, so 56 clears it
+    # with room, and the marker itself still sits at the true position.
+    label_x = min(max(x, 56.0), float(W - 56))
+    parts.append(f'<text x="{label_x:.1f}" y="12" text-anchor="middle" '
                  f'class="pos-label">{pct:.0f}% up the range</text>')
     parts.append("</svg>")
     words = (f"<b>{pct:.0f}%</b> of the way from this stock's own "
@@ -5955,30 +6000,53 @@ def _f(value, scale=1, default=None):
     return float(d) if d.is_finite() else default
 
 
+#: Below this many pixels per column there is no room for a name under
+#: a bar, and overlapping labels are worse than none. Classified by the
+#: RULE - the width actually available - rather than by a list of which
+#: charts are allowed labels (house rule 7), so a chart that later gains
+#: or loses bars gets the right answer without anyone remembering to
+#: come back here.
+MIN_LABEL_STEP_PX = 30
+
+
 def _bar_row(pairs, sid, unit="$", height=54, width=300):
     """A small column chart from (label, value) pairs. Values may be
-    negative; the zero line is drawn where zero actually is."""
+    negative; the zero line is drawn where zero actually is.
+
+    NAMES UNDER THE BARS WHEREVER THEY FIT. Rendered and looked at:
+    "Open P&L by position" came out as three unlabelled rectangles, and
+    a bar chart nobody can attach a ticker to is decoration rather than
+    data. The <title> tooltip is not an answer - there is no hover on a
+    phone, and needing one to read a three-bar chart is a defect.
+    """
     vals = [float(v) for _l, v in pairs if v is not None]
     if not vals:
         return ""
+    step = width / max(len(pairs), 1)
+    label_band = 11 if step >= MIN_LABEL_STEP_PX else 0
+    plot = height - label_band
     hi, lo = max(vals + [0.0]), min(vals + [0.0])
     span = (hi - lo) or 1.0
-    zero_y = 2 + (hi - 0.0) / span * (height - 4)
-    step = width / max(len(pairs), 1)
+    zero_y = 2 + (hi - 0.0) / span * (plot - 4)
     out = [f'<svg id="{sid}" class="minibar" viewBox="0 0 {width} {height}" '
-           'role="img" aria-hidden="true">',
+           f'role="img" aria-hidden="true">',
            f'<line x1="0" y1="{zero_y:.1f}" x2="{width}" y2="{zero_y:.1f}" '
            'class="minibar-zero"/>']
     for i, (_label, v) in enumerate(pairs):
         if v is None:
             continue
-        y = 2 + (hi - float(v)) / span * (height - 4)
+        y = 2 + (hi - float(v)) / span * (plot - 4)
         top, bot = min(y, zero_y), max(y, zero_y)
         out.append(
             f'<rect x="{i * step + step * 0.18:.1f}" y="{top:.1f}" '
             f'width="{step * 0.64:.1f}" height="{max(bot - top, 1):.1f}" '
             f'class="{"minibar-pos" if float(v) >= 0 else "minibar-neg"}">'
             f"<title>{esc(str(_label))}: {unit}{float(v):,.2f}</title></rect>")
+        if label_band:
+            out.append(
+                f'<text x="{i * step + step * 0.5:.1f}" y="{height - 2}" '
+                f'text-anchor="middle" class="minibar-label">'
+                f"{esc(str(_label))}</text>")
     out.append("</svg>")
     return "".join(out)
 

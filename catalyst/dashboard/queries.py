@@ -3677,13 +3677,22 @@ def spend_today_cents(db: Db, as_of: date | None = None) -> Decimal:
     computed here rather than by loosening anything the governor does.
     """
     as_of = as_of or datetime.now(timezone.utc).date()
+    # SUMMED AS Decimal, NOT BY SQLite. priced_cents is TEXT holding an
+    # exact Decimal, and `SUM(CAST(... AS REAL))` turns money into a
+    # float on the way past - which is how a ledger and a dashboard
+    # start disagreeing in the third decimal place for no reason anyone
+    # can find later. cost/ledger.py sums these in Python for exactly
+    # this reason; so does this.
     res = db.q(
-        "SELECT COALESCE(SUM(CAST(priced_cents AS REAL)), 0) c "
-        "FROM cost_events WHERE date(priced_at) = ? "
+        "SELECT priced_cents FROM cost_events WHERE date(priced_at) = ? "
         "AND priced_cents IS NOT NULL", (as_of.isoformat(),))
-    if not res.rows:
-        return Decimal("0")
-    return _dec(res.rows[0]["c"])
+    total = Decimal("0")
+    for row in res.rows:
+        value = _dec(row["priced_cents"], Decimal("0"))
+        # A non-finite row cannot be added to a running total without
+        # poisoning every figure downstream of it.
+        total += value if value.is_finite() else Decimal("0")
+    return total
 
 
 @dataclass
@@ -3952,7 +3961,19 @@ def api_desk(db: Db, days: int = 14, now=None) -> ApiDesk:
                 # tokens - which is what makes a bill look cheap.
                 d.unparseable_turns += 1
                 continue
-            u = make_usage_components(raw)
+            try:
+                u = make_usage_components(raw)
+            except Exception:      # noqa: BLE001 - a row, not the page
+                # THE DASHBOARD IS THE INSTRUMENT AND MUST SURVIVE ITS
+                # OWN DATA. A usage blob holding 1e400 raised straight
+                # out of the parser and took the whole detailed Overview
+                # with it - found by feeding this reader a hostile
+                # ledger. The parser is fixed too, but a display path
+                # that can be killed by one bad row is a display path
+                # that will be, and this one counts what it could not
+                # read rather than pretending it was zero.
+                d.unparseable_turns += 1
+                continue
             d.input_tokens += u.input_tokens
             d.output_tokens += u.output_tokens
             d.cache_read_tokens += u.cache_read_input_tokens

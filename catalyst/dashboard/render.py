@@ -45,8 +45,8 @@ MIN_TRADES_FOR_MEANING = 30
 BAKEOFF_CAVEAT = (
     "Bake-off caveat, carried on every performance number "
     "(docs/STRATEGY-BAKEOFF.md, verdict): nothing beat SPY out-of-sample net of all "
-    "costs, robustly. The single nominal beat (arm C, +6.73pp out-of-sample excess) "
-    "inverted to -15.17pp the moment the per-side spread assumption moved from 15bp "
+    "costs, robustly. The single nominal beat (arm C, +6.73% out-of-sample excess) "
+    "inverted to -15.17% the moment the per-side spread assumption moved from 15bp "
     "to 30bp. And the portfolio took only 229 of 1,522 eligible out-of-sample "
     "signals, path-dependently by slot contention: the unconditional event study "
     "puts the population mean at +0.73%/trade against the portfolio's +1.75% - "
@@ -234,8 +234,14 @@ code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo,
 .nav-hint { display: block; font-size: 10.5px; color: var(--rail-muted);
             line-height: 1.35; }
 .sidebar nav a.active .nav-hint { color: var(--rail-ink); opacity: .75; }
+/* overflow-wrap so the database PATH wraps instead of running off the
+   rail. Rendered and looked at: it read
+   "/home/user/catalyst/catalyst/dashboa" with the rest simply gone,
+   which is worse than useless - a path you cannot read is a path you
+   cannot check, and this one exists to be checked. */
 .sidebar-foot { margin-top: auto; font-size: 10.5px; color: var(--rail-muted);
-                padding: 0 8px; line-height: 1.5; }
+                padding: 0 8px; line-height: 1.5;
+                overflow-wrap: anywhere; }
 .sidebar-foot code { font-size: 10px; }
 .content { min-width: 0; display: flex; flex-direction: column; }
 .content > header { background: var(--surface);
@@ -374,6 +380,8 @@ h3 { font-size: 11px; margin: 14px 0 5px 0; text-transform: uppercase;
 .minibar-zero { stroke: var(--hairline); stroke-width: 1; }
 .minibar-pos { fill: var(--pos); }
 .minibar-neg { fill: var(--neg); }
+.minibar-label { fill: var(--ink-2); font-size: 8px; font-weight: 600;
+  letter-spacing: .02em; }
 
 /* used-against-limit lines. The bar is the picture; the number beside
    it is the fact, because a bar clipped at 100% cannot tell you
@@ -413,7 +421,17 @@ h3 { font-size: 11px; margin: 14px 0 5px 0; text-transform: uppercase;
   overflow: hidden; background: var(--surface-2);
   border: 1px solid var(--hairline); max-width: 640px; margin-bottom: 10px; }
 .bridge-seg { display: block; height: 100%; }
-.bridge-start { background: var(--baseline); opacity: .55; flex: 0 0 auto; }
+/* THE BASELINE SHRINKS SO THE OTHERS FIT. It is emitted at width:100%
+   and every segment was flex:0 0 auto, so the baseline alone filled the
+   bar and the trading and API segments were laid out starting one pixel
+   PAST its right edge - then clipped by the bar's own overflow:hidden.
+   Measured: the API segment rendered at x=639 in a 638px bar, i.e. the
+   line showing real money leaving the account was invisible on both the
+   Overview and Performance pages.
+   Letting the baseline shrink turns this back into the stacked bar it
+   was drawn to be; the other segments keep their exact widths. */
+.bridge-start { background: var(--baseline); opacity: .55;
+  flex: 1 1 auto; min-width: 0; }
 .bridge-pnl { background: var(--pos); opacity: .7; flex: 0 0 auto; }
 .bridge-api { background: var(--critical); opacity: .7; flex: 0 0 auto; }
 .prov-inline { color: var(--muted); font-size: var(--t-fine);
@@ -593,10 +611,29 @@ footer { color: var(--muted); font-size: 11.5px;
 .blame { background: var(--crit-wash); border-left: 3px solid var(--critical);
          padding: 9px 11px; font-size: 13px; margin: 9px 0;
          border-radius: 0; }
-form.inline { display: inline-block; margin: 7px 0; }
+/* Wrap, do not squeeze. As an inline-block the token-price row packed
+   its fields onto one line and shrank them until the "your name" box
+   showed "who is making this chang" - a form field too narrow for its
+   own placeholder. Flex-wrap lets a field keep its size and drop to the
+   next line instead. */
+form.inline { display: flex; flex-wrap: wrap; align-items: center;
+              gap: 6px 14px; margin: 7px 0; }
+form.inline label { display: inline-flex; align-items: center; gap: 5px; }
+/* A FIELD NARROWER THAN ITS OWN PLACEHOLDER shows the reader half a
+   sentence - measured on two forms here ("who is making this chang",
+   "substring of message, traceb"). The fix is `size` in the markup,
+   which is the attribute for exactly this and which a field that wants
+   to stay small (the log's 4-character limit box) can set for itself.
+   A blanket min-width would have stretched that one too. */
+/* max-width so a control can never widen the page. A <select> is sized
+   by its LONGEST OPTION, which is intrinsic content no grid column can
+   talk it out of: measured at 390px, the diagnostic bundle's "how far
+   back" menu pushed the document to 401px and the whole page scrolled
+   sideways. The page body must never do that. */
 input, select, button { font: inherit; padding: 5px 8px; border-radius: 6px;
                         border: 1px solid var(--baseline);
-                        background: var(--surface); color: var(--ink); }
+                        background: var(--surface); color: var(--ink);
+                        max-width: 100%; }
 button { background: var(--series-1); color: #fff; border-color: transparent;
          font-weight: 600; cursor: pointer; }
 .chart { display: block; margin: 10px 0; max-width: 100%; }
@@ -916,6 +953,10 @@ a.viewopt:hover { border-color: var(--accent); color: var(--ink); }
 @media (max-width: 760px) {
   .funnel-track, .funnel-flow, .funnel-plain, .funnel-why,
   .funnel-fault, .quiet { margin-left: 0; }
+  /* A 13em label column plus its description does not fit a phone, and
+     a two-column grid that does not fit is just a squashed one. Stack
+     them: the label above the thing it labels reads the same. */
+  .bundlerow { grid-template-columns: 1fr; gap: 2px; }
 }
 """
 
@@ -1453,10 +1494,12 @@ def dollars(cents) -> str:
     return f"${value:,.2f}"
 
 
-def signed_pp(value: float | None) -> str:
-    if value is None:
-        return "n/a"
-    return f"{value:+.2f}pp"
+# signed_pp DELETED 2026-08-21, deliberately rather than left unused.
+# The "pp -> %" fix had to be made three times: the tile, the sentence
+# beside it, and finally the status strip that sits on every page. A
+# helper that formats the unreadable version is a loaded gun for the
+# next person who greps for a percentage formatter, so it is gone and a
+# test asserts nothing in this package mentions it again.
 
 
 def signed_pct(value: float | None) -> str:
