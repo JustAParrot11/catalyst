@@ -305,6 +305,20 @@ h3 { font-size: 11px; margin: 14px 0 5px 0; text-transform: uppercase;
 /* AN ACTION THAT DESTROYS SOMETHING. Styled to look deliberate rather
    than convenient: it discards real history, so it should never be the
    easiest thing on the page to click. */
+/* ONE POSITION, EVERYTHING THAT HAPPENED TO IT. Owner-asked: "i cant
+   accurately see how well my current trades are going". Time across,
+   price up, the risk band shaded, and a rule for every call to Claude. */
+.pos-chart { width: 100%; max-width: 660px; height: auto; margin: 10px 0 2px; }
+.pos-risk { fill: var(--critical); opacity: .08; }
+.pos-entry { stroke: var(--ink-2); stroke-width: 1.5; }
+.pos-stop { stroke: var(--critical); stroke-width: 1.5; stroke-dasharray: 4 3; }
+.pos-price { fill: none; stroke: var(--series-1); stroke-width: 2;
+  stroke-linejoin: round; }
+.pos-now { fill: var(--series-1); }
+.pos-review { stroke: var(--accent); stroke-width: 1; stroke-dasharray: 2 3; }
+.pos-review-exit { stroke: var(--series-2); stroke-width: 1.5; }
+.pos-today { stroke: var(--series-2); stroke-width: 1.5; stroke-dasharray: 3 2; }
+.pos-label { fill: var(--muted); font-size: 10px; }
 .danger-form { border: 1px solid var(--critical); border-radius: 6px;
   padding: 12px 16px; margin: 12px 0; background: var(--crit-wash);
   max-width: 640px; }

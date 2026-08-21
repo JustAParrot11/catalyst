@@ -36,6 +36,7 @@ Nothing here may call an Admin endpoint that modifies anything.
 
 import json
 import os
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -49,6 +50,8 @@ USAGE_REPORT_URL = "https://api.anthropic.com/v1/organizations/usage_report/mess
 ANTHROPIC_VERSION = "2023-06-01"
 ADMIN_KEY_ENV = "ANTHROPIC_ADMIN_KEY"
 PAGE_LIMIT = 31
+#: Seconds between retries of a 5xx, multiplied by the attempt number.
+_RETRY_BACKOFF_S = 2.0
 
 #: Marks the correcting row. Never 'research' or any real component, so
 #: a corrected day is always tellable from a recorded one.
@@ -89,15 +92,26 @@ def fetch_usage_day(target_date: date, admin_key: str | None = None,
             "no admin key: set the Anthropic ADMIN key (the regular API "
             "key cannot read the usage report)")
     get = http_get or httpx.get
-    resp = get(
-        USAGE_REPORT_URL,
-        headers={"x-api-key": key, "anthropic-version": ANTHROPIC_VERSION},
-        params={"starting_at": target_date.isoformat() + "T00:00:00Z",
-                "ending_at": (target_date + timedelta(days=1)).isoformat()
-                + "T00:00:00Z",
-                "bucket_width": "1d", "limit": PAGE_LIMIT,
-                "group_by[]": ["api_key_id", "model"]},
-        timeout=30.0)
+    # TRANSIENT 5xx GETS RETRIED, 4xx NEVER DOES - the same rule
+    # TRAPS.md sets for EDGAR, and it earned its place here too: a live
+    # sweep of the month hit a single 503 on 2026-08-15, which without
+    # this leaves that day uncorrected until the next night.
+    resp = None
+    for attempt in range(3):
+        resp = get(
+            USAGE_REPORT_URL,
+            headers={"x-api-key": key,
+                     "anthropic-version": ANTHROPIC_VERSION},
+            params={"starting_at": target_date.isoformat() + "T00:00:00Z",
+                    "ending_at": (target_date + timedelta(days=1)).isoformat()
+                    + "T00:00:00Z",
+                    "bucket_width": "1d", "limit": PAGE_LIMIT,
+                    "group_by[]": ["api_key_id", "model"]},
+            timeout=30.0)
+        if resp.status_code < 500:
+            break
+        if attempt < 2:
+            time.sleep(_RETRY_BACKOFF_S * (attempt + 1))
     if resp.status_code != 200:
         raise BackfillError(f"usage_report answered HTTP {resp.status_code}",
                             status_code=resp.status_code,

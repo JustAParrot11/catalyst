@@ -563,12 +563,26 @@ class TestTheRawJsonIsTranslated:
         assert "79.1295" in said and "5.06" in said
 
 
+def _fallback_story(**kw):
+    """A story the full position chart cannot draw, so the smaller rail
+    and hold bar are what render. Since the position chart landed those
+    two are the FALLBACK, not the primary view - these tests are about
+    the fallback still being correct when it is reached."""
+    base = dict(ticker="EMBC", entry_price="5.06", stop_price="4.55",
+                qty="79.1295", status="open",
+                opened_at="2026-08-17T16:27:56+00:00",
+                planned_exit_date="2026-08-29")
+    base.update(kw)
+    return queries.TradeStory(**base)
+
+
 class TestThePictureReplacesTheParagraph:
     """OWNER-ASKED: "Simplify data maybe with prediction graphs, it feels
-    word heavy"."""
+    word heavy". These now cover the FALLBACK charts - see
+    _fallback_story."""
 
     def test_the_stop_and_the_fill_are_drawn(self, tmp_path):
-        html = _page(_seed(tmp_path))
+        html = panels._price_rail(_fallback_story(), "tr", 0)
         assert 'class="rail-chart"' in html
         assert "rail-stop" in html and "rail-entry" in html
         assert "4.55" in html and "5.06" in html
@@ -576,7 +590,7 @@ class TestThePictureReplacesTheParagraph:
     def test_the_exposure_is_drawn_as_a_band_not_two_ticks(self, tmp_path):
         """The width of that band IS the divisor the position size came
         out of. Seeing it is seeing the sizing."""
-        html = _page(_seed(tmp_path))
+        html = panels._price_rail(_fallback_story(), "tr", 0)
         assert 'class="rail-risk"' in html
         m = re.search(r'<rect x="([\d.]+)"[^>]*width="([\d.]+)"[^>]*'
                       r'class="rail-risk"', html)
@@ -584,11 +598,12 @@ class TestThePictureReplacesTheParagraph:
 
     def test_the_distance_to_the_stop_is_stated_as_a_percentage(self, tmp_path):
         """(5.06 - 4.55) / 5.06 = 10.08%."""
-        html = _page(_seed(tmp_path))
+        html = panels._price_rail(_fallback_story(), "tr", 0)
         assert "10.1% below" in html
 
     def test_a_closed_trade_draws_where_it_was_sold(self, tmp_path):
-        html = _page(_seed(tmp_path, closed=True))
+        html = panels._price_rail(
+            _fallback_story(status="closed", exit_price="5.62"), "tr", 0)
         assert "rail-exit" in html
         assert "sold $5.62" in html
 
@@ -600,7 +615,8 @@ class TestThePictureReplacesTheParagraph:
 
         Only prices that exist may be marked, so every number inside the
         SVG has to be one of them."""
-        html = _page(_seed(tmp_path, closed=True))
+        html = panels._price_rail(
+            _fallback_story(status="closed", exit_price="5.62"), "tr", 0)
         svg = html[html.index("<svg id=\"tr-t0-rail\""):]
         svg = svg[:svg.index("</svg>")]
         real = {"4.55", "5.06", "5.62"}
@@ -612,8 +628,19 @@ class TestThePictureReplacesTheParagraph:
         label is a number that silently is not there."""
         from catalyst.dashboard import charts
 
-        html = _page(_seed(tmp_path, closed=True))
+        html = panels._price_rail(
+            _fallback_story(status="closed", exit_price="5.62"), "tr", 0)
         svg = html[html.index("<svg id=\"tr-t0-rail\""):]
+        svg = svg[:svg.index("</svg>") + 6]
+        assert not charts.labels_outside_viewbox(svg)
+
+    def test_the_POSITION_chart_labels_also_stay_inside(self, tmp_path):
+        """The one that actually renders now."""
+        from catalyst.dashboard import charts
+
+        html = _page(_seed(tmp_path, reviews=[
+            ("2026-08-19T14:00:00+00:00", "hold", False, "intact", [])]))
+        svg = html[html.rindex("<svg", 0, html.index('class="pos-chart"')):]
         svg = svg[:svg.index("</svg>") + 6]
         assert not charts.labels_outside_viewbox(svg)
 
@@ -760,13 +787,15 @@ class TestIconsHelpAndNeverCarryMeaningAlone:
 
 class TestTheHoldProgressBar:
     def test_an_open_position_shows_how_far_through_it_is(self, tmp_path):
-        html = _page(_seed(tmp_path))
+        html = panels._hold_progress(_fallback_story(), "tr", 0)
         assert 'class="hold-track"' in html
         assert "day(s) left of a 12-day hold" in html \
             or "past its exit date" in html
 
     def test_a_closed_one_says_what_it_actually_used(self, tmp_path):
-        html = _page(_seed(tmp_path, closed=True))
+        html = panels._hold_progress(
+            _fallback_story(status="closed",
+                            closed_at="2026-08-29T20:00:00+00:00"), "tr", 0)
         assert "of an allowed 12 days" in html
 
     def test_the_fill_never_leaves_the_track(self, tmp_path):
@@ -805,12 +834,12 @@ class TestAChartKeepsItsLegend:
         assert 0 < d < 40, f"the legend is {d} characters from its chart"
 
     def test_the_price_rail_caption_stays_with_the_rail(self, tmp_path):
-        html = _page(_seed(tmp_path))
+        html = panels._price_rail(_fallback_story(), "tr", 0)
         d = self.caption_distance(html, "tr-t0-rail", "The stop sits")
         assert 0 < d < 40, f"the caption is {d} characters from its chart"
 
     def test_the_hold_bar_caption_stays_with_the_bar(self, tmp_path):
-        html = _page(_seed(tmp_path))
+        html = panels._hold_progress(_fallback_story(), "tr", 0)
         i = html.index('class="hold-track"')
         assert "fig-cap" in html[i:i + 260], (
             "the hold bar's caption has been lifted away from it")
@@ -985,3 +1014,101 @@ class TestTheAccountValueIsBrokenIntoItsParts:
         src = inspect.getsource(panels._equity_bridge)
         assert "abs(v) / start" in src, (
             "segments are no longer proportional to the starting capital")
+
+
+class TestThePositionChart:
+    """OWNER-ASKED: "i cant accurately see how well my current trades
+    are going i want a graph with multiple points of info e.g. when is
+    it calling to claude for a tech, current costs, original cost, sell
+    cost etc"."""
+
+    REVIEW = [("2026-08-19T14:00:00+00:00", "hold", False, "intact", [])]
+
+    def test_it_draws_what_it_cost_and_what_it_sells_for(self, tmp_path):
+        html = _page(_seed(tmp_path))
+        assert 'class="pos-chart"' in html
+        assert "bought $5.06" in html and "stop $4.55" in html
+
+    def test_the_money_at_risk_is_the_shaded_band(self, tmp_path):
+        html = _page(_seed(tmp_path))
+        m = re.search(r'<rect[^>]*height="([\d.]+)"[^>]*class="pos-risk"', html)
+        assert m and float(m.group(1)) > 0
+
+    def test_every_call_to_claude_is_marked_on_the_day_it_happened(
+            self, tmp_path):
+        html = _page(_seed(tmp_path, reviews=self.REVIEW))
+        assert "pos-review" in html
+        assert ">held</text>" in html
+
+    def test_an_exit_review_is_drawn_differently_from_a_hold(self, tmp_path):
+        html = _page(_seed(tmp_path, reviews=[
+            ("2026-08-19T14:00:00+00:00", "exit_now", True, "broken", [])]))
+        assert "pos-review-exit" in html
+        assert ">EXIT</text>" in html
+
+    def test_the_hard_exit_date_is_the_right_hand_edge(self, tmp_path):
+        html = _page(_seed(tmp_path))
+        assert "closes 2026-08-29" in html
+
+    def test_it_says_how_many_times_claude_has_looked(self, tmp_path):
+        html = _page(_seed(tmp_path, reviews=self.REVIEW))
+        assert "re-read the thesis <b>1</b> time(s)" in html
+
+    def test_a_skipped_review_is_not_counted_as_a_look(self, tmp_path):
+        """A skipped review cost nothing and decided nothing."""
+        from catalyst.dashboard.queries import TradeStory
+
+        st = TradeStory(ticker="X", entry_price="10", stop_price="9",
+                        opened_at="2026-08-01", planned_exit_date="2026-08-20",
+                        reviews=[("2026-08-05T00:00:00+00:00", "hold", False,
+                                  "", [], "too soon")])
+        assert "<b>0</b> time(s)" in panels._position_chart(st, "tr", 0)
+
+    def test_NOTHING_IS_PROJECTED(self, tmp_path):
+        """The one line this chart must not cross. The only future marks
+        allowed are DATES the bot has already committed to - never a
+        price it might reach."""
+        html = _page(_seed(tmp_path))
+        svg = html[html.rindex('<svg', 0, html.index('class="pos-chart"')):]
+        svg = svg[:svg.index("</svg>")]
+        real = {"5.06", "4.55"}
+        assert set(re.findall(r"\$([\d.]+)", svg)) <= real
+
+    def test_a_missing_bar_cache_says_so_rather_than_guessing(self, tmp_path):
+        html = _page(_seed(tmp_path))
+        assert "empty rather than guessed" in html
+
+    @pytest.mark.parametrize("kw", [
+        {"entry_price": ""}, {"stop_price": "abc"},
+        {"opened_at": "not-a-date"}, {"planned_exit_date": "2020-01-01"},
+    ])
+    def test_unusable_inputs_draw_nothing_and_never_raise(self, kw):
+        from catalyst.dashboard.queries import TradeStory
+
+        st = TradeStory(ticker="X", entry_price="10", stop_price="9",
+                        opened_at="2026-08-01",
+                        planned_exit_date="2026-08-20")
+        for field, value in kw.items():
+            setattr(st, field, value)
+        assert panels._position_chart(st, "tr", 0) == ""
+
+    def test_it_replaces_the_two_smaller_bars_rather_than_adding_to_them(
+            self, tmp_path):
+        """Three charts saying overlapping things is the clutter the
+        owner reported. The rail and hold bar are the FALLBACK for a
+        position the full chart cannot draw."""
+        html = _page(_seed(tmp_path))
+        assert 'class="pos-chart"' in html
+        assert 'class="rail-chart"' not in html
+        assert 'class="hold-track"' not in html
+
+    def test_but_the_fallback_still_appears_when_it_cannot_draw(self):
+        """A position with no stop gets no position chart, and must not
+        therefore get nothing at all."""
+        from catalyst.dashboard.queries import TradeStory
+
+        st = TradeStory(ticker="X", entry_price="10", stop_price="",
+                        opened_at="2026-08-01", planned_exit_date="2026-08-20",
+                        status="open")
+        assert panels._position_chart(st, "tr", 0) == ""
+        assert 'class="hold-track"' in panels._hold_progress(st, "tr", 0)

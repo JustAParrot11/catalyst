@@ -403,7 +403,19 @@ def _maybe_refresh_benchmark(state: dict | None, *, force: bool = False) -> None
     today = datetime.now(timezone.utc).date()
     if state.get("benchmark_day") == today and not force:
         return
-    state["benchmark_day"] = today
+    # NOT MARKED DONE YET. Owner-reported 2026-08-21: "SPY line has
+    # failed to populate for 48 hours", while every other daily job kept
+    # working.
+    #
+    # The marker used to be set HERE, before the attempt - so one failed
+    # refresh burned the whole day's only try. A transient timeout or
+    # rate limit meant the series silently fell a day behind, and two of
+    # them meant two days, which is exactly the gap on the chart. The
+    # comparison decays and nothing ever says so, because from the
+    # bot's point of view the job "ran".
+    #
+    # Marked on SUCCESS instead: a failure is retried on the next cycle,
+    # fifteen minutes later, rather than tomorrow.
     try:
         from catalyst.data import benchmark
         from catalyst.dashboard.db import bars_path
@@ -413,6 +425,7 @@ def _maybe_refresh_benchmark(state: dict | None, *, force: bool = False) -> None
         result = benchmark.refresh_benchmark(
             bars_path(), creds.alpaca_key, creds.alpaca_secret)
         if result.skipped_reason in (None, "already_current"):
+            state["benchmark_day"] = today          # only now is it done
             _log.info("Benchmark series: %s bar(s) added, %s.",
                       result.written, result.skipped_reason or "up to date")
         else:
@@ -1126,13 +1139,31 @@ def main(argv: list[str] | None = None) -> int:
         # cycle is running must still shorten the sleep that follows it,
         # and clearing afterwards would throw that signal away.
         _wake.clear()
+        # EACH DAILY JOB IN ITS OWN GUARD. These five are independent
+        # reporting and housekeeping tasks that happened to share one
+        # try block, which meant the FIRST one to raise silently
+        # cancelled every job after it - for that pass and every pass
+        # after, since they all run in the same order.
+        #
+        # Owner-reported: the SPY series stopped updating while
+        # everything else carried on. A shared guard makes exactly that
+        # shape of fault, and makes it invisible: the log blames "a
+        # trading cycle", and the job that never ran is not mentioned.
         try:
-            _maybe_reconcile_yesterday(path)
-            _maybe_refresh_benchmark(_daily_state)
-            # Learn from yesterday BEFORE trading today, so any
-            # parameter that moved is the one this cycle uses.
-            _maybe_adapt(path, _daily_state)
-            _maybe_forecast_budget(path, _daily_state)
+            for _name, _job in (
+                    ("nightly bill check", lambda: _maybe_reconcile_yesterday(path)),
+                    ("benchmark refresh", lambda: _maybe_refresh_benchmark(_daily_state)),
+                    # Learn from yesterday BEFORE trading today, so any
+                    # parameter that moved is the one this cycle uses.
+                    ("parameter adaptation", lambda: _maybe_adapt(path, _daily_state)),
+                    ("budget forecast", lambda: _maybe_forecast_budget(path, _daily_state)),
+            ):
+                try:
+                    _job()
+                except Exception:  # noqa: BLE001 - name it, then carry on
+                    _log.exception(
+                        "The %s failed this pass. Every other job still ran, "
+                        "and this one is retried on the next cycle.", _name)
             report = _run_one_cycle(path, _daily_state)
             if report.kill_switch.tripped:
                 _log.warning("Kill switch tripped: %s. New entries are "
