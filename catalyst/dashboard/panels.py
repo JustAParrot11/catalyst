@@ -6305,7 +6305,25 @@ def _cost_desk(db: Db, p: str) -> str:
     from catalyst.cost.forecast import forecast
 
     c = queries.cost_panel(db)
-    cap = Decimal(c.max_cap_cents or 0)
+    # THE CAP IN FORCE, WHICH IS base_cap_cents DESPITE THE NAME.
+    #
+    # OWNER-REPORTED: "where has the month against cap come from, im
+    # unsure what it means, my API montly is 100" - against a panel
+    # reading "$19.77 / $8.00" and a full red bar, while the status
+    # strip on the same page correctly read "$19.77 of $100.00".
+    #
+    # max_cap_cents is GOVERNOR_MAX_CAP_CENTS: a hard bound on the
+    # PROFIT-SHARE mechanism, capping how far realised profit may walk
+    # the budget up on its own. It has nothing to do with the figure the
+    # owner sets, and reading it here made four numbers wrong at once -
+    # the cap, the gauge, the derived daily ceiling ($5 instead of $10),
+    # and the forecast, which saw spend above cap, returned
+    # already_exhausted, and left burn rate and projected month blank.
+    #
+    # This is the same defect cost_panel itself carries a comment
+    # about: a dashboard that shows a smaller cap than the one being
+    # spent against teaches the owner their setting did nothing.
+    cap = Decimal(c.base_cap_cents or 0)
     mtd = Decimal(c.scheduled_mtd_cents or 0) + Decimal(c.manual_mtd_cents or 0)
     f = forecast(mtd, cap, c.as_of)
     per_day = f.daily_rate_cents
@@ -6328,7 +6346,12 @@ def _cost_desk(db: Db, p: str) -> str:
                              else DASH),
          esc(hurdle) if hurdle else "at the current rate"),
         ("Cap", dollars(cap),
-         (f"runs out {f.exhausted_on}" if f.will_stop_early
+         # THREE STATES, NOT TWO. will_stop_early is true when the cap
+         # is ALREADY gone as well as when a date is projected, and in
+         # the first case exhausted_on is None - so this printed the
+         # words "runs out None" at the owner. Seen in their screenshot.
+         ("already spent" if f.already_exhausted
+          else f"runs out {f.exhausted_on}" if f.exhausted_on
           else "not expected to run out this month")),
     ])]
     # THE DAILY CEILING IS DERIVED FROM THE MONTHLY CAP, and read from

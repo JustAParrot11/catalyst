@@ -26,6 +26,8 @@ fetching tests inject a fake broker.
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+import re
+
 import pytest
 
 from catalyst.dashboard import live
@@ -221,3 +223,121 @@ class TestTheBookSaysWhichKindOfPriceItIs:
         assert pos.source != "live"
         assert book.n_live == 0
         assert book.quote_note
+
+
+class TestTheBrokerIsActuallyCONSTRUCTIBLE:
+    """OWNER-REPORTED 2026-08-21, from a screenshot: every row of the
+    desk read "broker could not be opened: TypeError".
+
+    _broker() called Broker(key, secret, paper=..., timeout=...) and
+    Broker.__init__ accepts neither keyword, so EVERY call raised and
+    the live-quote feature had never produced a single quote on a real
+    machine. It failed identically to having no credentials saved,
+    which is exactly why nobody noticed.
+
+    IT WAS INVISIBLE TO THIS FILE because every other test passes a stub
+    broker in, so the one line that builds a real one was never run. A
+    test that exercises everything except the code that talks to the
+    outside world is a test that cannot see this class of fault, so
+    these check the call against the real signature.
+    """
+
+    def test_the_arguments_live_py_passes_are_ones_Broker_accepts(self):
+        import inspect
+
+        from catalyst.execution.broker import Broker
+        from catalyst.dashboard import live as live_mod
+
+        accepted = set(inspect.signature(Broker.__init__).parameters)
+        # COMMENTS STRIPPED FIRST. The fix for this bug carries a
+        # comment quoting the broken call verbatim, and reading that
+        # made the test fail against code that was already correct -
+        # a test that greps source has to grep the code, not the prose.
+        src = "\n".join(
+            line.split("#")[0] for line in
+            inspect.getsource(live_mod._broker).splitlines())
+        assert "Broker(" in src, "_broker no longer constructs a Broker"
+        call = src.split("Broker(", 1)[1].split(")", 1)[0]
+        used = set(re.findall(r"\b(\w+)=", call))
+        unknown = used - accepted
+        assert not unknown, (
+            f"_broker passes {sorted(unknown)} to Broker, which accepts "
+            f"only {sorted(accepted - {'self'})}")
+
+    def test_a_broker_really_can_be_built_from_saved_credentials(self):
+        """The whole path, with no network: credentials in, a Broker
+        object out. Constructing one opens no socket."""
+        from catalyst.dashboard import live as live_mod
+
+        class Creds:
+            alpaca_key = "PKTEST"
+            alpaca_secret = "secret"
+            account_mode = "paper"
+
+        import catalyst.setup.credentials as creds_mod
+        real = creds_mod.load_credentials
+        creds_mod.load_credentials = lambda *a, **k: Creds()
+        try:
+            broker, reason = live_mod._broker()
+        finally:
+            creds_mod.load_credentials = real
+        assert broker is not None, f"could not build a broker: {reason}"
+        assert reason == ""
+        broker.close()
+
+    def test_paper_and_live_reach_different_hosts(self):
+        """Paper vs live is the base URL. Getting it wrong would point
+        a paper account at the live one."""
+        from catalyst.execution.broker import LIVE_BASE_URL, PAPER_BASE_URL
+        from catalyst.dashboard import live as live_mod
+
+        import catalyst.setup.credentials as creds_mod
+        real = creds_mod.load_credentials
+        seen = {}
+        for mode, expect in (("paper", PAPER_BASE_URL),
+                             ("live", LIVE_BASE_URL)):
+            class Creds:
+                alpaca_key = "PKTEST"
+                alpaca_secret = "secret"
+                account_mode = mode
+
+            creds_mod.load_credentials = lambda *a, **k: Creds()
+            try:
+                broker, _ = live_mod._broker()
+            finally:
+                creds_mod.load_credentials = real
+            assert broker is not None
+            seen[mode] = broker._base_url
+            broker.close()
+            assert seen[mode] == expect, (mode, seen[mode], expect)
+        assert seen["paper"] != seen["live"]
+
+    def test_a_failure_says_WHY_not_just_the_exception_type(self):
+        """House rule 3. "TypeError" on its own took a screenshot to
+        diagnose - the message has to carry the reason."""
+        from catalyst.dashboard import live as live_mod
+
+        import catalyst.setup.credentials as creds_mod
+        real = creds_mod.load_credentials
+
+        class Creds:
+            alpaca_key = "PKTEST"
+            alpaca_secret = "secret"
+            account_mode = "paper"
+
+        creds_mod.load_credentials = lambda *a, **k: Creds()
+        import catalyst.execution.broker as broker_mod
+        real_broker = broker_mod.Broker
+
+        class Exploding:
+            def __init__(self, *a, **k):
+                raise TypeError("__init__() got an unexpected keyword 'paper'")
+
+        broker_mod.Broker = Exploding
+        try:
+            broker, reason = live_mod._broker()
+        finally:
+            broker_mod.Broker = real_broker
+            creds_mod.load_credentials = real
+        assert broker is None
+        assert "unexpected keyword" in reason, reason
