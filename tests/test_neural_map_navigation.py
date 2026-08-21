@@ -66,12 +66,18 @@ class TestLabelsFitTheirColumn:
         """The node circle had a tooltip; the words did not. So the one
         thing a reader would hover - the label they cannot finish
         reading - said nothing."""
-        svg = _map(label="an-extremely-long-node-label-that-cannot-possibly-fit")
+        # LONG ENOUGH TO TRIM AT THE WIDTH CAP. A label now sits ABOVE
+        # its node with the whole column to itself rather than beside it
+        # with half, so the previous 52-character fixture fits and is no
+        # longer trimmed at all - which made this test pass vacuously in
+        # the other direction. Trimming is still the last resort, so the
+        # case that exercises it has to be one that genuinely cannot fit.
+        huge = "an-extremely-long-node-label-that-cannot-possibly-fit" * 12
+        svg = _map(label=huge)
         assert "…" in svg, "this label should be trimmed at all"
         titles = re.findall(r"<text[^>]*>[^<]*…<title>([^<]+)</title>", svg)
         assert titles, "a trimmed label has no title - its full text is lost"
-        assert all(t == "an-extremely-long-node-label-that-cannot-possibly-fit"
-                   for t in titles), titles
+        assert all(t == huge for t in titles), titles
 
     def test_an_untrimmed_label_is_not_given_a_pointless_title(self):
         svg = _map(label="SHORT")

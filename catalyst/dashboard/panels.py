@@ -2103,12 +2103,24 @@ def _narrative_evidence(t: queries.Trace, p: str, db_for_graph=None,
             node, kind = obj or subj, label_of(d, ("object_kind", "subject_kind"))
         if not node or node == centre:
             continue
-        key = (predicate, node)
-        if key in seen:
+        # ONE BOX PER THING, whatever it is linked by.
+        #
+        # The key used to be (predicate, node), so the same entity linked
+        # twice was drawn twice: "PDUFA decision" appeared at the top
+        # left as `likely_beneficiary_of` and again at the bottom right
+        # as `schedules`, reading as two different events. Rendered and
+        # looked at. Keyed on the NODE, the second link joins the box it
+        # belongs to and its predicate rides along on the same line.
+        if node in seen:
             continue
-        seen.add(key)
+        seen.add(node)
         branches.append((
-            predicate or "linked to", node, kind or "entity",
+            # Predicates are stored as they came from the graph, in
+            # snake_case: "likely_beneficiary_of" is not a phrase anyone
+            # reads. The underlying value is untouched; only the drawn
+            # label loses its underscores.
+            str(predicate or "linked to").replace("_", " "),
+            node, kind or "entity",
             label_of(d, ("reliability", "confidence", "strength")),
             label_of(d, ("source_ref", "source_class", "source")),
         ))
@@ -2552,7 +2564,17 @@ def refusals_simple(db: Db, p: str = "refs") -> str:
         [(esc(lbl), [(esc(a), esc(b_), w) for a, b_, w in ns])
          for lbl, ns in layers],
         [(esc(a), esc(b_), w, esc(t)) for a, b_, w, t in edges],
-        chart_id=f"{p}-map", links=links) + "</div>")
+        chart_id=f"{p}-map", links=links,
+        # Same reason as BRAIN_COLUMN_NOTES: the outer columns hold
+        # REASONS and RESULTS, not things, so several candidates share
+        # one node and the picture reads as a merge unless it says so.
+        column_notes={
+            "Why it refused": ("the reason given - every candidate "
+                               "refused for it runs into this node"),
+            "Which candidate": "one dated, tradeable event",
+            "What it then did": ("what the price did afterwards, "
+                                 "scored later"),
+        }) + "</div>")
     out.append(prov(
         "Left is the rule that declined it, middle is the candidate, right is "
         "what the price did afterwards. A reason with most of its strands "
@@ -3554,6 +3576,26 @@ def brain_ways_in(b, p: str) -> str:
                    "can read.") + "</div>")
 
 
+#: WHAT A NODE IN EACH COLUMN ACTUALLY IS, in one short line.
+#:
+#: The middle columns hold ANSWERS, not things - and that is the single
+#: most misread part of this drawing. Three tickers all run into one
+#: node labelled "long", which a reader takes as three candidates being
+#: merged into one when it means all three were judged the same way.
+#: Nothing on the page said otherwise, so the picture was quietly
+#: teaching the wrong model of how the bot works.
+BRAIN_COLUMN_NOTES = {
+    "Sources": "a filing or headline the bot read",
+    "Candidates": "one dated, tradeable event",
+    "What it linked": "a person or company named in it",
+    "Model view": ("Claude's answer - every candidate it gave "
+                   "the same answer to runs into it"),
+    "Risk engine": ("what the code then decided - again, one node "
+                    "per answer"),
+    "Outcome": "how the trade actually ended",
+}
+
+
 def brain_panel(db: Db, p: str = "brain", zoom: float = 1.0,
                 nodes: int = None, focus: str = "") -> str:
     """The whole system's wiring in one picture.
@@ -3679,7 +3721,7 @@ def brain_panel(db: Db, p: str = "brain", zoom: float = 1.0,
         [(esc(s), esc(d), w, esc(t))
          for s, d, w, t in queries.collapse_edges(b.edges)],
         chart_id=f"{p}-map", links=links,
-        max_per_layer=cap, zoom=zoom)
+        max_per_layer=cap, zoom=zoom, column_notes=BRAIN_COLUMN_NOTES)
         + "</div>")
     out.append(brain_interaction(f"{p}-map", p))
     out.append(prov(
