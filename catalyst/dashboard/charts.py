@@ -371,11 +371,46 @@ def labels_outside_viewbox(svg: str) -> list[str]:
 
 #: Reliability drives the EDGE, because it is a property of the link
 #: (how the claim was sourced), not of the thing at either end.
-_RELIABILITY_DASH = {
-    "filed": "", "exchange": "", "primary": "",
-    "reported": "5 3", "secondary": "5 3",
-    "inferred": "2 4", "model": "2 4",
-}
+#: How firm a link is, drawn as a line style.
+#:
+#: THIS WAS A LOOKUP TABLE AND IT WAS WRONG ABOUT EVERY REAL VALUE.
+#: It keyed on "primary", "secondary", "inferred" - but schema_graph.sql
+#: stores `primary_document`, `official_schedule`, `secondary_report`
+#: and `model_inference`, none of which matched. Every edge fell through
+#: to the default, and the default was the DOTTED style that means "the
+#: model guessed this". So a fact taken from an SEC filing was drawn
+#: identically to Claude's speculation - and drawn AS speculation.
+#:
+#: House rule 7, exactly: classify by the rule, not by enumeration. A
+#: hand-written list mislabels the first case nobody thought of, and
+#: here it mislabelled all four of the ones that actually exist.
+def reliability_dash(reliability) -> str:
+    """"" solid for a document, "5 3" for a report, "2 4" for a guess."""
+    text = str(reliability or "").lower()
+    if "model" in text or "infer" in text:
+        return "2 4"
+    if "secondary" in text or "report" in text or "news" in text:
+        return "5 3"
+    # SOLID IS EARNED, never assumed. Only a value that says it came
+    # from a document or an official schedule gets the strongest line;
+    # anything unrecognised - including blank - falls to the weakest.
+    #
+    # This is the direction the default has to point. The version this
+    # replaces had it the other way round and drew SEC filings as model
+    # guesses; getting it wrong in the other direction would be worse,
+    # because it would dress a guess up as a document.
+    if any(w in text for w in ("primary", "document", "official",
+                               "schedule", "filed", "exchange")):
+        return ""
+    return "2 4"
+
+
+#: Kept as a name for anything still importing it, derived from the rule
+#: above so the two can never disagree.
+_RELIABILITY_DASH = {k: reliability_dash(k) for k in (
+    "primary_document", "official_schedule", "secondary_report",
+    "model_inference", "filed", "exchange", "primary", "reported",
+    "secondary", "inferred", "model")}
 
 
 def _wrap(text: str, width: int) -> list:
@@ -421,7 +456,9 @@ def mindmap(
     node_h = 20 + 13 * max(len(_wrap(b[1], 22)) for b in shown)
     radius_x = width / 2 - 105
     radius_y = max(150.0, 34.0 * n / 2)
-    height = int(2 * radius_y + node_h + 90)
+    # +22 for the legend strip along the bottom, so it never lands on
+    # the lowest node.
+    height = int(2 * radius_y + node_h + 90) + 22
     cx, cy = width / 2, height / 2
 
     out = [
@@ -440,7 +477,7 @@ def mindmap(
         nx = cx + radius_x * math.cos(angle)
         ny = cy + radius_y * math.sin(angle)
         positions.append((nx, ny))
-        dash = _RELIABILITY_DASH.get((reliability or "").lower(), "2 4")
+        dash = reliability_dash(reliability)
         dash_attr = f' stroke-dasharray="{dash}"' if dash else ""
         out.append(
             f'<line x1="{cx:.1f}" y1="{cy:.1f}" x2="{nx:.1f}" y2="{ny:.1f}" '
@@ -484,6 +521,27 @@ def mindmap(
             f'<text x="{cx:.1f}" y="{cy - ch / 2 + 18 + 14 * j:.1f}" '
             f'font-size="{FONT_SIZE + 1}" text-anchor="middle" '
             f'fill="#ffffff">{ln}</text>')
+
+    # WHAT THE LINE STYLES MEAN, ON THE PICTURE. It was written in the
+    # paragraph below the chart, which is not where anyone looks while
+    # reading the chart - and the distinction it carries is the most
+    # important one here: whether a link came from a filed document or
+    # from the model guessing.
+    ly = height - 12
+    lx = 12.0
+    for dash, words in (("", "filed with a regulator"),
+                        ("5 3", "reported"),
+                        ("2 4", "Claude inferred it")):
+        da = f' stroke-dasharray="{dash}"' if dash else ""
+        out.append(
+            f'<line x1="{lx:.1f}" y1="{ly - 4:.1f}" x2="{lx + 22:.1f}" '
+            f'y2="{ly - 4:.1f}" stroke="var(--baseline)" '
+            f'stroke-width="1.5"{da}/>')
+        out.append(
+            f'<text x="{lx + 28:.1f}" y="{ly:.1f}" '
+            f'font-size="{FONT_SIZE - 1}" text-anchor="start" '
+            f'fill="var(--muted)">{words}</text>')
+        lx += 34 + _text_width_px(words) + 18
 
     out.append("</svg>")
     return "\n".join(out)
@@ -780,6 +838,9 @@ MAX_NODES_PER_LAYER = 14
 #: that: never so narrow that the nodes crowd, never so wide that the
 #: owner is scrolling for a minute to reach the last column.
 MIN_COL_WIDTH = 150.0
+#: What a stage that recorded nothing is worth on the canvas. Enough to
+#: be seen and read as a stage, not enough to push the drawing aside.
+EMPTY_COL_WIDTH = 96.0
 MAX_MAP_WIDTH = 2600.0
 #: Node radius plus breathing room between glyph and circle.
 NODE_LABEL_PAD = 26.0
@@ -864,6 +925,7 @@ def neural_map(
     links: dict | None = None,   # node_id -> href, for clickable nodes
     max_per_layer: int = MAX_NODES_PER_LAYER,
     zoom: float = 1.0,
+    column_notes: dict | None = None,   # column label -> what a node IS
 ) -> str:
     """The system's live wiring, drawn as connected layers.
 
@@ -920,16 +982,51 @@ def neural_map(
     label_px = [
         max((_text_width_px(nl) for _, nl, _ in nodes), default=0.0)
         for _, nodes, _ in kept]
-    # The label sits on ONE side of its node, so a column needs its
-    # longest label plus the node and its padding, then the same again
-    # for the mirrored half.
-    col_needs = [max(MIN_COL_WIDTH, 2 * (px + NODE_LABEL_PAD))
-                 for px in label_px]
+    # LABELS SIT ABOVE THEIR NODE, so a column needs its longest label
+    # plus a little padding - not twice that.
+    #
+    # They used to sit beside it, on the side chosen by which half of
+    # the map the column was in, and that rule put every label directly
+    # on top of a connector: a node in the left half was labelled to its
+    # RIGHT, which is exactly where its edges leave, and one in the
+    # right half was labelled to its LEFT, which is where its edges
+    # arrive. Measured, not guessed - EMBC sat at x=295 with its label
+    # running right from 309 straight along its own outgoing curve.
+    # It read as "EMBC" with a dash through it.
+    #
+    # Above the node there is never a horizontal connector, whichever
+    # half the column is in, and the label gets the WHOLE column to live
+    # in rather than half of it - which retires most of the trimming the
+    # owner reported twice as "cut off text".
+    #
+    # AN EMPTY COLUMN COLLAPSES. Three of the six stages here are
+    # routinely empty, and at a 150px floor each they took 38% of the
+    # canvas to say nothing, leaving the real content crammed into the
+    # middle and reading as a chart that failed to load. It still
+    # appears - a stage that recorded nothing is a fact worth seeing -
+    # but as a narrow strip.
+    col_needs = [(EMPTY_COL_WIDTH if not nodes
+                  else max(MIN_COL_WIDTH, px + NODE_LABEL_PAD))
+                 for px, (_, nodes, _) in zip(label_px, kept)]
     # Never narrower than it was, never wider than can be scrolled
     # comfortably.
     width = int(max(width, min(sum(col_needs), MAX_MAP_WIDTH)))
-    _scale = width / sum(col_needs) if sum(col_needs) else 1.0
-    col_widths = [w * _scale for w in col_needs]
+    # SPARE WIDTH GOES TO THE COLUMNS THAT HAVE SOMETHING IN THEM.
+    # Scaling every column by the same factor to fill the canvas undid
+    # the collapse above: an empty stage was still handed its share of
+    # the surplus, so the three empty ones came back to within a third
+    # of the full ones and the drawing was still mostly blank. An empty
+    # column keeps its strip; the rest share what is left.
+    filled = [i for i, (_, nodes, _) in enumerate(kept) if nodes]
+    spare = width - sum(col_needs)
+    col_widths = list(col_needs)
+    if spare > 0 and filled:
+        for i in filled:
+            col_widths[i] += spare * (col_needs[i] / sum(
+                col_needs[j] for j in filled))
+    elif sum(col_needs):
+        _scale = width / sum(col_needs)
+        col_widths = [w * _scale for w in col_needs]
     col_centres, _acc = [], 0.0
     for w in col_widths:
         col_centres.append(_acc + w / 2)
@@ -940,8 +1037,22 @@ def neural_map(
     # in a mostly-empty frame, which reads as a chart that failed to load
     # rather than as a small answer. The floor is now only what the
     # header and caption need.
-    height = max(180, 96 + row_gap * tallest)
-    top = 74
+    # ROOM FOR THE COLUMN NOTES. Without them a reader has to infer
+    # what a node in each column IS, and the inference goes wrong in the
+    # one place it matters: three tickers all run into a single node
+    # labelled "long", which reads as three candidates being MERGED when
+    # it means all three were judged long. Saying "the direction Claude
+    # returned - candidates sharing one are drawn into it" is the
+    # difference between a picture that misleads and one that informs.
+    column_notes = column_notes or {}
+    note_lines = {}
+    for _lbl, _nodes, _x in kept:
+        if _nodes and column_notes.get(_lbl):
+            note_lines[_lbl] = _wrap(column_notes[_lbl], 26)
+    note_rows = max((len(v) for v in note_lines.values()), default=0)
+    note_h = 12 * note_rows
+    height = max(180, 96 + note_h + row_gap * tallest)
+    top = 74 + note_h
 
     # Position every node first: edges need both endpoints.
     pos, radius = {}, {}
@@ -979,6 +1090,14 @@ def neural_map(
         # never decide what is in shot. The SVG itself stays free of
         # script, so the drawing remains a server-rendered artifact that
         # reproduces exactly with JavaScript turned off.
+        # AN ARROWHEAD, so the picture says which way it runs. The
+        # direction was only ever stated in prose above the chart, and a
+        # node-link diagram whose lines have no direction is read as
+        # "these are related", not as "this became that" - which is the
+        # whole content of this drawing.
+        f'<defs><marker id="{chart_id}-arrow" viewBox="0 0 8 8" refX="7" '
+        f'refY="4" markerWidth="5" markerHeight="5" orient="auto-start-reverse">'
+        f'<path d="M0,1 L7,4 L0,7 z" fill="var(--accent)"/></marker></defs>',
         f'<g class="camera" id="{chart_id}-camera">',
     ]
 
@@ -992,8 +1111,26 @@ def neural_map(
         out.append(
             f'<text x="{cx:.1f}" y="46" font-size="{FONT_SIZE - 1}" '
             f'text-anchor="middle" fill="var(--muted)">'
-            + (f"{len(nodes)} shown, {extra} more" if extra else f"{len(nodes)}")
+            + (f"{len(nodes)} shown, {extra} more" if extra
+               # A BARE "0" IS THE ZERO THIS PROJECT KEEPS BANNING. It
+               # says nothing about whether the stage is broken or
+               # simply had nothing to record, and it is the reading a
+               # person lands on first.
+               else "nothing yet" if not nodes else f"{len(nodes)}")
             + "</text>")
+        for li, line in enumerate(note_lines.get(label, [])):
+            out.append(
+                f'<text x="{cx:.1f}" y="{60 + 12 * li}" '
+                f'font-size="{FONT_SIZE - 2}" text-anchor="middle" '
+                f'fill="var(--muted)" font-style="italic">{line}</text>')
+        if not nodes:
+            # A dotted spine down the empty column, so it reads as a
+            # stage that is present and empty rather than as a gap where
+            # the drawing failed.
+            out.append(
+                f'<line x1="{cx:.1f}" y1="64" x2="{cx:.1f}" '
+                f'y2="{height - 26}" stroke="var(--hairline)" '
+                f'stroke-dasharray="2 5"/>')
 
     # Edges: cubic beziers with horizontal control points. Opacity
     # carries strength, so a heavily-used link reads as a brighter one.
@@ -1005,6 +1142,16 @@ def neural_map(
             continue        # an endpoint past the per-layer cap
         x1, y1 = pos[src]
         x2, y2 = pos[dst]
+        # STOP SHORT OF THE TARGET, so the arrowhead lands OUTSIDE the
+        # circle. Nodes are painted last, on purpose, so an edge ending
+        # at the node centre has its arrowhead covered by the node -
+        # which is how the first version of this shipped with markers
+        # declared, attached, and invisible in every rendering.
+        _gap = radius[dst] + 6.0
+        if x2 >= x1:
+            x2 = max(x1, x2 - _gap)
+        else:
+            x2 = min(x1, x2 + _gap)
         cxa, cxb = x1 + (x2 - x1) * 0.45, x2 - (x2 - x1) * 0.45
         opacity = 0.22 + 0.55 * (weight / max_e)
         # TWO paths per edge. A 1.1px line is close to unhittable with a
@@ -1027,7 +1174,8 @@ def neural_map(
         out.append(
             f'<g class="edge-wrap" data-src="{src}" data-dst="{dst}">'
             f'<path class="edge" d="{d}" fill="none" stroke="var(--accent)" '
-            f'stroke-width="1.1" opacity="{opacity:.2f}" pointer-events="none"/>'
+            f'stroke-width="1.1" opacity="{opacity:.2f}" pointer-events="none" '
+            f'marker-end="url(#{chart_id}-arrow)"/>'
             f'<path class="edge-hit" d="{d}" fill="none" stroke="transparent" '
             f'stroke-width="14" pointer-events="stroke">'
             f"<title>{title}</title></path></g>")
@@ -1038,7 +1186,6 @@ def neural_map(
     links = links or {}
     for ci, (label, nodes, _) in enumerate(kept):
         colour = NEURAL_STEPS[min(ci, len(NEURAL_STEPS) - 1)]
-        left_side = ci >= n_cols / 2
         for nid, node_label, weight in nodes:
             x, y = pos[nid]
             r = radius[nid]
@@ -1053,15 +1200,14 @@ def neural_map(
                 f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{r:.1f}" fill="{colour}" '
                 f'stroke="var(--page)" stroke-width="2" '
                 f'pointer-events="none"/></g>')
-            tx = x - r - 7 if left_side else x + r + 7
-            anchor = "end" if left_side else "start"
-            # FIT THE COLUMN, don't guess at 20 characters. The label
-            # runs from the node towards the column edge, so the room it
-            # has is half a column less the node and its padding. A
-            # fixed 20 threw away readable text in a wide column and
-            # still overflowed a narrow one (owner-reported: "you can
-            # only read a few lines before it cuts off").
-            room_px = max(40.0, col_widths[ci] / 2 - r - 14)
+            # ABOVE THE NODE, CENTRED. See the column-width note above:
+            # beside it, the label always lay along the node's own
+            # connectors. Above it there is nothing to collide with, the
+            # rule is the same in every column, and the label gets the
+            # whole column instead of half.
+            tx, ty = x, y - r - 6
+            anchor = "middle"
+            room_px = max(40.0, col_widths[ci] - 10)
             fits = max(8, int(room_px / (FONT_SIZE * 0.56)))
             trimmed = len(node_label) > fits
             text = node_label if not trimmed else node_label[:fits - 1] + "…"
@@ -1070,7 +1216,7 @@ def neural_map(
             # through - painting the page colour as a stroke UNDER the
             # glyphs cuts a clean gap in every line behind it.
             label_svg = (
-                f'<text x="{tx:.1f}" y="{y + 3.5:.1f}" font-size="{FONT_SIZE - 1}" '
+                f'<text x="{tx:.1f}" y="{ty:.1f}" font-size="{FONT_SIZE - 1}" '
                 f'text-anchor="{anchor}" fill="var(--ink-2)" '
                 f'stroke="var(--page)" stroke-width="3.5" paint-order="stroke" '
                 f'style="stroke-linejoin:round">{text}'
@@ -1096,8 +1242,23 @@ def neural_map(
         # once and carry their count as weight, so "9 links drawn" beside
         # a headline of "20 links" reads as an error in one of them.
         f'text-anchor="end" fill="var(--muted)">'
-        + (f"{drawn} line(s) drawn, carrying {records} recorded link(s)"
-           if records != drawn else f"{drawn} recorded link(s) drawn")
+        # PLAIN ENGLISH. "4 line(s) drawn, carrying 6 recorded link(s)"
+        # is accurate and tells a reader nothing: it never says that a
+        # repeated link is drawn once and thickened, which is the only
+        # reason the two numbers differ.
+        + (f"{drawn} line(s) — repeats are drawn once, so these carry "
+           f"{records} recorded links between them"
+           if records != drawn else f"{drawn} recorded link(s)")
         + "</text>")
+    # WHAT A DOT AND A LINE ACTUALLY MEAN. Node colour carries its
+    # column and node size carries how many links it has, and neither
+    # was written down anywhere - so a bigger circle looked like
+    # emphasis somebody had chosen rather than a fact being reported.
+    out.append(
+        f'<text x="10" y="{height - 10}" font-size="{FONT_SIZE - 1}" '
+        f'text-anchor="start" fill="var(--muted)">'
+        "each dot is one thing the bot recorded · a bigger dot has more "
+        "links · each arrow is one recorded link, pointing the way the "
+        "work flowed</text>")
     out.append("</svg>")
     return "\n".join(out)

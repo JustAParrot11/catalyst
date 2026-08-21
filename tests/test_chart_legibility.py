@@ -33,7 +33,7 @@ import re
 
 import pytest
 
-from catalyst.dashboard.charts import decision_spider, neural_map
+from catalyst.dashboard.charts import decision_spider, mindmap, neural_map
 
 # A realistic decision: the labels here are the shapes the live system
 # actually produces - skip reasons, entity names with roles, and the
@@ -163,14 +163,37 @@ class TestTheNeuralMapDoesNotTruncate:
         assert "skip: priced_in_below_raised_floor" in svg
 
     def test_the_map_widens_rather_than_cutting(self):
-        """A narrow map with long labels must grow, not trim."""
+        """A map whose labels cannot fit must grow, not trim.
+
+        THE LABELS HERE GOT LONGER when the label moved from beside its
+        node to above it. Beside it, a label had half a column and the
+        column had to be twice its width; above it, the label has the
+        whole column and needs only its own width plus padding - so the
+        old fixture (32 characters, five columns) now genuinely FITS in
+        1180px and widening it would be padding for its own sake.
+
+        The invariant is unchanged and is asserted on both counts: when
+        the labels really are too long the map widens, AND nothing is
+        cut either way.
+        """
         long_layers = [
             (f"layer{i}", [(f"n{i}", "a genuinely long node label here", 1)])
             for i in range(5)]
         svg = neural_map(long_layers, [], chart_id="m")
+        assert not re.findall(r">([^<>]*…)</text>", svg), (
+            "labels cut off in a map that had room for them")
+
+        # Now past what 1180px can hold, whatever the geometry.
+        longer = [
+            (f"layer{i}",
+             [(f"n{i}", "a considerably longer node label than that one", 1)])
+            for i in range(6)]
+        svg = neural_map(longer, [], chart_id="m")
         width = _view_box(svg)[2]
         assert width > 1180, (
             f"map stayed at {width}px with labels that cannot fit in it")
+        assert not re.findall(r">([^<>]*…)</text>", svg), (
+            "the map widened and still cut its labels")
 
     def test_it_does_not_widen_without_limit(self):
         """Scrolling for a minute to reach the last column is its own
@@ -192,3 +215,159 @@ class TestTheNeuralMapDoesNotTruncate:
     def test_it_is_still_deterministic(self):
         assert (neural_map(LAYERS, EDGES, chart_id="m")
                 == neural_map(LAYERS, EDGES, chart_id="m"))
+
+
+class TestTheMapsCanActuallyBeUNDERSTOOD:
+    """OWNER-ASKED 2026-08-21: "if you visually look at the nerual
+    networks were generating, are they really easy to understand? or can
+    you review how they are presented".
+
+    Rendered and looked at, the honest answer was no, for four reasons
+    that had nothing to do with the data being wrong.
+    """
+
+    def test_a_label_never_lies_along_its_own_connector(self):
+        """THE ONE THAT MADE THEM UNREADABLE. Labels sat beside their
+        node on a side chosen by which half of the map the column was
+        in - which put every label on top of a connector: a node in the
+        left half was labelled to its RIGHT, exactly where its edges
+        leave. Measured: EMBC at x=295 with its label running right from
+        309, straight along its own outgoing curve. It read as struck
+        through.
+
+        Above the node there is no horizontal connector, in any column.
+        """
+        svg = neural_map(LAYERS, EDGES, chart_id="m")
+        centres = {m.group(1): (float(m.group(2)), float(m.group(3)))
+                   for m in re.finditer(
+                       r'data-node="([^"]+)"[^>]*>\s*<circle cx="([\d.]+)" '
+                       r'cy="([\d.]+)"', svg)}
+        assert centres, "no nodes drawn"
+        labels = [(float(m.group(1)), float(m.group(2)), m.group(3))
+                  for m in re.finditer(
+                      r'<text x="([\d.]+)" y="([\d.]+)" font-size="\d+" '
+                      r'text-anchor="(\w+)"', svg)]
+        found = 0
+        for nid, (nx, ny) in centres.items():
+            # A node's own label: the one sitting in its column, within
+            # a row of it. Matched by position rather than by reading
+            # the text, so the assertion is about geometry.
+            near = [(x, y, a) for x, y, a in labels
+                    if abs(x - nx) < 2 and 0 < ny - y < 30]
+            assert near, f"{nid} has no label above it"
+            for _x, y, anchor in near:
+                assert y < ny, (
+                    f"{nid}'s label is at the node's own height, where "
+                    "every connector runs")
+                assert anchor == "middle", (
+                    f"{nid}'s label is anchored to one side, which is how "
+                    "it ends up lying along the edges leaving that side")
+                found += 1
+        assert found, "no node labels drawn"
+
+    def test_an_empty_stage_is_a_strip_not_a_third_of_the_canvas(self):
+        """Three of the brain's six stages are routinely empty. At the
+        same width as a full one they took 38% of the drawing to say
+        nothing, and the content that existed was squeezed into what
+        was left - which reads as a chart that failed to load."""
+        layers = [("Sources", []),
+                  ("Candidates", [("c", "EMBC", 2)]),
+                  ("What it linked", []),
+                  ("Model view", [("v", "long", 2)])]
+        svg = neural_map(layers, [("c", "v", 1, "t")], chart_id="m")
+        centres = [float(m.group(1)) for m in re.finditer(
+            r'<text x="([\d.]+)" y="30"', svg)]
+        assert len(centres) == 4
+        # Recover each column's width from the centres: the first is
+        # twice its own centre, and every later one follows from the
+        # gap. Comparing neighbouring GAPS cannot work - each gap is the
+        # mean of two adjacent widths, so an alternating empty/full
+        # layout gives identical gaps throughout.
+        widths = [2 * centres[0]]
+        for i in range(1, len(centres)):
+            widths.append(2 * (centres[i] - centres[i - 1]) - widths[-1])
+        empty = [widths[0], widths[2]]
+        full = [widths[1], widths[3]]
+        assert max(empty) < min(full), (
+            f"an empty stage ({empty}) is as wide as a full one ({full})")
+
+    def test_an_empty_stage_still_says_so_in_words(self):
+        """It must not vanish either - a stage that recorded nothing is
+        a fact. And a bare "0" is the unexplained zero this project
+        keeps banning."""
+        svg = neural_map([("Sources", []), ("Candidates", [("c", "X", 1)])],
+                         [], chart_id="m")
+        assert "SOURCES" in svg
+        assert "nothing yet" in svg
+
+    def test_every_edge_shows_which_way_it_runs(self):
+        """Left to right was stated in the prose above the chart and
+        nowhere in the chart. A node-link diagram with undirected lines
+        reads as "these are related", not "this became that" - which is
+        the entire content of this drawing."""
+        svg = neural_map(LAYERS, EDGES, chart_id="m")
+        assert "<marker" in svg, "no arrowhead is defined"
+        assert svg.count("marker-end=") >= 1
+
+    def test_the_arrowhead_is_not_hidden_under_the_node(self):
+        """Nodes are painted last, on purpose. An edge that ends at the
+        target's centre has its arrowhead covered by the target - which
+        is how the first attempt shipped with markers declared,
+        attached, and invisible in every rendering."""
+        layers = [("A", [("a", "a", 1)]), ("B", [("b", "b", 1)])]
+        svg = neural_map(layers, [("a", "b", 1, "t")], chart_id="m")
+        bx = float(re.search(
+            r'data-node="b"[^>]*>\s*<circle cx="([\d.]+)"', svg).group(1))
+        end_x = float(re.search(
+            r'<path class="edge" d="M[\d.]+,[\d.]+ C[^"]* ([\d.]+),[\d.]+"',
+            svg).group(1))
+        assert end_x < bx - 4, (
+            f"the edge ends at {end_x} against a node centred at {bx}, so "
+            "the arrowhead is under the node")
+
+    def test_what_a_dot_and_a_line_MEAN_is_written_down(self):
+        """Node colour carries its column and node size carries its link
+        count, and neither was stated anywhere - so a bigger circle
+        looked like emphasis somebody chose rather than a fact."""
+        svg = neural_map(LAYERS, EDGES, chart_id="m")
+        assert "each dot is one thing the bot recorded" in svg
+        assert "bigger dot has more links" in svg
+
+
+class TestEvidenceIsNotDressedUpAsSomethingItIsNot:
+
+    def test_a_filed_document_is_never_drawn_as_a_model_guess(self):
+        """THE DISHONEST ONE. The line-style table keyed on "primary",
+        "secondary" and "inferred", but schema_graph.sql stores
+        `primary_document`, `official_schedule`, `secondary_report` and
+        `model_inference` - so NOTHING matched, every edge fell to the
+        default, and the default was the dotted style meaning "Claude
+        inferred this". An SEC filing was drawn as speculation.
+
+        House rule 7: classify by the rule, not by a list.
+        """
+        from catalyst.dashboard.charts import reliability_dash
+
+        assert reliability_dash("primary_document") == ""
+        assert reliability_dash("official_schedule") == ""
+        assert reliability_dash("secondary_report") == "5 3"
+        assert reliability_dash("model_inference") == "2 4"
+
+    def test_an_unknown_reliability_under_claims_rather_than_over_claims(self):
+        """The default has to point at the weakest style. Drawing an
+        unrecognised value as a filed document would dress a guess up as
+        evidence, which is worse than the bug this replaces."""
+        from catalyst.dashboard.charts import reliability_dash
+
+        for unknown in ("", None, "something_nobody_added_yet", "vibes"):
+            assert reliability_dash(unknown) == "2 4", unknown
+
+    def test_the_mindmap_says_what_its_line_styles_mean(self):
+        """It was explained in the paragraph under the chart, which is
+        not where anyone looks while reading the chart - and the
+        distinction is the most important one on it."""
+        svg = mindmap("EMBC", [("mentions", "A person", "person",
+                                "primary_document", "edgar")],
+                      chart_id="m")
+        assert "filed with a regulator" in svg
+        assert "Claude inferred it" in svg
