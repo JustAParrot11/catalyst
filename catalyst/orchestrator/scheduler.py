@@ -299,6 +299,34 @@ def _maybe_reconcile_yesterday(db_file: str) -> None:
             if done:
                 continue
             try:
+                # CORRECT THE LEDGER BEFORE COMPARING IT. Owner-reported
+                # 2026-08-20: "it doesnt accurately reflect my costings,
+                # i need it updating historically so it looks correct".
+                #
+                # A day the bot spent on but failed to record - 2026-08-15
+                # billed 45.7446c against an empty ledger - is a hole in
+                # every historical figure AND a pause the next morning,
+                # from one cause. Rebuilding the day from Anthropic's own
+                # token counts fixes both, and it is only legitimate
+                # because price() reproduces their charges exactly:
+                # verified to the cent on five separate days.
+                #
+                # Failure here never blocks the comparison; an
+                # uncorrected day simply reconciles as it always did.
+                try:
+                    from catalyst.cost.backfill import backfill_day, fetch_usage_day
+                    fixed = backfill_day(
+                        conn, day,
+                        fetch=partial(fetch_usage_day,
+                                      admin_key=creds.anthropic_admin_key))
+                    if fixed.applied:
+                        _log.warning(
+                            "Ledger corrected for %s: %s", day, fixed.reason)
+                except Exception:  # noqa: BLE001 - reporting, never trading
+                    _log.exception(
+                        "Could not rebuild the ledger for %s from the usage "
+                        "report; reconciling the day as recorded.", day)
+
                 result = reconcile_day(
                     day, conn,
                     partial(fetch_cost_api_day,
