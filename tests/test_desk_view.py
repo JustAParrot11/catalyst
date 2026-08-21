@@ -465,3 +465,79 @@ class TestNothingHereCanBeKilledByOneBadRow:
         total = queries.spend_today_cents(db)
         db.close()
         assert total.is_finite()
+
+
+class TestTheCapShownIsTheCapBEINGSPENTAGAINST:
+    """OWNER-REPORTED 2026-08-21, with a screenshot: "where has the
+    month against cap come from, im unsure what it means, my API montly
+    is 100" - against a panel reading "$19.77 / $8.00" with a full red
+    bar, while the status strip on the SAME PAGE read "$19.77 of
+    $100.00".
+
+    _cost_desk read c.max_cap_cents, which is GOVERNOR_MAX_CAP_CENTS: a
+    hard bound on the PROFIT-SHARE mechanism, capping how far realised
+    profit may walk the budget up on its own. It has nothing to do with
+    the figure the owner sets.
+
+    One wrong field made five numbers wrong at once, and cost_panel
+    already carries a comment about this exact defect - an owner who
+    raised their budget and still saw the old cap concluded the setting
+    had done nothing.
+    """
+
+    def _owner_cap(self, path, usd=100, cents="1977"):
+        import catalyst.setup.credentials as creds_mod
+
+        c = _conn(path)
+        c.execute("INSERT INTO cost_events VALUES (?,?,?,?,?,?,?,?)",
+                  ("cap-e1", "{}", "m", "scheduled", "research", cents,
+                   NOW.replace(day=1).isoformat(), "cap-e1"))
+        c.commit()
+        c.close()
+
+        class Creds:
+            anthropic_admin_key = ""
+            settings = {"monthly_budget_usd": usd}
+
+        real = creds_mod.load_credentials
+        creds_mod.load_credentials = lambda *a, **k: Creds()
+        db = Db(path)
+        try:
+            return panels._cost_desk(db, "p"), queries.cost_panel(db)
+        finally:
+            db.close()
+            creds_mod.load_credentials = real
+
+    def test_the_cap_tile_is_the_owners_figure(self, seeded):
+        html, panel = self._owner_cap(seeded)
+        assert panel.base_cap_cents == Decimal("10000")
+        assert "$100.00" in html
+        assert "$8.00" not in html, (
+            "the profit-share bound is being shown as the owner's cap")
+
+    def test_the_gauge_measures_against_the_same_cap(self, seeded):
+        html, _ = self._owner_cap(seeded)
+        assert "$19.77 / $100.00" in html
+
+    def test_the_daily_ceiling_is_derived_from_that_cap(self, seeded):
+        """It is derived, so reading the wrong monthly cap silently
+        halved the daily one too - $5 where the bot spends against $10."""
+        html, _ = self._owner_cap(seeded)
+        assert "/ $10.00" in html
+
+    def test_the_forecast_is_not_strangled_by_a_false_exhaustion(self, seeded):
+        """With the cap read as $8 against $19.77 spent, forecast()
+        returned already_exhausted and took the early return - so burn
+        rate and projected month both rendered as a dash. Two more
+        figures lost to the same wrong field."""
+        html, _ = self._owner_cap(seeded)
+        assert "$0.94" in html, "burn rate did not compute"
+        assert "$29.18" in html, "projected month did not compute"
+
+    def test_a_cap_already_spent_never_prints_the_word_None(self, seeded):
+        """will_stop_early is true when the cap is ALREADY gone as well
+        as when a date is projected, and in the first case exhausted_on
+        is None - so the tile read "runs out None" at the owner."""
+        html, _ = self._owner_cap(seeded, usd=5, cents="1977")
+        assert "None" not in html
+        assert "already spent" in html

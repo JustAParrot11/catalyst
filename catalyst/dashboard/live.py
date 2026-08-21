@@ -144,10 +144,30 @@ def _broker():
     if not key or not secret:
         return None, "no Alpaca credentials are saved"
     try:
-        paper = getattr(creds, "account_mode", "paper") != "live"
-        return Broker(key, secret, paper=paper, timeout=TIMEOUT_S), ""
+        # PAPER OR LIVE IS THE BASE URL, not a keyword.
+        #
+        # OWNER-REPORTED, from a screenshot reading "broker could not be
+        # opened: TypeError" on every row: this called
+        # Broker(key, secret, paper=..., timeout=...) and Broker.__init__
+        # accepts neither. Every call raised, so the live-quote feature
+        # had never produced a single quote on a real machine - it
+        # failed identically to having no credentials, which is exactly
+        # why it went unnoticed.
+        #
+        # It was invisible to the suite because every test here passes a
+        # stub broker in, so the one line that builds a real one was
+        # never executed. test_live_quotes.py now checks the call
+        # against Broker's actual signature.
+        from catalyst.execution.broker import LIVE_BASE_URL, PAPER_BASE_URL
+
+        live = getattr(creds, "account_mode", "paper") == "live"
+        return Broker(key, secret,
+                      base_url=LIVE_BASE_URL if live else PAPER_BASE_URL), ""
     except Exception as exc:      # noqa: BLE001
-        return None, f"broker could not be opened: {type(exc).__name__}"
+        # THE MESSAGE CARRIES THE REASON (house rule 3). "TypeError" on
+        # its own took a screenshot to diagnose; the text says which.
+        return None, (f"broker could not be opened: "
+                      f"{type(exc).__name__}: {str(exc)[:160]}")
 
 
 def quotes_for(tickers, broker=None, now=None, use_cache=True) -> dict:
