@@ -352,6 +352,45 @@ h3 { font-size: 11px; margin: 14px 0 5px 0; text-transform: uppercase;
 .spark-entry { stroke: var(--baseline); stroke-width: 1;
   stroke-dasharray: 2 2; }
 .spark-dot { fill: var(--ink-2); }
+/* The one-line answer to "why did today cost that?". It sits ABOVE the
+   figures rather than under them: the reason for a zero is the more
+   important half, and a reader who stops after one line should have
+   read the half that matters. */
+.verdict { margin: 6px 0 10px; padding: 7px 10px; font-size: var(--t-base);
+  border: 1px solid var(--hairline); border-left-width: 3px;
+  border-radius: 3px; background: var(--surface); max-width: 900px; }
+
+/* The desk view. Two charts side by side where a comparison is the
+   point, stacking on a narrow screen rather than scrolling sideways -
+   a chart you have to scroll to see is a chart nobody compares. */
+.deskgrid { display: grid; gap: 10px; margin: 8px 0 2px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.deskcell { border: 1px solid var(--hairline); border-radius: 4px;
+  padding: 8px 10px 4px; background: var(--surface); min-width: 0; }
+.deskcell h4 { margin: 0 0 4px; font-size: var(--t-fine);
+  font-weight: 650; color: var(--ink-2); letter-spacing: .02em;
+  text-transform: uppercase; }
+.minibar { display: block; width: 100%; height: auto; }
+.minibar-zero { stroke: var(--hairline); stroke-width: 1; }
+.minibar-pos { fill: var(--pos); }
+.minibar-neg { fill: var(--neg); }
+
+/* used-against-limit lines. The bar is the picture; the number beside
+   it is the fact, because a bar clipped at 100% cannot tell you
+   whether you are at the limit or twice past it. */
+.dg { margin: 6px 0 10px; max-width: 720px; }
+.dg-line { display: grid; align-items: center; gap: 8px;
+  grid-template-columns: minmax(120px, 1fr) minmax(80px, 2fr) auto;
+  padding: 2px 0; font-size: var(--t-fine); }
+.dg-name { color: var(--ink-2); }
+.dg-track { height: 8px; border-radius: 4px; background: var(--surface-2);
+  border: 1px solid var(--hairline); overflow: hidden; }
+.dg-bar { display: block; height: 100%; border-radius: 4px 0 0 4px; }
+.dg-ok { background: var(--pos); }
+.dg-warn { background: var(--warning); }
+.dg-crit { background: var(--critical); }
+.dg-num { font-size: var(--t-fine); color: var(--ink);
+  font-variant-numeric: tabular-nums; }
 .range-chart { width: 100%; max-width: 640px; height: auto; margin: 6px 0 2px; }
 .range-track { fill: var(--surface-2); stroke: var(--hairline); }
 .range-now { fill: var(--series-1); }
@@ -942,7 +981,15 @@ def status_rail(items: list) -> str:
 
 
 def page(title: str, body: str, active: str, db_path: str, notes: str = "",
-         rail: str = "", subtitle: str = "") -> str:
+         rail: str = "", subtitle: str = "", refresh_seconds: int = 0) -> str:
+    """`refresh_seconds` makes the page reload itself.
+
+    A meta refresh rather than a script, because this dashboard has
+    never needed JavaScript and a desk view is the worst place to start
+    depending on one: if the script fails the numbers silently stop
+    moving while still looking current, which is the exact failure the
+    live/cached distinction exists to prevent.
+    """
     groups = []
     for group_name, items in NAV_GROUPS:
         parts = []
@@ -963,7 +1010,9 @@ def page(title: str, body: str, active: str, db_path: str, notes: str = "",
         f"<title>{esc(title)} - catalyst</title>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
         f"<meta name='build-hash' content='{esc(BUILD_HASH)}'>"
-        f"<style>{_CSS}</style></head><body>"
+        + (f'<meta http-equiv="refresh" content="{int(refresh_seconds)}">'
+           if refresh_seconds else "")
+        + f"<style>{_CSS}</style></head><body>"
         '<a class="skip" href="#main">Skip to content</a>'
         '<div class="shell">'
         '<aside class="sidebar">'
