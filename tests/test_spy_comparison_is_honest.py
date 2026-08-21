@@ -212,3 +212,90 @@ class TestTheWarningIsActuallyWIRED:
         src = inspect.getsource(panels.performance_panel)
         assert 'if perf.spy_points:\n            headline_sub +=' in src, (
             "the tile promises an exposure warning unconditionally again")
+
+
+class TestTheHeadlineBranchACTUALLYRENDERS:
+    """OWNER-REPORTED 2026-08-21, as a traceback from the live machine:
+
+        File ".../panels.py", line 209, in performance_panel
+          if start > 0 and excess_v is not None:
+        UnboundLocalError: cannot access local variable 'excess_v'
+
+    It took out BOTH /performance and the Overview.
+
+    WHY IT SHIPPED. `excess_v` is bound further down, in the tiles
+    block; the headline block has `excess`. The branch only runs when a
+    bot series AND a SPY series are both present, and no test had ever
+    rendered the panel in that state - every fixture had one or neither.
+    A crash needs the shape of the data, not just the shape of the code.
+
+    So this renders the real panel, through the real entry point, with
+    both series present.
+    """
+
+    def real_perf(self, bot=99.72, spy=98.61):
+        from datetime import date
+        from decimal import Decimal
+
+        from catalyst.dashboard.db import QueryResult
+
+        class Base:
+            capital_cents = Decimal("200000")
+            is_placeholder = False
+            source = "broker_read"
+            start_date = date(2026, 8, 17)
+            reason = "account opened"
+            set_at = "2026-08-17T00:00:00+00:00"
+            account_fingerprint = "abcd1234"
+
+        empty = QueryResult("", (), [], None)
+        p = queries.Performance(closed_q=empty, costs_q=empty)
+        p.baseline = Base()
+        p.bot_points = [(date(2026, 8, 17), 100.0), (date(2026, 8, 21), bot)]
+        p.spy_points = [(date(2026, 8, 17), 100.0), (date(2026, 8, 21), spy)]
+        p.start_day, p.end_day = date(2026, 8, 17), date(2026, 8, 21)
+        p.n_closed = 1
+        p.spy_source = "local bar cache"
+        p.spy_rows = 2
+        return p
+
+    def render(self, monkeypatch, perf):
+        monkeypatch.setattr(queries, "performance", lambda db: perf)
+        return panels.performance_panel(None, p="perf")
+
+    def test_it_does_not_raise_with_both_series_present(self, monkeypatch):
+        """THE CRASH, exactly."""
+        assert self.render(monkeypatch, self.real_perf())
+
+    @pytest.mark.parametrize("bot,spy", [
+        (99.72, 98.61),      # ahead
+        (98.00, 99.50),      # behind
+        (100.0, 100.0),      # level
+    ])
+    def test_it_survives_ahead_behind_and_level(self, monkeypatch, bot, spy):
+        assert self.render(monkeypatch, self.real_perf(bot, spy))
+
+    def test_the_headline_says_percent_not_pp(self, monkeypatch):
+        """The "%" fix landed on the TILE and missed this sentence, so
+        the headline still printed the jargon that was reported."""
+        html = self.render(monkeypatch, self.real_perf())
+        head = html[html.index("perf-headline"):][:400]
+        assert "pp<" not in head and "pp " not in head
+        assert re.search(r"[-+]\d+\.\d\d%", head), head[:200]
+
+    def test_the_money_line_is_the_excess_on_the_baseline(self, monkeypatch):
+        """+1.11% of $2,000 is $22.20 - and it is computed from `excess`,
+        the variable that exists here."""
+        html = self.render(monkeypatch, self.real_perf())
+        assert "$22.20" in html
+        assert "than the same cash in SPY would have been" in html
+
+    def test_both_sides_are_printed(self, monkeypatch):
+        html = self.render(monkeypatch, self.real_perf())
+        assert "You -0.28%" in html and "SPY -1.39%" in html
+
+    def test_and_the_exposure_warning_is_there_too(self, monkeypatch):
+        """The branch that crashed is the same one that must carry the
+        caveat. Both, or neither is worth much."""
+        html = self.render(monkeypatch, self.real_perf())
+        assert "not like for like" in html
