@@ -138,16 +138,16 @@ _CSS = """
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --page:      #08090b;
-    --surface:   #101216;
-    --surface-2: #161a20;
+    --page:      #050608;
+    --surface:   #0c0e12;
+    --surface-2: #12151b;
     --ink:       #e8e9ec;
     --ink-2:     #a8adb8;
     --muted:     #7d8492;
-    --hairline:  #1e232b;
+    --hairline:  #1b2028;
     --baseline:  #2b323d;
     --accent:    #3fd0d8;
-    --grid-head: #0b0d10;
+    --grid-head: #090b0e;
     --series-1:  #3987e5;
     --series-2:  #d95926;
     --series-3:  #199e70;
@@ -179,16 +179,16 @@ _CSS = """
    a single word is read. Prose sits at --t-base and never competes
    with a number. */
 :root {
-  --t-micro: 9.5px;   /* uppercase micro-labels */
-  --t-fine:  11px;    /* provenance, captions */
-  --t-base:  13px;    /* body, table cells */
+  --t-micro: 9px;     /* uppercase micro-labels */
+  --t-fine:  10.5px;  /* provenance, captions */
+  --t-base:  12.5px;  /* body, table cells */
   --t-lead:  15px;    /* the one-sentence read at the top of a section */
   --t-fig:   22px;    /* tile figures */
   --t-hero:  34px;    /* one per section, no more */
   --gap:     4px;
 }
 * { box-sizing: border-box; }
-body { font: var(--t-base)/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+body { font: var(--t-base)/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
        margin: 0; color: var(--ink); background: var(--page);
        -webkit-font-smoothing: antialiased;
        text-rendering: optimizeLegibility; }
@@ -282,14 +282,16 @@ code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo,
 p, li, .prov, .caveat, .alarm, .ok, .empty, summary { max-width: 82ch; }
 main { padding: 20px 22px 48px 22px; max-width: 1240px; }
 :focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+/* FLAT PANELS ON A DARK GROUND, tight against each other. Rounded,
+   spaced cards read as a document; a desk reads as a grid. */
 section { background: var(--surface); border: 1px solid var(--hairline);
-          border-radius: 2px; padding: 0 0 14px 0; margin-bottom: 14px; }
-section > h2 { font-size: 10.5px; margin: 0 0 12px 0; text-transform: uppercase;
-               letter-spacing: .14em; color: var(--ink-2); font-weight: 700;
-               padding: 8px 14px; background: var(--grid-head);
+          border-radius: 0; padding: 0 0 10px 0; margin-bottom: 8px; }
+section > h2 { font-size: 9.5px; margin: 0 0 8px 0; text-transform: uppercase;
+               letter-spacing: .18em; color: var(--accent); font-weight: 700;
+               padding: 6px 12px; background: var(--grid-head);
                border-bottom: 1px solid var(--hairline);
-               border-left: 3px solid var(--accent); }
-section > *:not(h2) { margin-left: 14px; margin-right: 14px; }
+               border-left: 2px solid var(--accent); }
+section > *:not(h2) { margin-left: 12px; margin-right: 12px; }
 section > .scroll-x, section > .chart-wrap { margin-left: 0; margin-right: 0; }
 section > .scroll-x table { border-left: none; border-right: none; }
 h3 { font-size: 11px; margin: 14px 0 5px 0; text-transform: uppercase;
@@ -338,6 +340,11 @@ h3 { font-size: 11px; margin: 14px 0 5px 0; text-transform: uppercase;
 .switch-opt.on { background: var(--accent); color: var(--header);
   text-shadow: none; }
 /* A sparkline sits INSIDE a table cell and must not grow it. */
+/* A live mark. The dot is decoration; the time beside it is the fact,
+   and a cached close shows a DATE instead - the two must never be
+   dressed the same. */
+.live-dot { color: var(--pos); margin-right: 5px; font-size: 9px;
+  vertical-align: middle; }
 .spark { width: 96px; height: 22px; display: block; }
 .spark-line { fill: none; stroke-width: 1.4; }
 .spark-up { stroke: var(--pos); }
@@ -463,10 +470,10 @@ h3 { font-size: 11px; margin: 14px 0 5px 0; text-transform: uppercase;
    trading desk packs more into the same glance: narrower minimum,
    tighter padding, so a KPI row reads as one instrument rather than as
    four cards. */
-.tiles { display: grid; gap: 1px; margin: 8px 0 10px 0;
+.tiles { display: grid; gap: 1px; margin: 6px 0 8px 0;
          background: var(--hairline); border: 1px solid var(--hairline);
          grid-template-columns: repeat(auto-fit, minmax(158px, 1fr)); }
-.tile { background: var(--surface-2); padding: 8px 11px;
+.tile { background: var(--surface-2); padding: 7px 10px;
         border-top: 2px solid transparent; }
 .tile:hover { border-top-color: var(--accent); }
 .tile-label { font-size: var(--t-micro); text-transform: uppercase; letter-spacing: .13em;
@@ -488,8 +495,8 @@ h3 { font-size: 11px; margin: 14px 0 5px 0; text-transform: uppercase;
 .pill-idle { background: var(--surface-2); color: var(--ink-2);
              border-color: var(--baseline); }
 
-table { border-collapse: collapse; width: 100%; margin: 0; font-size: 12.5px; }
-th, td { border-bottom: 1px solid var(--hairline); padding: 4px 10px;
+table { border-collapse: collapse; width: 100%; margin: 0; font-size: 12px; }
+th, td { border-bottom: 1px solid var(--hairline); padding: 3px 9px;
          text-align: left; vertical-align: top; }
 /* Alternating ground. On a blotter the eye tracks ACROSS a row while
    comparing DOWN a column, and a hairline alone does not hold it. */
