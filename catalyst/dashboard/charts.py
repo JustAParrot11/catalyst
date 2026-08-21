@@ -305,8 +305,18 @@ def bar_chart(
             f'<line x1="{m_left:.1f}" y1="{ry:.1f}" x2="{m_left + plot_w:.1f}" '
             f'y2="{ry:.1f}" stroke="var(--critical)" stroke-width="2" '
             f'stroke-dasharray="6 4"/>')
+        # A PLATE UNDER THE LABEL. It sits inside the plot, so on a full
+        # chart it lands on top of the bars and the two colours fight -
+        # rendered and looked at: "cap, pro-rata per day" was reading
+        # through the last three bars. The plate is the page ground, so
+        # the words sit on the same background as the axis labels.
+        lw = len(rlabel) * CHAR_W + 8
         out.append(
-            f'<text x="{m_left + plot_w:.1f}" y="{ry - 5:.1f}" '
+            f'<rect x="{m_left + plot_w - lw:.1f}" y="{ry - 16:.1f}" '
+            f'width="{lw:.1f}" height="14" fill="var(--page)" '
+            f'opacity="0.85" rx="2"/>')
+        out.append(
+            f'<text x="{m_left + plot_w - 4:.1f}" y="{ry - 5:.1f}" '
             f'font-size="{FONT_SIZE}" text-anchor="end" '
             f'fill="var(--critical)">{rlabel}</text>')
     out.append("</svg>")

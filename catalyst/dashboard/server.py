@@ -35,7 +35,7 @@ from catalyst.dashboard.render import (
     page,
     pre,
     section,
-    signed_pp,
+    signed_pct,
 )
 
 DEFAULT_HOST = "0.0.0.0"
@@ -65,7 +65,11 @@ def _rail_for(db: Db) -> str:
         excess = perf.excess_pp
         items.append((
             "vs S&P",
-            esc(signed_pp(excess)) if excess is not None else "&mdash;",
+            # signed_pct, NOT signed_pp. Third call site of the same
+            # owner-reported fix, and the most visible one: this strip
+            # sits on every page, so "pp" survived on all nineteen tabs
+            # while the Performance page itself read "%".
+            esc(signed_pct(excess)) if excess is not None else "&mdash;",
             "idle" if excess is None else ("good" if excess >= 0 else "crit")))
         items.append(("Closed trades", str(perf.n_closed),
                       "good" if perf.n_closed else "idle"))

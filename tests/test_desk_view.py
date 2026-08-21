@@ -389,3 +389,79 @@ class TestTheDesk:
         """A chart with losses on it must not draw them as small wins."""
         html = panels._bar_row([("a", 10), ("b", -10)], "s")
         assert "minibar-pos" in html and "minibar-neg" in html
+
+
+# ---------------------------------------------------------------------
+# A hostile ledger. Found by feeding these readers the things a real
+# database eventually contains rather than the things a fixture does.
+# ---------------------------------------------------------------------
+
+
+class TestNothingHereCanBeKilledByOneBadRow:
+
+    def _poison(self, path):
+        c = _conn(path)
+        c.execute("PRAGMA foreign_keys=OFF")
+        for i, (cents, usage) in enumerate((
+                ("NaN", '{"input_tokens": 1e400}'),
+                ("Infinity", '{"output_tokens": NaN}'),
+                ("", "null"),
+                ("abc", "[]"),
+                ("1e400", "not json at all"),
+                ("0.000000001", '{"input_tokens": "lots"}'))):
+            c.execute("INSERT INTO research_calls VALUES (?,?,?,?,?,?,?,?,?)",
+                      (f"bad{i}", CID, "m", "p", "[]", cents, i * 7, None,
+                       (NOW - timedelta(hours=i)).isoformat()))
+            c.execute("INSERT INTO research_call_turns VALUES (?,?,?,?,?)",
+                      (f"bad{i}", 0, "{}", usage, "end_turn"))
+        for i, cents in enumerate(("NaN", "", "-1", "Infinity", "0.005")):
+            c.execute("INSERT INTO cost_events VALUES (?,?,?,?,?,?,?,?)",
+                      (f"bad-ce{i}", "{}", "m", "scheduled", "research",
+                       cents, NOW.isoformat(), f"bad-ce{i}"))
+        c.commit()
+        c.close()
+
+    def test_a_usage_blob_holding_infinity_does_not_take_the_page_down(
+            self, seeded):
+        """json.loads("1e400") is inf and int(inf) raises OverflowError,
+        which is neither TypeError nor ValueError - so it went straight
+        through the parser's guard and killed the whole detailed
+        Overview. Exactly the shape of the UnboundLocalError that took
+        out two pages on the owner's machine."""
+        self._poison(seeded)
+        assert "The API, at work" in page(seeded)
+
+    def test_the_rows_it_could_not_read_are_counted_not_zeroed(self, seeded):
+        """House rule 3 and the TRAPS.md trap in one: a row that
+        silently prices at zero makes the bill look cheaper than it is.
+        Unreadable is a number on the page, not an absence."""
+        self._poison(seeded)
+        db = Db(seeded)
+        d = queries.api_desk(db)
+        db.close()
+        assert d.unparseable_turns >= 3
+
+    def test_money_is_summed_as_Decimal_not_as_a_float(self, seeded):
+        """priced_cents is TEXT holding an exact Decimal. Summing it via
+        CAST(... AS REAL) turns money into a float on the way past,
+        which is how a ledger and a dashboard begin disagreeing in the
+        third decimal place for reasons nobody can reconstruct."""
+        c = _conn(seeded)
+        for i, cents in enumerate(("0.005", "0.005", "0.005")):
+            c.execute("INSERT INTO cost_events VALUES (?,?,?,?,?,?,?,?)",
+                      (f"tiny{i}", "{}", "m", "scheduled", "r", cents,
+                       NOW.isoformat(), f"tiny{i}"))
+        c.commit()
+        c.close()
+        db = Db(seeded)
+        total = queries.spend_today_cents(db)
+        db.close()
+        assert isinstance(total, Decimal)
+        assert total == Decimal("0.015"), f"lost precision: {total!r}"
+
+    def test_a_non_finite_amount_never_poisons_the_total(self, seeded):
+        self._poison(seeded)
+        db = Db(seeded)
+        total = queries.spend_today_cents(db)
+        db.close()
+        assert total.is_finite()

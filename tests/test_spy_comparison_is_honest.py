@@ -33,7 +33,7 @@ import pytest
 
 from catalyst.dashboard import panels, queries
 from catalyst.dashboard.db import QueryResult
-from catalyst.dashboard.render import signed_pct, signed_pp
+from catalyst.dashboard.render import signed_pct
 
 
 def perf(bot=99.72, spy=98.61, start=Decimal("200000")):
@@ -133,7 +133,31 @@ class TestThePercentageIsReadable:
         """Only the label moved. If the value changed, the fix would be
         a lie dressed as a clarification."""
         for v in (0.89, -1.5, 0.0, 12.345):
-            assert signed_pct(v)[:-1] == signed_pp(v)[:-2]
+            assert signed_pct(v) == f"{v:+.2f}%"
+
+    def test_NOTHING_can_print_pp_again(self):
+        """THE STRUCTURAL VERSION OF THIS FIX, because the whack-a-mole
+        version failed twice. It landed on the tile and missed the
+        sentence beside it; it landed on the Performance page and missed
+        the status strip, which sits on EVERY page - so "pp" was still
+        on all nineteen tabs while the page it was reported against read
+        "%".
+
+        signed_pp is now deleted rather than merely unused. A helper
+        that formats the wrong thing is a loaded gun for the next person
+        who greps for a percentage formatter, so the guarantee is that
+        the function does not exist to be called.
+        """
+        from catalyst.dashboard import render
+
+        assert not hasattr(render, "signed_pp")
+        root = pathlib.Path(render.__file__).parent
+        offenders = []
+        for f in sorted(root.glob("*.py")):
+            for n, line in enumerate(f.read_text().splitlines(), 1):
+                if "signed_pp" in line and not line.lstrip().startswith("#"):
+                    offenders.append(f"{f.name}:{n}: {line.strip()}")
+        assert not offenders, offenders
 
     def test_a_missing_comparison_is_not_zero(self):
         assert signed_pct(None) == "n/a"
