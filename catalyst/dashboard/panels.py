@@ -4218,8 +4218,16 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
              if st.expected_holding_days else "no expectation recorded"),
         ] + facts[:1]
     out.append(tiles(f"{p}-t{index}-tiles", facts))
-    out.append(_hold_progress(st, p, index))
-    out.append(_price_rail(st, p, index))
+    # THE POSITION, ON ONE AXIS. Owner-asked for "a graph with multiple
+    # points of info" - price, what it cost, what it sells for, and
+    # every call to Claude - because the separate small bars answered
+    # none of "how is this trade actually going". The rail and hold bar
+    # remain as the FALLBACK for a position the full chart cannot draw.
+    chart = _position_chart(st, p, index)
+    out.append(chart)
+    if not chart:
+        out.append(_hold_progress(st, p, index))
+        out.append(_price_rail(st, p, index))
     if not st.entry_price:
         out.append(caveat(
             "The fill has not been reconciled yet, so the price paid is "
@@ -5342,3 +5350,118 @@ def _book_strip(stories, p: str) -> str:
         out.append(figcap(
             f"Best {_r(b.best_r)}, worst {_r(b.worst_r)}."))
     return "".join(out)
+
+
+def _load_position_bars(ticker: str):
+    """Daily closes for a held ticker, or (). Never raises: a missing
+    cache is a chart that does not draw, not a page that does not."""
+    try:
+        from catalyst.backtest.data import BarCache
+        from catalyst.dashboard.db import bars_path
+
+        return BarCache(bars_path()).load_bars(ticker)
+    except Exception:            # noqa: BLE001 - absence is normal
+        return ()
+
+
+def _position_chart(st, p: str, index: int) -> str:
+    """One position, everything that has happened to it, on one axis.
+
+    OWNER-ASKED: "i cant accurately see how well my current trades are
+    going i want a graph with multiple points of info e.g. when is it
+    calling to claude for a tech, current costs, original cost, sell
+    cost etc".
+
+    So the axis is TIME, from the day it was bought to the day it must
+    close, and everything that matters is plotted against it:
+
+      - the price line, from this ticker's own cached daily closes;
+      - what it cost to buy and what it sells for if the thesis fails,
+        as horizontal rules, because the gap between them is the money
+        at stake;
+      - a marker every time Claude was called to re-check the thesis,
+        and what it said;
+      - today, and the hard exit date where it closes regardless.
+
+    NOTHING IS PROJECTED. The price line stops where the data stops. The
+    only marks in the future are DATES the bot has already committed to,
+    never a price it might reach.
+    """
+    entry = _num(st.entry_price)
+    stop = _num(st.stop_price)
+    start = _as_date(st.opened_at)
+    end = _as_date(st.planned_exit_date)
+    if not (entry and stop and start and end and end > start):
+        return ""
+    bars = [b for b in _load_position_bars(st.ticker) if start <= b.day <= end]
+    today = datetime.now(timezone.utc).date()
+
+    lo_p = min([float(stop), float(entry)] + [float(b.low) for b in bars])
+    hi_p = max([float(stop), float(entry)] + [float(b.high) for b in bars])
+    pad = (hi_p - lo_p) * 0.12 or hi_p * 0.02
+    lo_p, hi_p = lo_p - pad, hi_p + pad
+    span_d = max((end - start).days, 1)
+
+    W, H, L, R, T, B = 660, 200, 52, 14, 14, 34
+
+    def x(d):
+        return L + (d - start).days / span_d * (W - L - R)
+
+    def y(v):
+        return T + (hi_p - float(v)) / (hi_p - lo_p) * (H - T - B)
+
+    out = [f'<svg id="{p}-t{index}-pos" class="pos-chart" '
+           f'viewBox="0 0 {W} {H}" role="img" '
+           f'aria-label="price, stop and every review for {esc(st.ticker)}">']
+    out.append(f'<rect x="{L}" y="{y(entry):.1f}" width="{W - L - R}" '
+               f'height="{abs(y(stop) - y(entry)):.1f}" class="pos-risk"/>')
+    for value, cls, label in ((entry, "pos-entry", f"bought ${entry:.2f}"),
+                              (stop, "pos-stop", f"stop ${stop:.2f}")):
+        out.append(f'<line x1="{L}" y1="{y(value):.1f}" x2="{W - R}" '
+                   f'y2="{y(value):.1f}" class="{cls}"/>')
+        out.append(f'<text x="{L - 6}" y="{y(value) + 3:.1f}" '
+                   f'text-anchor="end" class="pos-label">{esc(label)}</text>')
+    if bars:
+        pts = " ".join(f"{x(b.day):.1f},{y(b.close):.1f}" for b in bars)
+        out.append(f'<polyline points="{pts}" class="pos-price"/>')
+        last = bars[-1]
+        out.append(f'<circle cx="{x(last.day):.1f}" cy="{y(last.close):.1f}" '
+                   f'r="3.5" class="pos-now"/>')
+        out.append(f'<text x="{x(last.day):.1f}" y="{y(last.close) - 8:.1f}" '
+                   f'text-anchor="middle" class="pos-label">'
+                   f"now ${float(last.close):.2f}</text>")
+    for when, action, _trig, _why, _changed, skipped in (st.reviews or []):
+        day = _as_date(when)
+        if not day or not (start <= day <= end):
+            continue
+        word = {"hold": "held", "exit_now": "EXIT",
+                "exit_sooner": "cut short"}.get(str(action), str(action))
+        cls = "pos-review" if str(action) == "hold" else "pos-review-exit"
+        out.append(f'<line x1="{x(day):.1f}" y1="{T}" x2="{x(day):.1f}" '
+                   f'y2="{H - B}" class="{cls}"/>')
+        out.append(f'<text x="{x(day):.1f}" y="{T + 10:.0f}" '
+                   f'text-anchor="middle" class="pos-label">'
+                   + esc("skipped" if skipped else word) + "</text>")
+    if start <= today <= end:
+        out.append(f'<line x1="{x(today):.1f}" y1="{T - 4}" '
+                   f'x2="{x(today):.1f}" y2="{H - B + 4}" class="pos-today"/>')
+    for day, label in ((start, str(start)), (end, f"closes {end}")):
+        out.append(f'<text x="{x(day):.1f}" y="{H - 8}" '
+                   f'text-anchor="{"start" if day == start else "end"}" '
+                   f'class="pos-label">{esc(label)}</text>')
+    out.append("</svg>")
+
+    left = (end - today).days
+    words = f"Bought at <b>${entry:.2f}</b>, stop at <b>${stop:.2f}</b>. "
+    if bars:
+        move = (float(bars[-1].close) - float(entry)) / float(entry) * 100
+        words += (f"Last close <b>${float(bars[-1].close):.2f}</b>, "
+                  f"<b>{move:+.1f}%</b> against the fill. ")
+    else:
+        words += ("No cached daily closes for this ticker yet, so the price "
+                  "line is empty rather than guessed. ")
+    n_reviews = len([r for r in (st.reviews or []) if not r[5]])
+    words += (f"Claude has re-read the thesis <b>{n_reviews}</b> time(s); "
+              + (f"it closes in <b>{left}</b> day(s) whatever happens."
+                 if left >= 0 else "its exit date has passed."))
+    return "".join(out) + figcap(words)

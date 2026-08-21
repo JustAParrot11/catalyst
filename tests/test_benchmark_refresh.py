@@ -201,7 +201,60 @@ class TestSchedulerWiring:
         state = {}
         scheduler._maybe_refresh_benchmark(state)   # never raises
         scheduler._maybe_refresh_benchmark(state)
-        assert len(calls) == 1, "second call in the same day must be skipped"
+        # CHANGED, and the old assertion was the bug. It required that a
+        # FAILED refresh still counted as the day's attempt, so one
+        # transient timeout cost the whole day and the series fell
+        # silently behind - owner-reported as "SPY line has failed to
+        # populate for 48 hours", which is two of these in a row.
+        #
+        # A failure must be retried on the next cycle.
+        assert len(calls) == 2, (
+            "a failed refresh was marked done for the day, so the series "
+            "cannot catch up until tomorrow")
+
+    def test_a_SUCCESSFUL_refresh_is_not_repeated_that_day(
+            self, tmp_path, monkeypatch):
+        """The other half of the rule, and the reason the guard exists:
+        this hits Alpaca, and it only needs to once a day."""
+        from types import SimpleNamespace
+
+        import catalyst.data.benchmark as bench
+        from catalyst.orchestrator import scheduler
+        import catalyst.setup.credentials as creds_mod
+
+        monkeypatch.setattr(
+            creds_mod, "load_credentials",
+            lambda *a, **k: SimpleNamespace(alpaca_key="k", alpaca_secret="s"))
+        monkeypatch.setenv("CATALYST_BARS", str(tmp_path / "bars"))
+        calls = []
+
+        def ok_refresh(*a, **kw):
+            calls.append(1)
+            return bench.RefreshResult(written=3, feed="iex")
+
+        monkeypatch.setattr(bench, "refresh_benchmark", ok_refresh)
+        state = {}
+        scheduler._maybe_refresh_benchmark(state)
+        scheduler._maybe_refresh_benchmark(state)
+        assert len(calls) == 1
+
+    def test_one_failing_daily_job_does_not_silence_the_others(self):
+        """OWNER-REPORTED: the SPY series stopped while everything else
+        carried on. Five independent daily jobs shared one try block, so
+        the first to raise cancelled every job after it - on that pass
+        and every pass after, since the order never changes. The log
+        blamed "a trading cycle" and never named the job that never
+        ran."""
+        import inspect
+
+        from catalyst.orchestrator import scheduler
+
+        src = inspect.getsource(scheduler.main)
+        block = src[src.index("_wake.clear()"):]
+        assert "for _name, _job in" in block, (
+            "the daily jobs share one guard again, so one failure "
+            "silently cancels the rest")
+        assert "Every other job still ran" in block
 
 
 @pytest.mark.sabotage
