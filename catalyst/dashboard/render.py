@@ -319,6 +319,16 @@ h3 { font-size: 11px; margin: 14px 0 5px 0; text-transform: uppercase;
 .pos-review-exit { stroke: var(--series-2); stroke-width: 1.5; }
 .pos-today { stroke: var(--series-2); stroke-width: 1.5; stroke-dasharray: 3 2; }
 .pos-label { fill: var(--muted); font-size: 10px; }
+/* The 20-day average, under the price and quieter than it: the price
+   is the fact, the average is the reading of it. */
+.pos-sma { fill: none; stroke: var(--muted); stroke-width: 1.2;
+  stroke-dasharray: 4 3; }
+/* The entry day. It is no longer the left edge of the chart - the run
+   up into the trade is drawn before it - so it needs its own rule. */
+.pos-bought { stroke: var(--ink-2); stroke-width: 1.5; }
+.range-chart { width: 100%; max-width: 640px; height: auto; margin: 6px 0 2px; }
+.range-track { fill: var(--surface-2); stroke: var(--hairline); }
+.range-now { fill: var(--series-1); }
 .danger-form { border: 1px solid var(--critical); border-radius: 6px;
   padding: 12px 16px; margin: 12px 0; background: var(--crit-wash);
   max-width: 640px; }

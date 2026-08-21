@@ -8,7 +8,7 @@ both rendered blank.
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from catalyst.dashboard import charts, queries
@@ -4272,6 +4272,7 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
     # remain as the FALLBACK for a position the full chart cannot draw.
     chart = _position_chart(st, p, index)
     out.append(chart)
+    out.append(_technicals(st, p, index))
     if not chart:
         out.append(_hold_progress(st, p, index))
         out.append(_price_rail(st, p, index))
@@ -5443,6 +5444,13 @@ def _book_strip(stories, p: str) -> str:
     return "".join(out)
 
 
+#: Calendar days of price history drawn BEFORE the entry, so the chart
+#: shows what the stock was doing when the bot decided to buy it. Long
+#: enough that a 20-day average exists; short enough that the position
+#: itself is still the subject of the picture.
+CONTEXT_DAYS_BEFORE_ENTRY = 60
+
+
 def _load_position_bars(ticker: str):
     """Daily closes for a held ticker, or (). Never raises: a missing
     cache is a chart that does not draw, not a page that does not."""
@@ -5484,19 +5492,27 @@ def _position_chart(st, p: str, index: int) -> str:
     end = _as_date(st.planned_exit_date)
     if not (entry and stop and start and end and end > start):
         return ""
-    bars = [b for b in _load_position_bars(st.ticker) if start <= b.day <= end]
+    # THE RUN-UP INTO THE TRADE, not just the hold. A days-to-weeks
+    # position is too short to read on its own - and a 20-day average
+    # over a 12-day hold does not exist at all, so the trend line never
+    # drew. Starting the window before the entry gives both: whether the
+    # stock was already extended when it was bought, and enough bars for
+    # the average to mean something.
+    chart_start = start - timedelta(days=CONTEXT_DAYS_BEFORE_ENTRY)
+    bars = [b for b in _load_position_bars(st.ticker)
+            if chart_start <= b.day <= end]
     today = datetime.now(timezone.utc).date()
 
     lo_p = min([float(stop), float(entry)] + [float(b.low) for b in bars])
     hi_p = max([float(stop), float(entry)] + [float(b.high) for b in bars])
     pad = (hi_p - lo_p) * 0.12 or hi_p * 0.02
     lo_p, hi_p = lo_p - pad, hi_p + pad
-    span_d = max((end - start).days, 1)
+    span_d = max((end - chart_start).days, 1)
 
     W, H, L, R, T, B = 660, 200, 52, 14, 14, 34
 
     def x(d):
-        return L + (d - start).days / span_d * (W - L - R)
+        return L + (d - chart_start).days / span_d * (W - L - R)
 
     def y(v):
         return T + (hi_p - float(v)) / (hi_p - lo_p) * (H - T - B)
@@ -5515,6 +5531,17 @@ def _position_chart(st, p: str, index: int) -> str:
     if bars:
         pts = " ".join(f"{x(b.day):.1f},{y(b.close):.1f}" for b in bars)
         out.append(f'<polyline points="{pts}" class="pos-price"/>')
+        # THE TREND UNDER THE PRICE. A 20-day average is the plainest
+        # technical read there is: above it the stock has been rising
+        # into this, below it falling. Drawn only where it EXISTS - the
+        # first nineteen days have no twenty-day average, and drawing
+        # one for them would be inventing the very thing being read.
+        closes = [float(b.close) for b in bars]
+        sma = _sma(closes, 20)
+        if len(sma) >= 2:
+            line = " ".join(f"{x(bars[i].day):.1f},{y(v):.1f}"
+                            for i, v in sma)
+            out.append(f'<polyline points="{line}" class="pos-sma"/>')
         last = bars[-1]
         out.append(f'<circle cx="{x(last.day):.1f}" cy="{y(last.close):.1f}" '
                    f'r="3.5" class="pos-now"/>')
@@ -5523,7 +5550,7 @@ def _position_chart(st, p: str, index: int) -> str:
                    f"now ${float(last.close):.2f}</text>")
     for when, action, _trig, _why, _changed, skipped in (st.reviews or []):
         day = _as_date(when)
-        if not day or not (start <= day <= end):
+        if not day or not (chart_start <= day <= end):
             continue
         word = {"hold": "held", "exit_now": "EXIT",
                 "exit_sooner": "cut short"}.get(str(action), str(action))
@@ -5533,12 +5560,17 @@ def _position_chart(st, p: str, index: int) -> str:
         out.append(f'<text x="{x(day):.1f}" y="{T + 10:.0f}" '
                    f'text-anchor="middle" class="pos-label">'
                    + esc("skipped" if skipped else word) + "</text>")
-    if start <= today <= end:
+    out.append(f'<line x1="{x(start):.1f}" y1="{T}" x2="{x(start):.1f}" '
+               f'y2="{H - B}" class="pos-bought"/>')
+    out.append(f'<text x="{x(start):.1f}" y="{H - 20:.0f}" '
+               'text-anchor="middle" class="pos-label">bought</text>')
+    if chart_start <= today <= end:
         out.append(f'<line x1="{x(today):.1f}" y1="{T - 4}" '
                    f'x2="{x(today):.1f}" y2="{H - B + 4}" class="pos-today"/>')
-    for day, label in ((start, str(start)), (end, f"closes {end}")):
+    for day, label in ((chart_start, str(chart_start)),
+                       (end, f"closes {end}")):
         out.append(f'<text x="{x(day):.1f}" y="{H - 8}" '
-                   f'text-anchor="{"start" if day == start else "end"}" '
+                   f'text-anchor="{"start" if day == chart_start else "end"}" '
                    f'class="pos-label">{esc(label)}</text>')
     out.append("</svg>")
 
@@ -5556,3 +5588,102 @@ def _position_chart(st, p: str, index: int) -> str:
               + (f"it closes in <b>{left}</b> day(s) whatever happens."
                  if left >= 0 else "its exit date has passed."))
     return "".join(out) + figcap(words)
+
+
+def _sma(values, window):
+    """Simple moving average, aligned to the END of each window. Returns
+    (index, value) pairs so a caller can plot only where it exists -
+    the first `window-1` days genuinely have no average and drawing one
+    for them would invent data."""
+    out = []
+    if len(values) < window:
+        return out
+    running = sum(values[:window])
+    out.append((window - 1, running / window))
+    for i in range(window, len(values)):
+        running += values[i] - values[i - window]
+        out.append((i, running / window))
+    return out
+
+
+def _technicals(st, p: str, index: int) -> str:
+    """A brief read of the tape, from the same numbers Claude was given.
+
+    OWNER-ASKED: "maybe another graph or two, it feels very wordy to
+    give it a brief technical analysis".
+
+    DELIBERATELY NOT A SECOND OPINION. Every figure here comes from
+    data/price_action.py - the exact module that fills the research
+    prompt - so this page shows what the model SAW rather than a fresh
+    calculation that might disagree with it. A dashboard quietly
+    computing its own version of the evidence is how two numbers with
+    one name start contradicting each other.
+
+    Descriptive, never predictive: where the price sits in its own
+    year, how far it has moved, whether it is being traded more than
+    usual. No signal, no rating, no target.
+    """
+    try:
+        from catalyst.data.price_action import price_action
+        from catalyst.dashboard.db import bars_path
+
+        pa = price_action(bars_path(), st.ticker,
+                          since=_as_date(st.catalyst_date))
+    except Exception:            # noqa: BLE001 - absence is normal
+        return ""
+    if not pa.measured:
+        return ""
+
+    def move(v):
+        return DASH if v is None else f"{float(v):+.1f}%"
+
+    vol = pa.recent_volume_ratio
+    vol_word = ("no volume history" if vol is None
+                else "traded far more than usual" if float(vol) >= 2
+                else "busier than usual" if float(vol) >= 1.2
+                else "quieter than usual" if float(vol) < 0.8
+                else "about its usual volume")
+    rows = [
+        ("5 days", move(pa.move_5d_pct), "what the last week did"),
+        ("20 days", move(pa.move_20d_pct), "the month behind it"),
+        ("Since the catalyst", move(pa.move_since_catalyst_pct),
+         f"over {pa.sessions_since_catalyst or 0} session(s)"),
+        ("Volume", (DASH if vol is None else f"{float(vol):.1f}x"),
+         esc(vol_word)),
+    ]
+    out = [tiles(f"{p}-t{index}-ta", rows), _range_bar(st, pa, p, index)]
+    return "".join(x for x in out if x)
+
+
+def _range_bar(st, pa, p: str, index: int) -> str:
+    """Where the price sits between its own 52-week low and high.
+
+    One of the few things about a stock that is a fact rather than a
+    judgement, and it takes a sentence to say and a glance to see.
+    """
+    pos = pa.range_position_pct
+    if pos is None:
+        return ""
+    pct = max(0.0, min(100.0, float(pos)))
+    entry = _num(st.entry_price)
+    W, H = 640, 40
+    parts = [f'<svg id="{p}-t{index}-range" class="range-chart" '
+             f'viewBox="0 0 {W} {H}" role="img" aria-label="where '
+             f'{esc(st.ticker)} sits in its own 52-week range">',
+             f'<rect x="40" y="16" width="{W - 80}" height="8" rx="4" '
+             'class="range-track"/>']
+    x = 40 + pct / 100 * (W - 80)
+    parts.append(f'<circle cx="{x:.1f}" cy="20" r="5" class="range-now"/>')
+    parts.append('<text x="36" y="24" text-anchor="end" '
+                 'class="pos-label">52w low</text>')
+    parts.append(f'<text x="{W - 36}" y="24" text-anchor="start" '
+                 'class="pos-label">high</text>')
+    parts.append(f'<text x="{x:.1f}" y="12" text-anchor="middle" '
+                 f'class="pos-label">{pct:.0f}% up the range</text>')
+    parts.append("</svg>")
+    words = (f"<b>{pct:.0f}%</b> of the way from this stock's own "
+             "52-week low to its high"
+             + (f", bought at ${entry:.2f}." if entry else ".")
+             + " Near the low is not cheap and near the high is not "
+             "expensive - it is context for the thesis, not a verdict.")
+    return "".join(parts) + figcap(words)
