@@ -5774,7 +5774,20 @@ def detailed_overview(db: Db, p: str = "pro") -> str:
     somebody believes they are flat when they are not - so the age is a
     column, not a footnote, and a stale one is called out.
     """
-    b = queries.live_book(db)
+    # LIVE QUOTES WHERE THEY CAN BE HAD. dashboard/live.py validates
+    # each one exactly as the trading path does - fresh, positive, not
+    # crossed - so anything shown here is a price the risk engine would
+    # also have accepted. A failure is never fatal: the mark falls back
+    # to the cached close and the page says which it is.
+    tickers = [r["ticker"] for r in db.q(
+        "SELECT ticker FROM positions WHERE status = 'open'").rows]
+    try:
+        from catalyst.dashboard.live import quotes_for
+
+        quotes = quotes_for(tickers)
+    except Exception:            # noqa: BLE001 - a nicety, not the page
+        quotes = {}
+    b = queries.live_book(db, quotes=quotes)
     out: list[str] = []
 
     if not b.positions:
@@ -5793,18 +5806,43 @@ def detailed_overview(db: Db, p: str = "pro") -> str:
     fresh_state = ("crit" if worst is None
                    else "good" if worst <= 1
                    else "warn" if worst <= 4 else "crit")
+
+    # WHICH KIND OF PRICE IS THIS. The single most important thing on
+    # the page: a live quote and a day-old close look identical as
+    # numbers and mean completely different things.
+    if b.positions and b.n_live == len(b.positions):
+        mark_value, mark_state = "LIVE", "good"
+        mark_sub = (f"all {b.n_live} quoted just now, validated the same "
+                    "way the risk engine validates one")
+    elif b.n_live:
+        mark_value, mark_state = f"{b.n_live}/{len(b.positions)}", "warn"
+        mark_sub = ("live; the rest fall back to their last cached close "
+                    "- the MARKED column says which is which")
+    else:
+        mark_value, mark_state = esc(b.freshest or DASH), fresh_state
+        # HOW OLD, in words. The pill's colour alone cannot say "nine
+        # days", and nine days is the difference between a mark worth
+        # reading and one that is fiction.
+        age = ("" if worst is None
+               else " (today)" if worst == 0
+               else f" ({worst} day(s) old)")
+        mark_sub = (esc(b.quote_note) + age if b.quote_note
+                    else "last cached daily close, not a live quote" + age)
+    pnl_sub = ("marked to live quotes" if b.n_live == len(b.positions)
+               and b.positions else
+               "marked to the last cached close, not a live quote")
+
     out.append(tiles(f"{p}-tiles", [
-        ("Open P&L", _signed(b.unrealised_usd, money=True),
-         "marked to the last cached close, not a live quote"),
+        ("Open P&L", _signed(b.unrealised_usd, money=True), pnl_sub),
         ("Deployed", _pct(b.deployed_pct, 0),
          (dollars(b.deployed_usd * 100) if b.deployed_usd is not None
           else DASH) + " at market"),
         ("At risk", (dollars(b.open_risk_usd * 100)
                      if b.open_risk_usd is not None else DASH),
          f"{_pct(b.open_risk_pct, 1)} of the account if every stop fills"),
-        ("Marks as of", esc(b.freshest or DASH),
-         f"{pill(fresh_state, f'{worst} day(s) old' if worst is not None else 'unknown')} "
-         "last cached daily close"),
+        ("Marks", mark_value,
+         f"{pill(mark_state, 'live quotes' if b.n_live else 'cached closes')} "
+         + mark_sub),
     ]))
 
     rows = []
@@ -5824,7 +5862,10 @@ def detailed_overview(db: Db, p: str = "pro") -> str:
             f"{x.days_held}d" if x.days_held is not None else DASH,
             f"{x.days_left}d" if x.days_left is not None else DASH,
             f"{float(x.conviction):.2f}" if x.conviction is not None else DASH,
-            esc(x.as_of or "no cached bars"),
+            (f'<span class="live-dot" aria-hidden="true">&#9679;</span>'
+             f'<span class="mono">{esc(x.as_of)}</span>'
+             if x.source == "live"
+             else esc(x.as_of or "no cached bars")),
         ])
     out.append(table(
         f"{p}-book",
@@ -5832,15 +5873,20 @@ def detailed_overview(db: Db, p: str = "pro") -> str:
          "R now", "stop", "to stop", "risk $", "held", "left", "conv",
          "marked"],
         rows, numeric_cols={2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}))
+    if b.quote_note and not b.n_live:
+        out.append(caveat(
+            "No live quote could be taken, so every mark below is the "
+            f"last cached daily close. Reason: {b.quote_note}"))
     out.append(figcap(
         "<b>R now</b> is the open result as a multiple of the money at "
         "risk on that position - the unit a book is read in, because it "
         "makes a small win on a small risk and a large win on a large "
         "risk the same result. <b>To stop</b> is how far the price must "
         "fall before the stop fills. <b>Marked</b> is the day the price "
-        "came from: these are cached daily closes, not live quotes, and "
-        "a mark that looks like a tick and is a day old is worse than no "
-        "mark at all."))
+        "came from: a green dot and a time is a live quote taken just "
+        "now, a date is that day's cached close. A mark that looks "
+        "like a tick and is a day old is worse than no mark at all, so "
+        "the two are never dressed the same."))
     return section(f"{p}-section", "The book, in detail", "".join(out))
 
 

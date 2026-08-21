@@ -93,7 +93,7 @@ class TestItNeverCallsACACHEDCLOSEALIVEPRICE:
         possible - as 99 days stale, because 0 is falsy. It painted
         today's close critical."""
         html = page(marked)
-        i = html.index("Marks as of")
+        i = html.index(">Marks<")
         tile = html[i:i + 400]
         assert "pill-good" in tile, "today's close is flagged as stale"
 

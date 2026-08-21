@@ -3519,6 +3519,12 @@ class MarkedPosition:
     catalyst_type: str = ""
     spark: tuple = ()               # recent closes, oldest first
     stale_days: int | None = None
+    #: "live" when the mark came from a broker quote taken just now,
+    #: "close" when it came from the cached daily bar. Never blank while
+    #: a price exists: a reader must always be able to tell which.
+    source: str = ""
+    quote_error: str = ""
+    spread_bp: Decimal | None = None
 
 
 @dataclass
@@ -3533,6 +3539,8 @@ class LiveBook:
     freshest: str = ""
     stalest: str = ""
     positions_q: QueryResult | None = None
+    n_live: int = 0
+    quote_note: str = ""
 
 
 def _closes(bars_dir, ticker, days=90):
@@ -3545,8 +3553,9 @@ def _closes(bars_dir, ticker, days=90):
     return tuple(bars[-days:])
 
 
-def live_book(db: Db, bars_dir=None, now=None) -> LiveBook:
-    """Every open position, marked to its last cached close."""
+def live_book(db: Db, bars_dir=None, now=None, quotes=None) -> LiveBook:
+    """Every open position, marked to a live quote where one can be had
+    and to the last cached close where one cannot - and saying which."""
     from catalyst.dashboard.db import bars_path
 
     bars_dir = bars_dir or bars_path()
@@ -3570,15 +3579,29 @@ def live_book(db: Db, bars_dir=None, now=None) -> LiveBook:
             sector=st.catalyst_type and "" or "", catalyst_type=st.catalyst_type)
         if equity is None:
             equity = _metric_dec(st.equity_at_entry)
+        q = (quotes or {}).get(str(st.ticker).upper())
         bars = _closes(bars_dir, st.ticker)
+        if q is not None and q.live:
+            # A LIVE QUOTE WINS, and says so. It has already been
+            # validated the same way the trading path validates one -
+            # fresh, positive, not crossed - so a quote that reaches
+            # here is one the risk engine would also have accepted.
+            mp.last, mp.source = q.mid, "live"
+            mp.spread_bp = q.spread_bp
+            mp.as_of = q.at.strftime("%H:%M:%S") if q.at else ""
+            mp.stale_days = 0
+        elif q is not None:
+            mp.quote_error = q.error
         if bars:
-            mp.last = _metric_dec(bars[-1].close)
-            mp.as_of = str(bars[-1].day)
             mp.spark = tuple(float(b.close) for b in bars[-60:])
-            try:
-                mp.stale_days = (now.date() - bars[-1].day).days
-            except (TypeError, ValueError):
-                mp.stale_days = None
+            if mp.last is None:            # no live quote: fall back
+                mp.last = _metric_dec(bars[-1].close)
+                mp.source = "close"
+                mp.as_of = str(bars[-1].day)
+                try:
+                    mp.stale_days = (now.date() - bars[-1].day).days
+                except (TypeError, ValueError):
+                    mp.stale_days = None
         if mp.last is not None and mp.qty:
             mp.market_value = mp.qty * mp.last
             deployed += mp.market_value
@@ -3609,7 +3632,15 @@ def live_book(db: Db, bars_dir=None, now=None) -> LiveBook:
             book.deployed_pct = book.deployed_usd / equity * 100
         if book.open_risk_usd is not None:
             book.open_risk_pct = book.open_risk_usd / equity * 100
-    stamps = sorted(p.as_of for p in book.positions if p.as_of)
+    book.n_live = sum(1 for x in book.positions if x.source == "live")
+    errs = [x.quote_error for x in book.positions if x.quote_error]
+    if errs and not book.n_live:
+        # One reason, not five copies of it: the usual cause is a single
+        # condition (no credentials, market closed) affecting every
+        # symbol at once.
+        book.quote_note = errs[0]
+    stamps = sorted(p.as_of for p in book.positions
+                    if p.as_of and p.source == "close")
     if stamps:
         book.freshest, book.stalest = stamps[-1], stamps[0]
     return book
