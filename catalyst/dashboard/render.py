@@ -299,6 +299,19 @@ h3 { font-size: 11px; margin: 14px 0 5px 0; text-transform: uppercase;
 /* Explanatory text inside a table cell. Not .prov for the same reason
    as .fig-cap: a reason lifted out of the row it explains is a reason
    attached to nothing. */
+/* THE ACCOUNT-VALUE BRIDGE. Segment widths are proportional to the
+   STARTING capital, never rescaled to fill the bar - a $3 API bill
+   against $2,000 should look like a sliver, because it is one. */
+.bridge { border: 1px solid var(--hairline); border-radius: 6px;
+  padding: 10px 16px 14px; margin: 14px 0; background: var(--surface); }
+.bridge h3 { margin: 0 0 8px; font-size: 0.95em; color: var(--ink-2); }
+.bridge-bar { display: flex; height: 10px; border-radius: 5px;
+  overflow: hidden; background: var(--surface-2);
+  border: 1px solid var(--hairline); max-width: 640px; margin-bottom: 10px; }
+.bridge-seg { display: block; height: 100%; }
+.bridge-start { background: var(--baseline); opacity: .55; flex: 0 0 auto; }
+.bridge-pnl { background: var(--pos); opacity: .7; flex: 0 0 auto; }
+.bridge-api { background: var(--critical); opacity: .7; flex: 0 0 auto; }
 .prov-inline { color: var(--muted); font-size: var(--t-fine);
         line-height: 1.45; }
 /* A chart's legend, which must stay WITH the chart. Looks like .prov
