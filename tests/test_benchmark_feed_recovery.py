@@ -140,3 +140,57 @@ class TestTheRebuildIsTheDoorOut:
         scheduled = [p for p in callers if "scheduler" in p.name]
         assert not scheduled, (
             f"the destructive rebuild is wired into the scheduler: {scheduled}")
+
+
+# ==========================================================================
+# The button. Owner-asked for nothing to be left outstanding, and an
+# escape hatch nothing can reach is not an escape hatch.
+# ==========================================================================
+
+
+def _perf(spy_error):
+    """A Performance carrying just the field the offer reads."""
+    from catalyst.dashboard.db import QueryResult
+    from catalyst.dashboard.queries import Performance
+
+    empty = QueryResult("", (), [], None)
+    return Performance(closed_q=empty, costs_q=empty, spy_stale=True,
+                       spy_error=spy_error)
+
+
+class TestTheOwnerCanActuallyReachTheRebuild:
+    def test_the_offer_appears_only_for_a_refused_feed(self):
+        """A generic outage gets no button, because for that one waiting
+        IS the answer. Offering a destructive rebuild for a blip trains
+        the owner to reach for it."""
+        from catalyst.dashboard import panels
+        from catalyst.dashboard.queries import Performance
+
+        refused = _perf("feed_no_longer_available_sip")
+        outage = _perf("fetch_failed_http_500")
+        assert "rebuild-benchmark" in panels._spy_rebuild_offer(refused, "p")
+        assert panels._spy_rebuild_offer(outage, "p") == ""
+
+    def test_it_demands_a_typed_confirmation(self):
+        from catalyst.dashboard.server import rebuild_spy_series
+
+        okay, message = rebuild_spy_series("")
+        assert not okay and "REBUILD" in message
+        okay, message = rebuild_spy_series("yes")
+        assert not okay
+
+    def test_the_route_exists(self):
+        from catalyst.dashboard import server
+
+        assert "/rebuild-benchmark" in (
+            open(server.__file__).read())
+
+    def test_the_form_says_what_will_be_destroyed(self):
+        """It discards real history. Someone clicking it must know that
+        from the page, not from the source."""
+        from catalyst.dashboard import panels
+
+        html = panels._spy_rebuild_offer(
+            _perf("feed_no_longer_available_sip"), "p")
+        assert "discards the stored series" in html
+        assert "will not recover by itself" in html

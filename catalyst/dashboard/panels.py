@@ -52,6 +52,52 @@ from catalyst.dashboard.render import (
 DASH = "\u2014"
 
 
+#: The refusal that never fixes itself. refresh_benchmark names it
+#: exactly so this page can tell it apart from an outage.
+_FEED_REFUSED = ("feed_no_longer_available", "feeds_refused_http")
+
+
+def _spy_rebuild_offer(perf, p: str) -> str:
+    """The one fault on this page with a button, and only when it is
+    that fault.
+
+    OWNER-REPORTED: "the SPY comparison line has disappeared", days
+    after replacing the Alpaca keys. A cache built on `sip` keeps asking
+    for `sip`; a key without that subscription is refused every time and
+    the comparison never returns. Waiting cannot fix it, so telling the
+    owner to wait is the wrong answer.
+
+    OFFERED, NEVER TAKEN AUTOMATICALLY. The rebuild discards real
+    history, and the pin it removes exists for a good reason - a series
+    half consolidated tape and half one exchange's prints makes every
+    comparison against it quietly wrong. So it needs a typed
+    confirmation, and it appears only when the stored reason says the
+    feed itself was refused. A generic outage gets no button, because
+    for that one waiting IS the answer.
+    """
+    reason = str(perf.spy_error or "")
+    if not any(marker in reason for marker in _FEED_REFUSED):
+        return ""
+    return (
+        '<form class="danger-form" method="post" '
+        f'action="/rebuild-benchmark" id="{p}-spy-rebuild">'
+        "<p><b>Your market-data key can no longer read the feed this "
+        "series was built on.</b> That is why it stopped updating, and "
+        "it will not recover by itself - every refresh asks for the same "
+        "refused feed.</p>"
+        "<p>Rebuilding fetches the history again on a feed your current "
+        "keys can reach. It <b>discards the stored series</b> rather "
+        "than splicing a second feed onto it, because a benchmark on two "
+        "different bases makes every comparison against it quietly "
+        "wrong. The page will name the feed it lands on.</p>"
+        '<label for="' + p + '-spy-confirm">Type <code>REBUILD</code> '
+        "to confirm</label> "
+        f'<input id="{p}-spy-confirm" name="confirm" autocomplete="off" '
+        'placeholder="REBUILD" required>'
+        '<button type="submit">Rebuild the SPY series</button>'
+        "</form>")
+
+
 def _baseline_words(base) -> str:
     """Where the comparison's money and start date came from, in one
     phrase. Never "$1,000" with no attribution: on this page a figure
@@ -354,6 +400,7 @@ def performance_panel(db: Db, p: str = "perf") -> str:
             f"{perf.spy_error or ''} Until it refreshes there is no S&amp;P "
             "comparison, though nothing about trading is affected - the "
             "benchmark is reporting only."))
+        out.append(_spy_rebuild_offer(perf, p))
     elif perf.spy_window_too_short:
         # Healthy cache, window shorter than one trading day. An alarm
         # here taught the owner to distrust a working benchmark.
@@ -378,6 +425,7 @@ def performance_panel(db: Db, p: str = "perf") -> str:
             "The bot refreshes this cache once a day from Alpaca; if this "
             "persists, the Maintenance page shows whether Alpaca is reachable."
         ))
+        out.append(_spy_rebuild_offer(perf, p))
     out.append(prov(
         "Missing on purpose rather than invented: the T-bill comparison the brief "
         "also asks for. No risk-free rate series exists in the database or the bar "
