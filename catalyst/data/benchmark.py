@@ -78,6 +78,20 @@ def _cached_feed(cache) -> str | None:
         return None
 
 
+class AllFeedsRefused(RuntimeError):
+    """Every feed turned the credentials away. Distinct from an outage:
+    it carries each feed's own status so the reason the caller reports
+    still names it, rather than flattening to the exception type."""
+
+    def __init__(self, message, statuses=(), bodies=()):
+        super().__init__(message)
+        self.statuses = list(statuses)
+        #: Each feed's verbatim refusal. House rule 3: the raw upstream
+        #: response goes beside the failure, and an exception that eats
+        #: it makes the one diagnostic sentence unavailable.
+        self.bodies = list(bodies)
+
+
 def _fetch_with_fallback(client, start, end, have_feed):
     """Bars, and the feed that produced them.
 
@@ -88,19 +102,53 @@ def _fetch_with_fallback(client, start, end, have_feed):
 
     So an existing cache pins the feed. Only a bootstrap - an empty
     cache - is free to choose, and it takes the best one that answers.
+
+    THE TRAP THAT PIN CREATES, owner-reported 2026-08-20: "the SPY
+    comparison line has disappeared so i cant visually see if we're
+    beating SPY" - days after replacing the Alpaca keys. A cache built
+    on `sip` keeps asking for `sip`; a new key without that
+    subscription is refused every time, forever, and the comparison
+    dies with no way back. Correct not to mix bases, but there has to
+    be a door: rebuild_benchmark() opens it deliberately, discarding
+    the series rather than splicing a second feed onto it.
     """
     if have_feed:
         by_symbol, notes = fetch_daily_bars(
             client, [BENCHMARK_SYMBOL], start, end, feed=have_feed)
         return by_symbol, notes, have_feed
 
-    last_notes = []
+    # A BOOTSTRAP TRIES EACH FEED UNTIL ONE ANSWERS - including the ones
+    # that REFUSE rather than merely return nothing. It did not: a feed
+    # the key has no subscription for raises, and an uncaught raise here
+    # abandoned the whole loop, so the second preference was never
+    # reached. That made "take the best one that answers" untrue for the
+    # exact case it exists to handle, and it is why rebuilding onto a
+    # reachable feed did not work either.
+    #
+    # Found by the rebuild test, not by reading: every existing test had
+    # a client that answered on every feed.
+    last_notes, refusals, bodies = [], [], []
     for feed in FEED_PREFERENCE:
-        by_symbol, notes = fetch_daily_bars(
-            client, [BENCHMARK_SYMBOL], start, end, feed=feed)
+        try:
+            by_symbol, notes = fetch_daily_bars(
+                client, [BENCHMARK_SYMBOL], start, end, feed=feed)
+        except Exception as exc:   # noqa: BLE001 - try the next feed
+            status = getattr(getattr(exc, "response", None), "status_code",
+                             None)
+            refusals.append(f"{feed}: {status or type(exc).__name__}")
+            body = getattr(getattr(exc, "response", None), "text", "") or ""
+            bodies.append(f"{feed}: {body or repr(exc)}")
+            continue
         if by_symbol.get(BENCHMARK_SYMBOL):
             return by_symbol, notes, feed
         last_notes = notes
+    if refusals and not last_notes:
+        # Every feed refused. Raise rather than return empty, so the
+        # caller reports a credentials problem instead of "no new bars",
+        # which reads as a quiet weekend.
+        raise AllFeedsRefused(
+            "no market data feed accepted these credentials: "
+            + "; ".join(refusals), statuses=refusals, bodies=bodies)
     return {}, last_notes, FEED_PREFERENCE[-1]
 
 
@@ -153,6 +201,19 @@ def refresh_benchmark(
         status = getattr(getattr(exc, "response", None), "status_code", None)
         reason = (f"fetch_failed_http_{status}" if status
                   else f"fetch_failed_{type(exc).__name__}")
+        if isinstance(exc, AllFeedsRefused):
+            # Keep the status visible: "fetch_failed_RuntimeError" tells
+            # the owner nothing, and 403 tells them it is the key.
+            codes = [p.rsplit(": ", 1)[-1] for p in exc.statuses]
+            reason = "feeds_refused_http_" + "_".join(dict.fromkeys(codes))
+            body = "\n".join(exc.bodies) or body
+        # A PINNED FEED THAT IS NO LONGER PERMITTED is a different fault
+        # from a flaky upstream, and it needs a different answer: it
+        # will never fix itself, because every retry asks for the same
+        # refused feed. Name it so the dashboard can offer the rebuild
+        # instead of telling the owner to wait.
+        if have_feed and status in (401, 403):
+            reason = f"feed_no_longer_available_{have_feed}"
         return RefreshResult(skipped_reason=reason,
                              raw_response=(body or repr(exc))[:2000])
 
@@ -180,3 +241,31 @@ def refresh_benchmark(
     })
     return RefreshResult(written=len(fresh), first_day=fresh[0].day,
                          last_day=fresh[-1].day, feed=used_feed)
+
+
+def rebuild_benchmark(bars_root: str, alpaca_key: str, alpaca_secret: str,
+                      *, today=None, client_factory=None) -> RefreshResult:
+    """Throw the SPY series away and fetch it again on whatever feed the
+    current credentials can actually reach.
+
+    DELIBERATE AND DESTRUCTIVE, which is why it is a separate function
+    nothing calls on a schedule. refresh_benchmark() pins the feed on
+    purpose - a series that is half consolidated tape and half one
+    exchange's prints makes every comparison against it quietly wrong -
+    so the ONLY safe way onto a different feed is to stop having the old
+    series at all.
+
+    The owner reaches this when their key loses the subscription the
+    cache was built on. The alternative on offer is a comparison that
+    never comes back, so the trade is worth making, and the page says
+    which feed the rebuilt series is on rather than leaving it implied.
+    """
+    cache = BarCache(bars_root)
+    try:
+        cache.write_bars(BENCHMARK_SYMBOL, [])
+        cache.write_meta({})
+    except Exception as exc:   # noqa: BLE001 - reported, never raised
+        return RefreshResult(skipped_reason=f"could_not_clear_{type(exc).__name__}",
+                             raw_response=repr(exc)[:2000])
+    return refresh_benchmark(bars_root, alpaca_key, alpaca_secret,
+                             today=today, client_factory=client_factory)
