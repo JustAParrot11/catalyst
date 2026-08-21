@@ -5691,3 +5691,159 @@ def _range_bar(st, pa, p: str, index: int) -> str:
              + " Near the low is not cheap and near the high is not "
              "expensive - it is context for the thesis, not a verdict.")
     return "".join(parts) + figcap(words)
+
+
+def _sparkline(values, entry=None, sid=""):
+    """Sixty closes in the width of a table cell.
+
+    No axis, no labels, no ticks - a sparkline earns its place by being
+    read in the same glance as the number beside it. The entry price is
+    the only reference drawn, because "above or below what I paid" is
+    the one question the shape has to answer.
+    """
+    vals = [float(v) for v in (values or ()) if v is not None]
+    if len(vals) < 3:
+        return ""
+    lo, hi = min(vals), max(vals)
+    if entry is not None:
+        lo, hi = min(lo, float(entry)), max(hi, float(entry))
+    rng = (hi - lo) or (hi or 1.0) * 0.02
+    W, H = 96, 22
+
+    def y(v):
+        return 2 + (hi - v) / rng * (H - 4)
+
+    step = (W - 2) / max(len(vals) - 1, 1)
+    pts = " ".join(f"{1 + i * step:.1f},{y(v):.1f}" for i, v in enumerate(vals))
+    up = vals[-1] >= (float(entry) if entry is not None else vals[0])
+    out = [f'<svg class="spark" viewBox="0 0 {W} {H}" aria-hidden="true">']
+    if entry is not None:
+        out.append(f'<line x1="0" y1="{y(float(entry)):.1f}" x2="{W}" '
+                   f'y2="{y(float(entry)):.1f}" class="spark-entry"/>')
+    out.append(f'<polyline points="{pts}" class="spark-line '
+               f'{"spark-up" if up else "spark-down"}"/>')
+    out.append(f'<circle cx="{1 + (len(vals) - 1) * step:.1f}" '
+               f'cy="{y(vals[-1]):.1f}" r="1.8" class="spark-dot"/>')
+    out.append("</svg>")
+    return "".join(out)
+
+
+def _signed(value, places=2, money=False, unit=""):
+    """A signed figure that carries its own colour class.
+
+    The UNIT goes inside the span, not after it. Outside, the figure
+    renders as "+0.28</span>R" - two things where the reader sees one,
+    and a copy that loses the unit.
+    """
+    if value is None:
+        return DASH
+    cls = "pos" if value >= 0 else "neg"
+    text = (dollars(abs(Decimal(str(value))) * 100) if money
+            else f"{float(value):+.{places}f}")
+    if money and value < 0:
+        text = "-" + text
+    return f'<span class="{cls}">{text}{unit}</span>'
+
+
+def detailed_overview(db: Db, p: str = "pro") -> str:
+    """The book as a desk would want it: every position marked, every
+    metric derived, nothing hidden behind prose.
+
+    OWNER-ASKED: "a detailed toggle ... current price of each trade,
+    price tracking, live graphs ... this needs no data missed,
+    understandable to a proper pro trader with loads of metrics".
+
+    WHAT "AS MUCH AS WE CAN" HONESTLY MEANS, and it is stated on the
+    page rather than implied away. This dashboard reads a database and a
+    bar cache. It holds no broker session and takes no quote. The
+    freshest price it can show is the last DAILY CLOSE the bot cached,
+    and every mark carries the day it came from.
+
+    A mark-to-market that looks like a tick and is a day old is how
+    somebody believes they are flat when they are not - so the age is a
+    column, not a footnote, and a stale one is called out.
+    """
+    b = queries.live_book(db)
+    out: list[str] = []
+
+    if not b.positions:
+        out.append(zero_block(
+            f"{p}-none", b.positions_q,
+            meaning=("nothing is open, so there is nothing to mark. This "
+                     "view fills the moment a position exists.")))
+        return section(f"{p}-section", "The book, in detail", "".join(out))
+
+    worst = max((x.stale_days for x in b.positions
+                 if x.stale_days is not None), default=None)
+    # `worst or 99` read a ZERO-day-old mark - the freshest possible -
+    # as 99 days stale, because 0 is falsy. It flagged today's close as
+    # critical. Explicit None check, because the difference between "no
+    # mark" and "marked today" is the whole point of the column.
+    fresh_state = ("crit" if worst is None
+                   else "good" if worst <= 1
+                   else "warn" if worst <= 4 else "crit")
+    out.append(tiles(f"{p}-tiles", [
+        ("Open P&L", _signed(b.unrealised_usd, money=True),
+         "marked to the last cached close, not a live quote"),
+        ("Deployed", _pct(b.deployed_pct, 0),
+         (dollars(b.deployed_usd * 100) if b.deployed_usd is not None
+          else DASH) + " at market"),
+        ("At risk", (dollars(b.open_risk_usd * 100)
+                     if b.open_risk_usd is not None else DASH),
+         f"{_pct(b.open_risk_pct, 1)} of the account if every stop fills"),
+        ("Marks as of", esc(b.freshest or DASH),
+         f"{pill(fresh_state, f'{worst} day(s) old' if worst is not None else 'unknown')} "
+         "last cached daily close"),
+    ]))
+
+    rows = []
+    for x in b.positions:
+        rows.append([
+            f'<a href="/trades?id={esc(x.position_id)}">'
+            f"<b>{esc(x.ticker)}</b></a>",
+            _sparkline(x.spark, x.entry),
+            f"${esc(f'{x.entry:.2f}')}" if x.entry else DASH,
+            f"${esc(f'{x.last:.2f}')}" if x.last is not None else DASH,
+            _signed(x.unrealised_pct, 1, unit="%"),
+            _signed(x.unrealised_usd, money=True),
+            _signed(x.r_now, unit="R"),
+            f"${esc(f'{x.stop:.2f}')}" if x.stop else DASH,
+            _pct(x.to_stop_pct, 1),
+            (dollars(x.risk_usd * 100) if x.risk_usd is not None else DASH),
+            f"{x.days_held}d" if x.days_held is not None else DASH,
+            f"{x.days_left}d" if x.days_left is not None else DASH,
+            f"{float(x.conviction):.2f}" if x.conviction is not None else DASH,
+            esc(x.as_of or "no cached bars"),
+        ])
+    out.append(table(
+        f"{p}-book",
+        ["ticker", "60 sessions", "entry", "last", "move", "open P&L",
+         "R now", "stop", "to stop", "risk $", "held", "left", "conv",
+         "marked"],
+        rows, numeric_cols={2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}))
+    out.append(figcap(
+        "<b>R now</b> is the open result as a multiple of the money at "
+        "risk on that position - the unit a book is read in, because it "
+        "makes a small win on a small risk and a large win on a large "
+        "risk the same result. <b>To stop</b> is how far the price must "
+        "fall before the stop fills. <b>Marked</b> is the day the price "
+        "came from: these are cached daily closes, not live quotes, and "
+        "a mark that looks like a tick and is a day old is worse than no "
+        "mark at all."))
+    return section(f"{p}-section", "The book, in detail", "".join(out))
+
+
+def overview_switch(detailed: bool) -> str:
+    """Summary or the full book. A link, not a script: it survives a
+    refresh, it can be bookmarked, and it works with no JavaScript -
+    which this page has deliberately never needed."""
+    opts = [("", "Summary", "the handful of figures worth a glance"),
+            ("?view=detailed", "Detailed",
+             "every position marked, every metric derived")]
+    cells = []
+    for href, label, why in opts:
+        on = (label == "Detailed") == detailed
+        cells.append(
+            f'<a class="switch-opt{" on" if on else ""}" href="/{href}" '
+            f'title="{esc(why)}">{esc(label)}</a>')
+    return f'<div class="switch" id="ov-switch">{"".join(cells)}</div>'

@@ -133,8 +133,16 @@ def route_overview(db: Db, params: dict) -> str:
     # shows every word inline. Rendering all of it here came to 76 words
     # of prose per figure, which is how the page came to read as an
     # essay with numbers in it rather than an instrument.
+    # THE DETAILED TOGGLE. Owner-asked for a pro view: every position
+    # marked, every metric derived, nothing folded. Server-rendered off
+    # a query parameter like the decision page's own simple/full switch,
+    # so it survives a refresh and can be linked to.
+    detailed = (params.get("view") or [""])[0] == "detailed" if isinstance(
+        params.get("view"), list) else params.get("view") == "detailed"
     body = (
         panels.state_line(db, p="state")
+        + panels.overview_switch(detailed)
+        + (panels.detailed_overview(db, p="pro") if detailed else "")
         + digest(panels.value_reconciliation_panel(db, p="ovval"))
         + digest(panels.performance_panel(db, p="perf"))
         + digest(panels.funnel_panel(db, p="funnel"))

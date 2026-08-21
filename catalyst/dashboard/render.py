@@ -326,6 +326,25 @@ h3 { font-size: 11px; margin: 14px 0 5px 0; text-transform: uppercase;
 /* The entry day. It is no longer the left edge of the chart - the run
    up into the trade is drawn before it - so it needs its own rule. */
 .pos-bought { stroke: var(--ink-2); stroke-width: 1.5; }
+/* SUMMARY / DETAILED. A segmented control, the way a terminal offers a
+   view rather than a settings page. */
+.switch { display: inline-flex; border: 1px solid var(--hairline);
+  border-radius: 3px; overflow: hidden; margin: 0 0 12px 0; }
+.switch-opt { padding: 5px 14px; font-size: var(--t-fine); font-weight: 600;
+  text-transform: uppercase; letter-spacing: .1em; color: var(--muted);
+  text-decoration: none; background: var(--surface); }
+.switch-opt + .switch-opt { border-left: 1px solid var(--hairline); }
+.switch-opt:hover { color: var(--ink); background: var(--surface-2); }
+.switch-opt.on { background: var(--accent); color: var(--header);
+  text-shadow: none; }
+/* A sparkline sits INSIDE a table cell and must not grow it. */
+.spark { width: 96px; height: 22px; display: block; }
+.spark-line { fill: none; stroke-width: 1.4; }
+.spark-up { stroke: var(--pos); }
+.spark-down { stroke: var(--neg); }
+.spark-entry { stroke: var(--baseline); stroke-width: 1;
+  stroke-dasharray: 2 2; }
+.spark-dot { fill: var(--ink-2); }
 .range-chart { width: 100%; max-width: 640px; height: auto; margin: 6px 0 2px; }
 .range-track { fill: var(--surface-2); stroke: var(--hairline); }
 .range-now { fill: var(--series-1); }
