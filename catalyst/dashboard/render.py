@@ -1035,6 +1035,17 @@ def caveat(text: str) -> str:
     return f'<div class="caveat">{esc(text)}</div>'
 
 
+def caveat_html(html_text: str) -> str:
+    """A caveat whose text is already HTML.
+
+    caveat() escapes, which is right for the many callers passing plain
+    strings - and silently turns <b> into visible &lt;b&gt; for anyone
+    who forgets. The same trap as passing &mdash; through esc(), which
+    this dashboard has already been bitten by once.
+    """
+    return f'<div class="caveat">{html_text}</div>' 
+
+
 def note(text_html: str) -> str:
     """Neutral, informational. Not a warning and not a success.
 
@@ -1246,6 +1257,21 @@ def signed_pp(value: float | None) -> str:
     if value is None:
         return "n/a"
     return f"{value:+.2f}pp"
+
+
+def signed_pct(value: float | None) -> str:
+    """The same figure with a symbol a person can read.
+
+    OWNER-REPORTED: "still dont understand what beating it by 0.89pp
+    means, can you just show a percentage symbol equivalent".
+
+    "pp" is percentage POINTS, which is the correct unit for the gap
+    between two percentages and is also jargon. The number is unchanged;
+    only the label is, because a figure nobody can read is not a figure.
+    """
+    if value is None:
+        return "n/a"
+    return f"{value:+.2f}%"
 
 
 def json_pretty(text) -> str:

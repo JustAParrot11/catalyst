@@ -22,6 +22,7 @@ from catalyst.dashboard.render import (
     alarm,
     caveat,
     caveat_fold,
+    caveat_html,
     details,
     dollars,
     empty_block,
@@ -37,6 +38,7 @@ from catalyst.dashboard.render import (
     prov,
     raw,
     section,
+    signed_pct,
     signed_pp,
     table,
     tiles,
@@ -188,10 +190,33 @@ def performance_panel(db: Db, p: str = "perf") -> str:
             excess_text = '<span class="muted-fig">not yet</span>'
         else:
             excess_text = '<span class="neg">unavailable</span>' 
+        # BOTH PERCENTAGES, THEN THE GAP, THEN THE MONEY. Owner-
+        # reported: "still dont understand what beating it by 0.89pp
+        # means, can you just show a percentage symbol equivalent".
+        #
+        # A gap on its own is only readable if you can see what it is a
+        # gap BETWEEN - and the dollar line is the one nobody has to
+        # translate at all.
+        sides = ""
+        money = ""
+        if perf.bot_index is not None and perf.spy_index is not None:
+            you, spy = perf.bot_index - 100.0, perf.spy_index - 100.0
+            sides = (f' <b>You {you:+.2f}%</b>, '
+                     f"<b>SPY {spy:+.2f}%</b>.")
+            try:
+                start = Decimal(perf.start_capital_cents or 0)
+                if start > 0 and excess_v is not None:
+                    diff = start * Decimal(str(excess_v)) / 100
+                    money = (" In money, that is "
+                             f"<b>{dollars(diff.copy_abs())}</b> "
+                             + ("more" if excess_v >= 0 else "less")
+                             + " than the same cash in SPY would have been.")
+            except (ArithmeticError, TypeError, ValueError):
+                money = ""
         out.append(
             f'<p id="{p}-headline"><span class="big">{excess_text}</span> '
-            f"excess return against SPY, both series indexed to 100 at "
-            f"{esc(perf.start_day)}, bot line net of all API spend.</p>"
+            f"against SPY since {esc(perf.start_day)}, net of all API "
+            f"spend.{sides}{money}</p>"
         )
         bot_text = (f"bot index {perf.bot_index:.2f} "
                     f"(= {dollars(perf.net_equity_cents)} on a {start_text} "
@@ -226,9 +251,32 @@ def performance_panel(db: Db, p: str = "perf") -> str:
             state, word = "good", "ahead of SPY"
         else:
             state, word = "crit", "behind SPY"
+        # PERCENT, NOT "pp". Owner-reported: "still dont understand what
+        # beating it by 0.89pp means, can you just show a percentage
+        # symbol equivalent". Percentage POINTS is the technically
+        # correct unit for the gap between two percentages, and it is
+        # jargon - a figure nobody can read is not a figure. The two
+        # underlying percentages sit beside it so the gap is checkable
+        # rather than taken on trust.
         headline_tile = (f'<span class="{"pos" if (excess_v or 0) >= 0 else "neg"}">'
-                         f"{esc(signed_pp(excess_v))}</span>")
-        headline_sub = f"{pill(state, word)} exposure-matched, net of API spend"
+                         f"{esc(signed_pct(excess_v))}</span>")
+        # NOT "exposure-matched". It never was, and the correction was
+        # sitting in a provenance line that section() sweeps into a fold
+        # at the foot of the page - so the headline made a claim the
+        # page quietly contradicted where nobody would look.
+        #
+        # Owner-reported: "i dont want the false idea we are beating
+        # SPY". This is exactly how that idea forms, and the numbers
+        # make it concrete: an account holding one position and ~80%
+        # cash falls less than a fully invested index in every down
+        # market. That is not skill, it is not being in the market.
+        # The pointer only exists when the thing it points at does.
+        # _exposure_warning renders only where there IS a SPY series,
+        # so promising it unconditionally sends the reader looking for
+        # a paragraph that is not on the page.
+        headline_sub = f"{pill(state, word)} net of API spend"
+        if perf.spy_points:
+            headline_sub += " &mdash; but see the exposure warning below"
         equity_tile = dollars(perf.net_equity_cents)
         equity_sub = (
             (f"{pill('idle', 'placeholder baseline')} " if perf.baseline_is_placeholder
@@ -380,12 +428,11 @@ def performance_panel(db: Db, p: str = "perf") -> str:
             "liquid as SPY the difference is small - but it is a different "
             "basis, and the comparison is only as good as that."))
     if perf.spy_points:
+        out.append(_exposure_warning(perf, p))
         out.append(prov(
             f"Benchmark: SPY, {len(perf.spy_points)} daily closes from "
-            f"{perf.spy_source}, indexed to 100 on the same day as the bot line. "
-            "Exposure is NOT matched: SPY is fully invested throughout, the bot is "
-            "not - a like-for-like exposure-matched comparison needs a daily "
-            "position-value series the schema does not record yet."
+            f"{perf.spy_source}, indexed to 100 on the same day as the bot "
+            "line, total return (adjustment=all) so dividends are included."
         ))
     elif perf.spy_stale:
         # A DIFFERENT PROBLEM, and the only one of the two anybody can
@@ -5163,6 +5210,50 @@ def next_actions_panel(db: Db, p: str = "na") -> str:
         "visible from a schedule. The Overview and Cost pages are where "
         "those live.</p>")))
     return section(f"{p}-section", "What happens next", "".join(out))
+
+
+def _exposure_warning(perf, p: str) -> str:
+    """The condition the excess figure may only be read under.
+
+    OWNER-REPORTED: "ensure it is 100% accurate, i dont want the false
+    idea we are beating SPY".
+
+    THE COMPARISON IS NOT LIKE FOR LIKE AND CANNOT BE MADE SO with what
+    the schema records. SPY is 100% invested every day of the window.
+    This account holds a handful of positions and is mostly cash, so in
+    any falling market it loses less than the index - and that is not
+    skill, it is not being in the market. The reverse is just as true:
+    in a rising market it will look worse than it is.
+
+    A caveat, not a correction: exposure-matching properly needs a daily
+    position-value series, which nothing writes yet. Inventing one from
+    today's exposure would be worse than saying so, because it would
+    look like a measurement.
+
+    It sits BESIDE the number rather than in the provenance fold, which
+    is where it used to be - while the tile above it claimed
+    "exposure-matched". The page contradicted itself, and the half that
+    was easy to see was the wrong half.
+    """
+    deployed = ""
+    try:
+        equity = Decimal(perf.net_equity_cents or 0)
+        invested = Decimal(getattr(perf, "open_notional_cents", 0) or 0)
+        if equity > 0 and invested > 0:
+            deployed = (f" Right now about <b>{invested / equity * 100:.0f}%"
+                        "</b> of the account is invested; SPY is 100% "
+                        "invested every day of this window.")
+    except (ArithmeticError, TypeError, ValueError):
+        deployed = ""
+    return caveat_html(
+        "Read the excess figure with this in mind: <b>the two lines are "
+        "not like for like.</b> SPY is fully invested throughout. This "
+        "account is mostly cash between trades, so it falls less than "
+        "the index in a down market and rises less in an up one."
+        + deployed
+        + " Matching them properly needs a daily record of what the "
+        "positions were worth, which nothing writes yet - so this is "
+        "stated rather than silently corrected.")
 
 
 def _equity_bridge(perf, p: str) -> str:
