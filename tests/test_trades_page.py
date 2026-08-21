@@ -1236,3 +1236,98 @@ class TestTheChartShowsTheRunUp:
         drawn = set(re.findall(r"\$([\d.]+)", svg))
         assert "5.06" in drawn and "4.55" in drawn
         assert len(drawn) <= 3, f"unexplained prices drawn: {drawn}"
+
+
+class TestThePositionChartIsLEGIBLE:
+    """OWNER-REPORTED with a screenshot, 2026-08-21: "on the trade info
+    this bar is broken".
+
+    Three faults in one picture:
+      - the entry label rendered as "ught $5.06" - it sat at x = L-6
+        with text-anchor=end and ran off the left edge;
+      - several review rules landed on the same pixel and their labels
+        overprinted into "skipp/jjjgted";
+      - a SKIPPED review was drawn as loudly as a real decision, when
+        it cost nothing and decided nothing.
+    """
+
+    def svg_of(self, html):
+        i = html.index('class="pos-chart"')
+        svg = html[html.rindex("<svg", 0, i):]
+        return svg[:svg.index("</svg>") + 6]
+
+    def test_no_label_is_clipped_by_the_left_edge(self, tmp_path):
+        """THE REPORTED SYMPTOM. "bought $5.06" is ~72px wide and the
+        margin was 52."""
+        from catalyst.dashboard import charts
+
+        svg = self.svg_of(_page(_seed(tmp_path)))
+        assert not charts.labels_outside_viewbox(svg)
+        assert ">bought $5.06<" in svg, "the entry label is cut again"
+
+    def test_same_day_reviews_collapse_to_one_marker(self, tmp_path):
+        html = _page(_seed(tmp_path, reviews=[
+            ("2026-08-19T09:00:00+00:00", "hold", False, "a", []),
+            ("2026-08-19T15:00:00+00:00", "hold", False, "b", []),
+            ("2026-08-20T15:00:00+00:00", "hold", False, "c", []),
+        ]))
+        assert self.svg_of(html).count('class="pos-review') == 2, (
+            "two reviews on one day drew two rules on the same pixel")
+
+    def test_a_decision_outranks_a_hold_on_the_same_day(self, tmp_path):
+        html = _page(_seed(tmp_path, reviews=[
+            ("2026-08-19T09:00:00+00:00", "hold", False, "a", []),
+            ("2026-08-19T15:00:00+00:00", "exit_now", False, "b", []),
+        ]))
+        svg = self.svg_of(html)
+        assert "pos-review-exit" in svg
+        assert ">EXIT<" in svg
+
+    def test_a_SKIPPED_review_is_not_drawn_at_all(self, tmp_path):
+        """It cost nothing and decided nothing. It is still counted in
+        the caption and still listed in full further down."""
+        from catalyst.dashboard.queries import TradeStory
+
+        st = TradeStory(
+            ticker="X", entry_price="10", stop_price="9",
+            opened_at="2026-08-01", planned_exit_date="2026-08-20",
+            reviews=[("2026-08-05T00:00:00+00:00", "hold", False, "", [],
+                      "too soon")])
+        svg = panels._position_chart(st, "tr", 0)
+        assert "pos-review" not in svg
+        assert ">skipped<" not in svg
+
+    def test_crowded_labels_are_dropped_rather_than_overprinted(self,
+                                                                tmp_path):
+        """An unreadable label is worse than none - the rule and its
+        tooltip still carry the fact."""
+        html = _page(_seed(tmp_path, reviews=[
+            (f"2026-08-{d}T12:00:00+00:00", "hold", False, "x", [])
+            for d in (18, 19, 20, 21, 22, 23, 24, 25, 26)
+        ]))
+        svg = self.svg_of(html)
+        rules = svg.count('class="pos-review')
+        labels = len(re.findall(r'class="pos-label">held<', svg))
+        assert rules == 9
+        assert labels < rules, "every crowded label was drawn anyway"
+
+    def test_every_marker_carries_a_tooltip_even_unlabelled(self,
+                                                            tmp_path):
+        html = _page(_seed(tmp_path, reviews=[
+            ("2026-08-19T12:00:00+00:00", "hold", False, "x", [])]))
+        assert "<title>2026-08-19: held</title>" in self.svg_of(html)
+
+    def test_only_actions_the_schema_permits_are_translated(self):
+        """The map carried "exit_sooner", which the schema forbids, and
+        omitted "no_opinion", which it permits - so a real no_opinion
+        review would have printed the raw machine string on the chart."""
+        import inspect
+        from pathlib import Path
+
+        schema = (Path(__file__).resolve().parents[1] / "catalyst"
+                  / "storage" / "schema.sql").read_text()
+        assert "action IN ('hold','exit_now','no_opinion')" in schema
+        src = inspect.getsource(panels._position_chart)
+        assert '"no_opinion"' in src
+        assert '"exit_sooner"' not in src, (
+            "the chart still translates an action the schema cannot store")

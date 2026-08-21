@@ -93,11 +93,13 @@ def _rail_for(db: Db) -> str:
 
 
 def render_page(title: str, body: str, active: str, path: str,
-                db: Db | None = None, subtitle: str = "") -> str:
+                db: Db | None = None, subtitle: str = "",
+                refresh_seconds: int = 0) -> str:
     """Build the page, then CHECK IT. A duplicated element id becomes a
     banner on the page rather than two silently blank panels."""
     rail = _rail_for(db) if db is not None else ""
-    html_doc = page(title, body, active, path, rail=rail, subtitle=subtitle)
+    html_doc = page(title, body, active, path, rail=rail, subtitle=subtitle,
+                    refresh_seconds=refresh_seconds)
     dupes = duplicate_ids(html_doc)
     if dupes:
         banner = alarm(
@@ -149,7 +151,14 @@ def route_overview(db: Db, params: dict) -> str:
         + digest(panels.cost_panel(db, p="ovcost", compact=True))
         + digest(panels.alerts_panel(db, p="alerts"))
     )
-    return render_page("Overview", body, "/", db.path, db=db)
+    # THE DESK VIEW REFRESHES ITSELF. Owner-asked for "loads of graphs
+    # fluctuating numbers" - and a number only fluctuates if the page
+    # goes back for it. The summary view does not: it is read, not
+    # watched, and reloading it every few seconds would fight the
+    # reader for the scroll position.
+    return render_page("Overview", body, "/", db.path, db=db,
+                       refresh_seconds=panels.DESK_REFRESH_SECONDS
+                       if detailed else 0)
 
 
 def route_performance(db: Db, params: dict) -> str:

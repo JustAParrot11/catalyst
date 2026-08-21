@@ -3525,6 +3525,11 @@ class MarkedPosition:
     source: str = ""
     quote_error: str = ""
     spread_bp: Decimal | None = None
+    #: The two sides of the live quote the mid was taken from. Present
+    #: only when source == "live" - a cached daily close has no bid and
+    #: no ask, and inventing one would be inventing a spread.
+    bid: Decimal | None = None
+    ask: Decimal | None = None
 
 
 @dataclass
@@ -3588,6 +3593,7 @@ def live_book(db: Db, bars_dir=None, now=None, quotes=None) -> LiveBook:
             # here is one the risk engine would also have accepted.
             mp.last, mp.source = q.mid, "live"
             mp.spread_bp = q.spread_bp
+            mp.bid, mp.ask = q.bid, q.ask
             mp.as_of = q.at.strftime("%H:%M:%S") if q.at else ""
             mp.stale_days = 0
         elif q is not None:
@@ -3652,3 +3658,304 @@ def _as_day(text):
             str(text).replace("Z", "+00:00")).date()
     except (TypeError, ValueError):
         return None
+
+
+# --------------------------------------------------------------------------
+# The desk view's own reads: spend as it stands NOW, and what the API is
+# actually doing. Both are local-ledger reads - the Cost API cannot see
+# today at any price (TRAPS.md), so a live number can only come from here.
+# --------------------------------------------------------------------------
+
+
+def spend_today_cents(db: Db, as_of: date | None = None) -> Decimal:
+    """Everything priced today, both kinds pooled.
+
+    POOLED HERE AND NOWHERE ELSE. The governor keeps scheduled and
+    manual spend strictly apart, because one must never authorise the
+    other. This is a display of what the day has cost in total, which is
+    the question a person looking at a burn rate is asking, so it is
+    computed here rather than by loosening anything the governor does.
+    """
+    as_of = as_of or datetime.now(timezone.utc).date()
+    res = db.q(
+        "SELECT COALESCE(SUM(CAST(priced_cents AS REAL)), 0) c "
+        "FROM cost_events WHERE date(priced_at) = ? "
+        "AND priced_cents IS NOT NULL", (as_of.isoformat(),))
+    if not res.rows:
+        return Decimal("0")
+    return _dec(res.rows[0]["c"])
+
+
+@dataclass
+class SpendToday:
+    """Why today has cost what it has cost - especially when that is nil.
+
+    OWNER-ASKED 2026-08-21: "should claude be spending daily? it failed
+    to spend anything today? Does that mean its failing to research".
+
+    IT IS A FAIR READING AND THE PAGE HAD NO ANSWER TO IT. A $0 day is
+    produced by at least five different situations, three of them
+    completely normal and one of them a dead service, and until now they
+    all rendered as the same zero. That is the exact failure the brief
+    names: "a zero is never left unexplained", and "routine attrition
+    must not look like damage".
+
+    So this walks the chain in order and reports the FIRST stage that
+    stopped, classified by the rule rather than by a list of known
+    cases (house rule 7): running at all -> budget -> hunt -> candidates
+    -> research.
+    """
+
+    #: "spent" | "routine" | "limit" | "fault" - the same three-way
+    #: split the funnel uses, because only the last deserves attention.
+    kind: str = "routine"
+    headline: str = ""
+    detail: str = ""
+    cents: Decimal = Decimal("0")
+    calls: int = 0
+    is_weekend: bool = False
+    last_cycle_at: str = ""
+    hours_since_cycle: float | None = None
+    evidence_q: QueryResult = None
+
+
+#: How long the bot can go without completing a cycle before silence is
+#: a fault rather than a gap. Cycles are every 15 minutes, so anything
+#: past a couple of hours has missed several in a row - well beyond one
+#: slow feed or a single restart.
+CYCLE_SILENCE_HOURS = 2.0
+
+
+def spend_today(db: Db, now=None) -> SpendToday:
+    """The reason behind today's spend figure, whatever that figure is."""
+    now = now or datetime.now(timezone.utc)
+    today = now.date()
+    s = SpendToday(cents=spend_today_cents(db, today))
+    # Saturday and Sunday. Not a holiday calendar: a US market holiday
+    # is rare enough that calling it a quiet day rather than naming it
+    # is honest, and a wrong holiday list would be worse than none.
+    s.is_weekend = today.weekday() >= 5
+
+    calls = db.q(
+        "SELECT COUNT(*) n FROM research_calls WHERE date(called_at) = ?",
+        (today.isoformat(),))
+    s.calls = int(calls.rows[0]["n"]) if calls.rows else 0
+
+    if s.cents > 0 or s.calls:
+        s.kind, s.evidence_q = "spent", calls
+        s.headline = f"{s.calls} model call(s) today"
+        s.detail = ("this is what a working day looks like: the bot read "
+                    "the feed, judged what it found, and was billed for it")
+        return s
+
+    # 1. IS IT RUNNING AT ALL? Every completed cycle writes an equity
+    # snapshot from a confirmed broker read, so the newest one is the
+    # most reliable heartbeat in the database - it cannot be written by
+    # a cycle that failed before it got there.
+    beat = db.q("SELECT taken_at FROM equity_snapshots "
+                "ORDER BY taken_at DESC LIMIT 1")
+    s.evidence_q = beat
+    last = _as_dt(beat.rows[0]["taken_at"]) if beat.rows else None
+    if last is not None:
+        s.last_cycle_at = last.isoformat(timespec="seconds")
+        s.hours_since_cycle = (now - last).total_seconds() / 3600
+    if last is None:
+        s.kind = "fault"
+        s.headline = "no cycle has ever finished"
+        s.detail = ("nothing has written an equity snapshot, so the bot "
+                    "has not completed a single pass. Spending nothing is "
+                    "a symptom here, not the problem.")
+        return s
+    if s.hours_since_cycle is not None and (
+            s.hours_since_cycle > CYCLE_SILENCE_HOURS):
+        s.kind = "fault"
+        s.headline = (f"no cycle for {s.hours_since_cycle:.1f} hours")
+        s.detail = ("cycles run every 15 minutes, so several have been "
+                    "missed in a row. Nothing was spent because nothing "
+                    f"ran. Last completed pass: {s.last_cycle_at}. Check "
+                    "the service and the Logs tab.")
+        return s
+
+    # 2. DID A LIMIT REFUSE THE SPEND? The governor records every
+    # decision it makes, so a refusal is a queryable fact rather than
+    # something to be inferred from an absence.
+    denied = db.q(
+        "SELECT reason, COUNT(*) n, MAX(at) last_at FROM cost_governor_events "
+        "WHERE date(at) = ? AND decision <> 'allow' "
+        "GROUP BY reason ORDER BY n DESC", (today.isoformat(),))
+    if denied.rows:
+        r = denied.rows[0]
+        s.kind, s.evidence_q = "limit", denied
+        s.headline = f"the budget refused {r['n']} request(s)"
+        s.detail = (f"reason: {r['reason'] or 'not recorded'}. This is the "
+                    "cost governor doing its job, not a fault - but if it "
+                    "is refusing every day, the cap or the pause behind it "
+                    "is what to look at.")
+        return s
+
+    # 3. DID THE HUNT RUN? At the owner's cap it is a once-a-day call and
+    # is normally the floor under a day's spend, so a $0 day almost
+    # always means it did not happen. The scheduler logs its own reason.
+    hunt = db.q(
+        "SELECT message, MAX(ts) ts FROM logs WHERE date(ts) = ? "
+        "AND message LIKE 'Hunt did not run%'", (today.isoformat(),))
+    if hunt.rows and hunt.rows[0]["message"]:
+        s.evidence_q = hunt
+        why = str(hunt.rows[0]["message"]).split(":", 1)[-1].strip()
+        s.kind = "fault" if "error" in why else "routine"
+        s.headline = "the daily hunt did not run"
+        s.detail = (f"the scheduler gave its reason as \"{why}\". The hunt "
+                    "is the once-a-day call that reads the raw feed, so "
+                    "without it a quiet screen means a $0 day.")
+        return s
+
+    # 4. NOTHING SURVIVED THE SCREEN. The ordinary case, and the one
+    # that must not read as damage: research is spent per CANDIDATE, so
+    # a day with no candidate costs nothing by design.
+    cand = db.q(
+        "SELECT COUNT(*) n FROM candidates WHERE date(discovered_at) = ?",
+        (today.isoformat(),))
+    n = int(cand.rows[0]["n"]) if cand.rows else 0
+    s.evidence_q = cand
+    if n:
+        s.kind = "routine"
+        s.headline = f"{n} candidate(s) found, none reached research"
+        s.detail = ("the funnel names the stage that stopped them. Money "
+                    "is only spent on a candidate worth judging.")
+        return s
+    s.kind = "routine"
+    s.headline = "no candidate appeared today"
+    s.detail = (("the market is shut, so the feeds have nothing new to "
+                 "report and there is nothing to research. A $0 weekend "
+                 "is the system working.") if s.is_weekend else
+                ("the feeds ran and turned up nothing the screen would "
+                 "act on. Research is paid for per candidate, so a quiet "
+                 "day costs nothing by design - this is the cheap half "
+                 "of the strategy, not a failure of it."))
+    return s
+
+
+def _as_dt(text):
+    try:
+        d = datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
+@dataclass
+class ApiDesk:
+    """What the Anthropic API has actually been asked to do."""
+
+    calls_q: QueryResult = None
+    turns_q: QueryResult = None
+    calls_today: int = 0
+    calls_7d: int = 0
+    cost_today_cents: Decimal = Decimal("0")
+    cost_7d_cents: Decimal = Decimal("0")
+    #: Milliseconds. Median is the one to read; worst is the one that
+    #: decides whether a cycle finishes inside its 15 minutes.
+    latency_median_ms: int | None = None
+    latency_worst_ms: int | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    web_searches: int = 0
+    unparseable_turns: int = 0
+    #: (day, calls, cents) oldest first, for the bars.
+    by_day: tuple = ()
+    #: (day, cents) per call, oldest first.
+    cost_per_call: tuple = ()
+
+    @property
+    def billed_input_tokens(self) -> int:
+        """What actually gets charged as input. Cache tokens are billed
+        and are NOT inside input_tokens (TRAPS.md); a panel that shows
+        input alone understates the bill by about half."""
+        return (self.input_tokens + self.cache_read_tokens
+                + self.cache_write_tokens)
+
+    @property
+    def cache_hit_pct(self) -> Decimal | None:
+        total = self.billed_input_tokens
+        if not total:
+            return None
+        return Decimal(self.cache_read_tokens) / Decimal(total) * 100
+
+    @property
+    def avg_cost_cents(self) -> Decimal | None:
+        if not self.calls_7d:
+            return None
+        return self.cost_7d_cents / Decimal(self.calls_7d)
+
+
+def api_desk(db: Db, days: int = 14, now=None) -> ApiDesk:
+    """Calls, latency, tokens and searches over the recent window.
+
+    Reads research_calls and research_call_turns, which are the audit
+    trail of every model call the bot has made. Token counts come from
+    the VERBATIM usage object through cost.tracker's own parser - one
+    parser, so a rename cannot price itself at zero here while the
+    ledger still sees it.
+    """
+    now = now or datetime.now(timezone.utc)
+    today, since = now.date(), now.date() - timedelta(days=days)
+    d = ApiDesk()
+    d.calls_q = db.q(
+        "SELECT id, model, cost_cents, latency_ms, called_at, skipped_reason "
+        "FROM research_calls WHERE date(called_at) >= ? "
+        "ORDER BY called_at DESC", (since.isoformat(),))
+
+    per_day: dict = {}
+    lats: list = []
+    week = today - timedelta(days=6)
+    for r in d.calls_q.rows:
+        day = _as_date(r["called_at"])
+        cents = _dec(r["cost_cents"])
+        if day:
+            n, c = per_day.get(day, (0, Decimal("0")))
+            per_day[day] = (n + 1, c + cents)
+            if day == today:
+                d.calls_today += 1
+                d.cost_today_cents += cents
+            if day >= week:
+                d.calls_7d += 1
+                d.cost_7d_cents += cents
+        try:
+            ms = int(r["latency_ms"])
+        except (TypeError, ValueError):
+            ms = None
+        if ms is not None and ms >= 0:
+            lats.append(ms)
+    if lats:
+        lats.sort()
+        d.latency_median_ms = lats[len(lats) // 2]
+        d.latency_worst_ms = lats[-1]
+    d.by_day = tuple((day, n, c) for day, (n, c) in sorted(per_day.items()))
+    d.cost_per_call = tuple((day, (c / n if n else Decimal("0")))
+                            for day, n, c in d.by_day)
+
+    ids = [r["id"] for r in d.calls_q.rows]
+    if ids:
+        marks = ",".join("?" * len(ids))
+        d.turns_q = db.q(
+            f"SELECT call_id, usage_raw FROM research_call_turns "
+            f"WHERE call_id IN ({marks})", tuple(ids))
+        from catalyst.cost.tracker import make_usage_components
+
+        for r in d.turns_q.rows:
+            raw = jload(r["usage_raw"], None)
+            if not isinstance(raw, dict):
+                # House rule 3: a turn whose usage cannot be read is
+                # COUNTED and named, never silently treated as zero
+                # tokens - which is what makes a bill look cheap.
+                d.unparseable_turns += 1
+                continue
+            u = make_usage_components(raw)
+            d.input_tokens += u.input_tokens
+            d.output_tokens += u.output_tokens
+            d.cache_read_tokens += u.cache_read_input_tokens
+            d.cache_write_tokens += u.cache_creation_input_tokens
+            d.web_searches += u.web_search_requests
+    return d

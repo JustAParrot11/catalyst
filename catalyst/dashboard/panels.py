@@ -4529,7 +4529,7 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
                 continue
             said = {"hold": ("good", "kept holding"),
                     "exit_now": ("crit", "closed it now"),
-                    "exit_sooner": ("warn", "brought the exit forward")}.get(
+                    "no_opinion": ("idle", "had no view")}.get(
                         str(action), ("idle", str(action)))
             out.append(
                 f'<blockquote class="said"><b>{esc(when)}</b> '
@@ -5524,7 +5524,7 @@ def _position_chart(st, p: str, index: int) -> str:
     lo_p, hi_p = lo_p - pad, hi_p + pad
     span_d = max((end - chart_start).days, 1)
 
-    W, H, L, R, T, B = 660, 200, 52, 14, 14, 34
+    W, H, L, R, T, B = 660, 210, 88, 16, 18, 40
 
     def x(d):
         return L + (d - chart_start).days / span_d * (W - L - R)
@@ -5563,18 +5563,40 @@ def _position_chart(st, p: str, index: int) -> str:
         out.append(f'<text x="{x(last.day):.1f}" y="{y(last.close) - 8:.1f}" '
                    f'text-anchor="middle" class="pos-label">'
                    f"now ${float(last.close):.2f}</text>")
+    # ONE MARKER PER DAY, and only for reviews that DECIDED something.
+    #
+    # OWNER-REPORTED with a screenshot: several rules landed on the same
+    # pixel and their labels overprinted into "skipp/jjjgted". Two
+    # causes, both fixed here - same-day reviews are collapsed, and
+    # skipped ones are not drawn at all, because a skipped review cost
+    # nothing and decided nothing. It is still counted in the caption
+    # and still listed in full further down the page.
+    by_day = {}
     for when, action, _trig, _why, _changed, skipped in (st.reviews or []):
         day = _as_date(when)
-        if not day or not (chart_start <= day <= end):
+        if not day or not (chart_start <= day <= end) or skipped:
             continue
+        # An exit outranks a hold on a day that saw both: the decision
+        # that changed something is the one worth a mark.
+        if by_day.get(day, "hold") == "hold":
+            by_day[day] = str(action)
+    placed = []
+    for day in sorted(by_day):
+        px = x(day)
         word = {"hold": "held", "exit_now": "EXIT",
-                "exit_sooner": "cut short"}.get(str(action), str(action))
-        cls = "pos-review" if str(action) == "hold" else "pos-review-exit"
-        out.append(f'<line x1="{x(day):.1f}" y1="{T}" x2="{x(day):.1f}" '
-                   f'y2="{H - B}" class="{cls}"/>')
-        out.append(f'<text x="{x(day):.1f}" y="{T + 10:.0f}" '
-                   f'text-anchor="middle" class="pos-label">'
-                   + esc("skipped" if skipped else word) + "</text>")
+                "no_opinion": "no view"}.get(by_day[day], by_day[day])
+        cls = "pos-review" if by_day[day] == "hold" else "pos-review-exit"
+        out.append(f'<line x1="{px:.1f}" y1="{T}" x2="{px:.1f}" '
+                   f'y2="{H - B}" class="{cls}">'
+                   f"<title>{esc(str(day))}: {esc(word)}</title></line>")
+        # Label only where one FITS. Below ~34px apart the words
+        # overprint, and an unreadable label is worse than none - the
+        # rule and its tooltip still carry the fact.
+        if all(abs(px - q) > 34 for q in placed):
+            out.append(f'<text x="{px:.1f}" y="{T + 9:.0f}" '
+                       f'text-anchor="middle" class="pos-label">{esc(word)}'
+                       "</text>")
+            placed.append(px)
     out.append(f'<line x1="{x(start):.1f}" y1="{T}" x2="{x(start):.1f}" '
                f'y2="{H - B}" class="pos-bought"/>')
     out.append(f'<text x="{x(start):.1f}" y="{H - 20:.0f}" '
@@ -5795,7 +5817,13 @@ def detailed_overview(db: Db, p: str = "pro") -> str:
             f"{p}-none", b.positions_q,
             meaning=("nothing is open, so there is nothing to mark. This "
                      "view fills the moment a position exists.")))
-        return section(f"{p}-section", "The book, in detail", "".join(out))
+        # THE DESK IS NOT EMPTY JUST BECAUSE THE BOOK IS. Cost and API
+        # activity are live whether or not anything is held, and they
+        # are half of what was asked for here - an empty book must not
+        # take them off the page.
+        out.append(_cost_desk(db, p))
+        out.append(_api_desk(db, p))
+        return section(f"{p}-section", "The desk", "".join(out))
 
     worst = max((x.stale_days for x in b.positions
                  if x.stale_days is not None), default=None)
@@ -5887,7 +5915,11 @@ def detailed_overview(db: Db, p: str = "pro") -> str:
         "now, a date is that day's cached close. A mark that looks "
         "like a tick and is a day old is worse than no mark at all, so "
         "the two are never dressed the same."))
-    return section(f"{p}-section", "The book, in detail", "".join(out))
+    out.append(_market_strip(b, p))
+    out.append(_position_bars(b, p))
+    out.append(_cost_desk(db, p))
+    out.append(_api_desk(db, p))
+    return section(f"{p}-section", "The desk", "".join(out))
 
 
 def overview_switch(detailed: bool) -> str:
@@ -5904,3 +5936,316 @@ def overview_switch(detailed: bool) -> str:
             f'<a class="switch-opt{" on" if on else ""}" href="/{href}" '
             f'title="{esc(why)}">{esc(label)}</a>')
     return f'<div class="switch" id="ov-switch">{"".join(cells)}</div>'
+
+
+#: How often the desk view reloads itself. Short enough that a quote
+#: moves, long enough that the quote cache absorbs most of it and the
+#: broker is not re-asked on every tick.
+DESK_REFRESH_SECONDS = 15
+
+
+def _f(value, scale=1, default=None):
+    """A float for drawing, or `default`. Every chart on this page has
+    to survive a column that arrived as an empty string - a bad datum
+    hides one bar, it never takes the desk down."""
+    try:
+        d = Decimal(str(value)) / Decimal(str(scale))
+    except (ArithmeticError, TypeError, ValueError):
+        return default
+    return float(d) if d.is_finite() else default
+
+
+def _bar_row(pairs, sid, unit="$", height=54, width=300):
+    """A small column chart from (label, value) pairs. Values may be
+    negative; the zero line is drawn where zero actually is."""
+    vals = [float(v) for _l, v in pairs if v is not None]
+    if not vals:
+        return ""
+    hi, lo = max(vals + [0.0]), min(vals + [0.0])
+    span = (hi - lo) or 1.0
+    zero_y = 2 + (hi - 0.0) / span * (height - 4)
+    step = width / max(len(pairs), 1)
+    out = [f'<svg id="{sid}" class="minibar" viewBox="0 0 {width} {height}" '
+           'role="img" aria-hidden="true">',
+           f'<line x1="0" y1="{zero_y:.1f}" x2="{width}" y2="{zero_y:.1f}" '
+           'class="minibar-zero"/>']
+    for i, (_label, v) in enumerate(pairs):
+        if v is None:
+            continue
+        y = 2 + (hi - float(v)) / span * (height - 4)
+        top, bot = min(y, zero_y), max(y, zero_y)
+        out.append(
+            f'<rect x="{i * step + step * 0.18:.1f}" y="{top:.1f}" '
+            f'width="{step * 0.64:.1f}" height="{max(bot - top, 1):.1f}" '
+            f'class="{"minibar-pos" if float(v) >= 0 else "minibar-neg"}">'
+            f"<title>{esc(str(_label))}: {unit}{float(v):,.2f}</title></rect>")
+    out.append("</svg>")
+    return "".join(out)
+
+
+def _gauge_row(rows, sid):
+    """used / limit bars, one per line. The bar is the fraction; the
+    words are the two numbers, because a fraction alone cannot say
+    whether it is close to something that matters."""
+    out = [f'<div class="dg" id="{sid}">']
+    drawn = 0
+    for label, used, limit, note in rows:
+        u, lim = _f(used), _f(limit)
+        if not lim or lim <= 0 or u is None:
+            continue
+        pct = max(0.0, u / lim * 100)
+        # OVER THE LINE IS RED AND STAYS ON THE PAGE. A bar that simply
+        # stops at 100% cannot say whether it is at the limit or twice
+        # past it, so the number beside it always carries the truth and
+        # the bar is only ever the picture.
+        state = ("crit" if pct >= 100 else "warn" if pct >= 80 else "ok")
+        out.append(
+            f'<div class="dg-line"><span class="dg-name">{esc(label)}</span>'
+            f'<span class="dg-track"><span class="dg-bar dg-{state}" '
+            f'style="width:{min(pct, 100):.1f}%"></span></span>'
+            f'<span class="dg-num mono">{esc(note)}</span></div>')
+        drawn += 1
+    out.append("</div>")
+    return "".join(out) if drawn else ""
+
+
+def _market_strip(b, p: str) -> str:
+    """Bid, ask, spread and mid for everything held - the top-of-book
+    line a desk keeps in the corner of its eye.
+
+    EVERY POSITION APPEARS, quoted or not. Showing only the live ones
+    would let a symbol drop off the strip at the exact moment its quote
+    stopped arriving, which is the moment somebody most needs to see it.
+    A row with no quote carries the reason instead.
+    """
+    if not b.positions:
+        return ""
+    rows = []
+    for x in b.positions:
+        live = x.source == "live"
+        rows.append([
+            f"<b>{esc(x.ticker)}</b>",
+            f"${esc(f'{x.bid:.2f}')}" if x.bid else DASH,
+            f"${esc(f'{x.ask:.2f}')}" if x.ask else DASH,
+            f"${esc(f'{x.last:.2f}')}" if x.last is not None else DASH,
+            (f"{float(x.spread_bp):.1f}" if x.spread_bp is not None
+             else DASH),
+            ((x.entry and x.last is not None
+              and _signed((x.last - x.entry) / x.entry * 100, 2, unit="%"))
+             or DASH),
+            (f'<span class="live-dot" aria-hidden="true">&#9679;</span>'
+             f'<span class="mono">{esc(x.as_of)}</span>' if live else
+             f'<span class="muted-fig">{esc(x.quote_error)}</span>'
+             if x.quote_error else
+             f'<span class="muted-fig">cached close '
+             f'{esc(x.as_of or DASH)}</span>'),
+        ])
+    return ("<h3>Top of book</h3>" + table(
+        f"{p}-tob",
+        ["ticker", "bid", "ask", "mid", "spread bp", "vs entry", "quoted"],
+        rows, numeric_cols={1, 2, 3, 4, 5}) + figcap(
+        "<b>Spread bp</b> is half the bid-ask gap in basis points - what "
+        "crossing it costs, one way. A wide one is the difference "
+        "between a paper fill and a real one, so it sits beside the "
+        "price rather than behind a fold. A row with no bid and ask is "
+        "one no live quote could be had for; the reason is in the last "
+        "column."))
+
+
+def _position_bars(b, p: str) -> str:
+    """The book as two charts: money made, and money made per unit of
+    money risked. They rank differently, and the difference is the
+    whole reason R exists."""
+    if not b.positions:
+        return ""
+    pnl = [(x.ticker, _f(x.unrealised_usd)) for x in b.positions]
+    rmul = [(x.ticker, _f(x.r_now)) for x in b.positions]
+    if not any(v is not None for _t, v in pnl):
+        return ""
+    out = ['<div class="deskgrid">',
+           '<div class="deskcell"><h4>Open P&amp;L by position ($)</h4>',
+           _bar_row(pnl, f"{p}-pnl-bars"), "</div>",
+           '<div class="deskcell"><h4>R multiple by position</h4>',
+           _bar_row(rmul, f"{p}-r-bars", unit=""), "</div></div>"]
+    out.append(figcap(
+        "Left is dollars, right is the same result divided by what was "
+        "risked to get it. A position can be the biggest winner on the "
+        "left and a middling one on the right - that is a large bet "
+        "working, not a good one. Hover any bar for its number."))
+    return "".join(out)
+
+
+def _today_verdict(db: Db, p: str) -> str:
+    """One line saying why today has cost what it has cost.
+
+    OWNER-ASKED 2026-08-21: "should claude be spending daily? it failed
+    to spend anything today? Does that mean its failing to research".
+
+    A $0 day had exactly the same appearance whether the market was
+    shut, the screen was quiet, the budget had refused, or the service
+    was dead - and the owner correctly could not tell which. The brief
+    calls that out twice ("a zero is never left unexplained", "routine
+    attrition must not look like damage"), so the reason now sits
+    beside the number rather than in a log nobody reads.
+    """
+    s = queries.spend_today(db)
+    # ROUTINE IS "idle", NOT A WARNING. A quiet day is the system
+    # working, and painting it amber is how a working bot gets read as
+    # a broken one - which this project has already paid for twice.
+    state = {"spent": "good", "routine": "idle",
+             "limit": "warn", "fault": "crit"}.get(s.kind, "idle")
+    word = {"spent": "spending", "routine": "quiet",
+            "limit": "held back", "fault": "not running"}.get(s.kind, s.kind)
+    return (f'<p class="verdict">{pill(state, word)} '
+            f"<b>{dollars(s.cents)} spent today</b> &mdash; "
+            f"{esc(s.headline)}. {esc(s.detail)}</p>")
+
+
+def _api_desk(db: Db, p: str) -> str:
+    """What the API has actually been asked to do, and what it charged.
+
+    Owner-asked for "api and costing data all live". The costing half is
+    _cost_desk; this is the workload behind it - calls, latency, tokens
+    and searches. Every figure is measured from the bot's own audit
+    trail of model calls, not estimated.
+    """
+    d = queries.api_desk(db)
+    head = "<h3>The API, at work</h3>" + _today_verdict(db, p)
+    if not d.calls_q.rows:
+        return head + zero_block(
+            f"{p}-api-none", d.calls_q,
+            meaning=("no model call has been made in the last fortnight. "
+                     "The line above says why today spent what it did; "
+                     "the funnel names the stage that stopped the rest."))
+    hit = d.cache_hit_pct
+    out = [head, tiles(f"{p}-api", [
+        ("Calls today", str(d.calls_today),
+         f"{d.calls_7d} in the last 7 days, {dollars(d.cost_7d_cents)} "
+         "of billing"),
+        ("Cost per call", (dollars(d.avg_cost_cents)
+                           if d.avg_cost_cents is not None else DASH),
+         "mean over the last 7 days"),
+        ("Latency", (f"{d.latency_median_ms / 1000:.1f}s"
+                     if d.latency_median_ms is not None else DASH),
+         (f"median; worst {d.latency_worst_ms / 1000:.1f}s"
+          if d.latency_worst_ms is not None else "not recorded")),
+        ("Web searches", f"{d.web_searches:,}",
+         f"{dollars(Decimal(d.web_searches))} at 1c each, billed on top "
+         "of tokens"),
+    ])]
+    out.append(_gauge_row([
+        ("Cache hit rate", float(hit or 0), 100.0,
+         f"{float(hit):.0f}% of billed input" if hit is not None
+         else "no input recorded"),
+    ], f"{p}-api-gauges"))
+    out.append(table(
+        f"{p}-tokens",
+        ["", "tokens", "what it is"],
+        [["fresh input", f"{d.input_tokens:,}",
+          "charged at the full input rate"],
+         ["cache reads", f"{d.cache_read_tokens:,}",
+          "charged at 0.1x input - the cheap ones"],
+         ["cache writes", f"{d.cache_write_tokens:,}",
+          "charged at 1.25x input - the expensive ones"],
+         ["<b>billed input</b>", f"<b>{d.billed_input_tokens:,}</b>",
+          "<b>the three above, which is what the bill is built on</b>"],
+         ["output", f"{d.output_tokens:,}",
+          "charged at the output rate, roughly 5x input"]],
+        numeric_cols={1}))
+    if d.unparseable_turns:
+        out.append(caveat(
+            f"{d.unparseable_turns} recorded turn(s) had a usage object "
+            "this page could not read, so their tokens are missing from "
+            "the counts above. The ledger prices from the same raw "
+            "records, so the money figures are unaffected."))
+    if len(d.by_day) > 1:
+        out.append('<div class="deskgrid">'
+                   '<div class="deskcell"><h4>Calls per day</h4>')
+        out.append(_bar_row([(str(day), float(n)) for day, n, _c in d.by_day],
+                            f"{p}-api-calls", unit=""))
+        out.append('</div><div class="deskcell"><h4>Cost per call ($)</h4>')
+        out.append(_bar_row([(str(day), _f(c, scale=100))
+                             for day, c in d.cost_per_call],
+                            f"{p}-api-cpc"))
+        out.append("</div></div>")
+    out.append(figcap(
+        "<b>Cache tokens are billed and are not inside the input "
+        "count</b> - reading input alone understates the bill by about "
+        "half, which is exactly the mistake this table exists to stop. "
+        "A high cache hit rate is the cheapest thing on this page: it "
+        "is the same context charged at a tenth."))
+    return "".join(out)
+
+
+def _cost_desk(db: Db, p: str) -> str:
+    """Every number about what this bot costs to run, and the only
+    forecast in the building that is a real one.
+
+    THE PROJECTION IS OF SPEND, NEVER OF PRICE. Owner-asked for
+    "predictions". Month-end spend from the current burn rate is
+    arithmetic on a measured series and is offered here. A price target
+    is not, and never will be from this page - the bot does not forecast
+    prices, and a dashboard inventing one would be putting a number in
+    front of the owner that nothing in the system stands behind.
+    """
+    from catalyst.cost.forecast import forecast
+
+    c = queries.cost_panel(db)
+    cap = Decimal(c.max_cap_cents or 0)
+    mtd = Decimal(c.scheduled_mtd_cents or 0) + Decimal(c.manual_mtd_cents or 0)
+    f = forecast(mtd, cap, c.as_of)
+    per_day = f.daily_rate_cents
+
+    projected = (per_day * f.days_in_month) if per_day is not None else None
+    hurdle = ""
+    try:
+        capital = Decimal(queries.baseline(db).capital_cents or 0)
+        if capital > 0 and projected is not None:
+            hurdle = f"{projected * 12 / capital * 100:.0f}% a year to break even"
+    except Exception:            # noqa: BLE001
+        hurdle = ""
+
+    out = ["<h3>What it costs to run</h3>", tiles(f"{p}-cost", [
+        ("Month to date", dollars(mtd),
+         f"day {c.days_elapsed} of {f.days_in_month}"),
+        ("Burn rate", (dollars(per_day) if per_day is not None else DASH),
+         "a day, measured over this month"),
+        ("Projected month", (dollars(projected) if projected is not None
+                             else DASH),
+         esc(hurdle) if hurdle else "at the current rate"),
+        ("Cap", dollars(cap),
+         (f"runs out {f.exhausted_on}" if f.will_stop_early
+          else "not expected to run out this month")),
+    ])]
+    # THE DAILY CEILING IS DERIVED FROM THE MONTHLY CAP, and read from
+    # the governor rather than restated here. A second copy of that
+    # arithmetic is how the dashboard once printed a $5 ceiling while
+    # the bot spent against $10.
+    from catalyst.cost.governor import daily_cap_cents
+
+    today = queries.spend_today_cents(db)
+    day_cap = daily_cap_cents(cap if cap > 0 else None)
+    out.append(_gauge_row([
+        ("Month against the cap", mtd, cap,
+         f"{dollars(mtd)} / {dollars(cap)}"),
+        ("Today against the daily ceiling", today, day_cap,
+         f"{dollars(today)} / {dollars(day_cap)}"),
+    ], f"{p}-cost-gauges"))
+    if c.billed_days:
+        # billed_q comes back NEWEST FIRST. Charted in that order the
+        # time axis runs backwards, which reads as a burn rate falling
+        # when it is rising - so it is reversed before it is drawn.
+        bars = [(r["target_date"], _f(r["cost_api_total_cents"], scale=100))
+                for r in reversed(list(c.billed_q.rows))][-30:]
+        out.append(_bar_row(bars, f"{p}-billed-bars"))
+        out.append(figcap(
+            f"Daily billed spend, oldest left. {c.billed_days} day(s) "
+            "reconciled against Anthropic's own records - this is what "
+            "was actually charged, not what we estimated."))
+    out.append(figcap(
+        "<b>The only forecast here is of SPEND.</b> Month-end is "
+        "arithmetic on a measured burn rate. No price target appears on "
+        "this page and none ever will: the bot does not forecast prices, "
+        "so a number like that would be one nothing in the system stands "
+        "behind."))
+    return "".join(out)
