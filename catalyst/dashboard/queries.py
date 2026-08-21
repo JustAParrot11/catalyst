@@ -3473,3 +3473,151 @@ def book_metrics(stories, equity=None) -> BookMetrics:
         b.expectancy_r = b.avg_r
     b.enough_sample = b.graded >= MIN_TRADES_FOR_MEANING
     return b
+
+
+# ==========================================================================
+# The detailed book: every open position marked to the freshest price
+# this dashboard can honestly show.
+#
+# OWNER-ASKED: "a detailed toggle. This shows realtime data as much as
+# we can, current price of each trade, price tracking, live graphs ...
+# understandable to a proper pro trader with loads of metrics".
+#
+# "AS MUCH AS WE CAN" IS THE HONEST PART, and it is a real limit. This
+# dashboard reads a database and a bar cache; it holds no broker
+# session and takes no quote. The freshest price it can show is the
+# last DAILY CLOSE the bot cached for that ticker, and every figure
+# derived from it is stamped with the day it came from.
+#
+# Calling that "live" would be the single most dangerous thing on the
+# page: a mark-to-market that looks like a tick and is up to a day old
+# is how somebody thinks they are flat when they are not.
+# ==========================================================================
+
+
+@dataclass
+class MarkedPosition:
+    ticker: str = ""
+    position_id: str = ""
+    qty: Decimal | None = None
+    entry: Decimal | None = None
+    stop: Decimal | None = None
+    last: Decimal | None = None
+    as_of: str = ""                 # the day `last` closed
+    market_value: Decimal | None = None
+    unrealised_usd: Decimal | None = None
+    unrealised_pct: Decimal | None = None
+    #: Unrealised result as a multiple of the money at risk. The number
+    #: a book is read in.
+    r_now: Decimal | None = None
+    to_stop_pct: Decimal | None = None
+    risk_usd: Decimal | None = None
+    days_held: int | None = None
+    days_left: int | None = None
+    conviction: float | None = None
+    sector: str = ""
+    catalyst_type: str = ""
+    spark: tuple = ()               # recent closes, oldest first
+    stale_days: int | None = None
+
+
+@dataclass
+class LiveBook:
+    positions: list = field(default_factory=list)
+    equity_usd: Decimal | None = None
+    deployed_usd: Decimal | None = None
+    deployed_pct: Decimal | None = None
+    open_risk_usd: Decimal | None = None
+    open_risk_pct: Decimal | None = None
+    unrealised_usd: Decimal | None = None
+    freshest: str = ""
+    stalest: str = ""
+    positions_q: QueryResult | None = None
+
+
+def _closes(bars_dir, ticker, days=90):
+    try:
+        from catalyst.backtest.data import BarCache
+
+        bars = BarCache(bars_dir).load_bars(ticker)
+    except Exception:               # noqa: BLE001 - absence is normal
+        return ()
+    return tuple(bars[-days:])
+
+
+def live_book(db: Db, bars_dir=None, now=None) -> LiveBook:
+    """Every open position, marked to its last cached close."""
+    from catalyst.dashboard.db import bars_path
+
+    bars_dir = bars_dir or bars_path()
+    now = now or datetime.now(timezone.utc)
+    book = LiveBook()
+    d = trades(db)
+    book.positions_q = d.positions_q
+    equity = None
+    deployed = risk = unreal = Decimal("0")
+    saw_deployed = saw_risk = saw_unreal = False
+
+    for st in d.stories:
+        if st.status != "open":
+            continue
+        m = trade_metrics(st)
+        mp = MarkedPosition(
+            ticker=st.ticker, position_id=st.position_id,
+            qty=_metric_dec(st.qty), entry=_metric_dec(st.entry_price),
+            stop=_metric_dec(st.stop_price), risk_usd=m.risk_usd,
+            to_stop_pct=m.stop_pct, conviction=st.conviction,
+            sector=st.catalyst_type and "" or "", catalyst_type=st.catalyst_type)
+        if equity is None:
+            equity = _metric_dec(st.equity_at_entry)
+        bars = _closes(bars_dir, st.ticker)
+        if bars:
+            mp.last = _metric_dec(bars[-1].close)
+            mp.as_of = str(bars[-1].day)
+            mp.spark = tuple(float(b.close) for b in bars[-60:])
+            try:
+                mp.stale_days = (now.date() - bars[-1].day).days
+            except (TypeError, ValueError):
+                mp.stale_days = None
+        if mp.last is not None and mp.qty:
+            mp.market_value = mp.qty * mp.last
+            deployed += mp.market_value
+            saw_deployed = True
+            if mp.entry:
+                mp.unrealised_usd = (mp.last - mp.entry) * mp.qty
+                mp.unrealised_pct = (mp.last - mp.entry) / mp.entry * 100
+                unreal += mp.unrealised_usd
+                saw_unreal = True
+                if m.risk_usd and m.risk_usd > 0:
+                    mp.r_now = mp.unrealised_usd / m.risk_usd
+        if m.risk_usd is not None:
+            risk += m.risk_usd
+            saw_risk = True
+        opened, exits = _as_day(st.opened_at), _as_day(st.planned_exit_date)
+        if opened:
+            mp.days_held = (now.date() - opened).days
+        if exits:
+            mp.days_left = (exits - now.date()).days
+        book.positions.append(mp)
+
+    book.equity_usd = equity
+    book.deployed_usd = deployed if saw_deployed else None
+    book.open_risk_usd = risk if saw_risk else None
+    book.unrealised_usd = unreal if saw_unreal else None
+    if equity and equity > 0:
+        if book.deployed_usd is not None:
+            book.deployed_pct = book.deployed_usd / equity * 100
+        if book.open_risk_usd is not None:
+            book.open_risk_pct = book.open_risk_usd / equity * 100
+    stamps = sorted(p.as_of for p in book.positions if p.as_of)
+    if stamps:
+        book.freshest, book.stalest = stamps[-1], stamps[0]
+    return book
+
+
+def _as_day(text):
+    try:
+        return datetime.fromisoformat(
+            str(text).replace("Z", "+00:00")).date()
+    except (TypeError, ValueError):
+        return None
