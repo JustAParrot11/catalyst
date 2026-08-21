@@ -6075,7 +6075,7 @@ def _position_bars(b, p: str) -> str:
     return "".join(out)
 
 
-def _today_verdict(db: Db, p: str) -> str:
+def _today_verdict(db: Db, p: str, now=None) -> str:
     """One line saying why today has cost what it has cost.
 
     OWNER-ASKED 2026-08-21: "should claude be spending daily? it failed
@@ -6088,7 +6088,11 @@ def _today_verdict(db: Db, p: str) -> str:
     attrition must not look like damage"), so the reason now sits
     beside the number rather than in a log nobody reads.
     """
-    s = queries.spend_today(db)
+    # `now` is injectable ONLY so a test can pin the clock. House rule
+    # 6: this classifier measures against datetime.now(), and a test
+    # that fixes the clock in one place but not the other goes red at
+    # UTC midnight for a reason unrelated to what it tests.
+    s = queries.spend_today(db, now=now)
     # ROUTINE IS "idle", NOT A WARNING. A quiet day is the system
     # working, and painting it amber is how a working bot gets read as
     # a broken one - which this project has already paid for twice.

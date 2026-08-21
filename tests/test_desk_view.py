@@ -43,8 +43,13 @@ from tests.test_detailed_overview import bars_for
 from tests.test_trades_page import CID, _seed
 
 
+#: ONE CLOCK, READ ONCE, PASSED EXPLICITLY EVERYWHERE. House rule 6:
+#: the code under test measures against datetime.now(), so a fixture
+#: that stamps rows from one reading of the clock while the classifier
+#: takes another goes red the moment a run straddles UTC midnight - a
+#: failure with nothing to do with what these tests check. Every helper
+#: below takes `now`, and every assertion passes the same one in.
 NOW = datetime.now(timezone.utc)
-TODAY = NOW.date().isoformat()
 
 
 @pytest.fixture
@@ -58,9 +63,9 @@ def _conn(path):
     return sqlite3.connect(path)
 
 
-def _beat(path, hours_ago=0.1):
+def _beat(path, hours_ago=0.1, now=NOW):
     """A completed cycle: the equity snapshot every pass writes."""
-    when = NOW - timedelta(hours=hours_ago)
+    when = now - timedelta(hours=hours_ago)
     c = _conn(path)
     c.execute("INSERT OR REPLACE INTO equity_snapshots VALUES (?,?,?,?,?,?)",
               (when.date().isoformat(), when.isoformat(), "2000.00",
@@ -87,10 +92,10 @@ def _call(path, cents="19", latency=4200, usage=None, when=None):
     c.close()
 
 
-def verdict(path):
+def verdict(path, now=NOW):
     db = Db(path)
     try:
-        return queries.spend_today(db)
+        return queries.spend_today(db, now=now)
     finally:
         db.close()
 
@@ -194,7 +199,7 @@ class TestAZeroIsNeverLeftUnexplained:
         c.execute("DELETE FROM candidates WHERE id = ?", (CID,))
         c.commit()
         c.close()
-        html = panels._today_verdict(Db(seeded), "pro")
+        html = panels._today_verdict(Db(seeded), "pro", now=NOW)
         assert "pill-crit" not in html
         assert "pill-warn" not in html
 
