@@ -1112,3 +1112,127 @@ class TestThePositionChart:
                         status="open")
         assert panels._position_chart(st, "tr", 0) == ""
         assert 'class="hold-track"' in panels._hold_progress(st, "tr", 0)
+
+
+def _with_bars(tmp_path, monkeypatch, ticker="EMBC", sessions=300):
+    """A real bar cache, so the technical charts have something to read.
+    Built off a fixed seed: the SHAPE is arbitrary, the point is that
+    300 sessions exist."""
+    import random
+    from datetime import date, timedelta
+    from decimal import Decimal
+
+    from catalyst.backtest.data import Bar, BarCache
+
+    monkeypatch.setenv("CATALYST_BARS", str(tmp_path / "bars"))
+    random.seed(7)
+    px, d, days = 6.40, date(2026, 8, 21), []
+    while len(days) < sessions:
+        if d.weekday() < 5:
+            days.append(d)
+        d -= timedelta(days=1)
+    days.reverse()
+    bars = []
+    for day in days:
+        px = max(px * (1 + random.gauss(-0.0009, 0.022)), 3.9)
+        v = Decimal(str(round(px, 2)))
+        bars.append(Bar(day=day, open=v, high=v * Decimal("1.02"),
+                        low=v * Decimal("0.98"), close=v,
+                        volume=Decimal(str(random.randint(4 * 10**5, 3 * 10**6)))))
+    BarCache(str(tmp_path / "bars")).write_bars(ticker, bars)
+    return _seed(tmp_path)
+
+
+class TestTheBriefTechnicalRead:
+    """OWNER-ASKED: "maybe another graph or two, it feels very wordy to
+    give it a brief technical analysis"."""
+
+    def test_it_reuses_the_numbers_claude_was_GIVEN(self):
+        """Not a second opinion. Every figure comes from
+        data/price_action.py - the module that fills the research prompt
+        - so the page shows what the model saw. A dashboard computing
+        its own version is how two numbers with one name start
+        disagreeing."""
+        import inspect
+
+        src = inspect.getsource(panels._technicals)
+        assert "from catalyst.data.price_action import price_action" in src
+
+    def test_the_moves_and_the_volume_are_shown(self, tmp_path, monkeypatch):
+        html = _page(_with_bars(tmp_path, monkeypatch))
+        for label in ("5 days", "20 days", "Since the catalyst", "Volume"):
+            assert label in html
+
+    def test_volume_is_translated_not_just_a_ratio(self, tmp_path,
+                                                   monkeypatch):
+        """"1.1x" means nothing without knowing 1.0 is normal."""
+        html = _page(_with_bars(tmp_path, monkeypatch))
+        assert any(w in html for w in (
+            "usual volume", "busier than usual", "quieter than usual",
+            "traded far more than usual"))
+
+    def test_the_range_bar_places_it_in_its_own_year(self, tmp_path,
+                                                     monkeypatch):
+        html = _page(_with_bars(tmp_path, monkeypatch))
+        assert 'class="range-chart"' in html
+        assert "52w low" in html and "up the range" in html
+
+    def test_the_range_bar_refuses_to_call_it_cheap_or_expensive(
+            self, tmp_path, monkeypatch):
+        """Position in a range is context, not a verdict. A dashboard
+        that says "near the low, therefore cheap" has started giving
+        advice from a single number."""
+        html = _page(_with_bars(tmp_path, monkeypatch))
+        assert "not cheap" in html and "not expensive" in html
+
+    def test_the_marker_cannot_leave_the_track(self, tmp_path):
+        """A range position outside 0-100 would draw off the end."""
+        from catalyst.data.price_action import PriceAction
+        from decimal import Decimal
+
+        st = queries.TradeStory(ticker="X", entry_price="5")
+        for pos in (Decimal("-30"), Decimal("140")):
+            html = panels._range_bar(st, PriceAction(range_position_pct=pos),
+                                     "tr", 0)
+            cx = float(re.search(r'<circle cx="([\d.]+)"', html).group(1))
+            assert 40 <= cx <= 600, cx
+
+
+class TestTheChartShowsTheRunUp:
+    def test_history_before_the_entry_is_drawn(self, tmp_path, monkeypatch):
+        """A days-to-weeks position is too short to read on its own -
+        and a 20-day average over a 12-day hold does not exist, so the
+        trend line never drew at all."""
+        html = _page(_with_bars(tmp_path, monkeypatch))
+        assert 'class="pos-sma"' in html, "the trend line still cannot draw"
+        assert 'class="pos-bought"' in html, "the entry day is not marked"
+
+    def test_the_entry_is_marked_now_it_is_not_the_edge(self, tmp_path,
+                                                        monkeypatch):
+        html = _page(_with_bars(tmp_path, monkeypatch))
+        assert ">bought</text>" in html
+
+    def test_the_average_is_drawn_only_where_it_exists(self):
+        """The first nineteen days have no twenty-day average. Drawing
+        one for them invents the very thing being read."""
+        assert panels._sma([1, 2, 3], 20) == []
+        got = panels._sma(list(range(30)), 20)
+        assert got[0][0] == 19, "an average was drawn before it existed"
+        assert got[0][1] == sum(range(20)) / 20
+
+    def test_the_average_is_a_real_rolling_mean(self):
+        vals = [float(i) for i in range(1, 26)]
+        got = dict(panels._sma(vals, 5))
+        assert got[4] == sum(vals[0:5]) / 5
+        assert got[24] == sum(vals[20:25]) / 5
+
+    def test_still_NOTHING_IS_PROJECTED(self, tmp_path, monkeypatch):
+        """Unchanged by any of this: the price line stops where the data
+        stops, and no drawn price is one that was never paid or seen."""
+        html = _page(_with_bars(tmp_path, monkeypatch))
+        i = html.index('class="pos-chart"')
+        svg = html[html.rindex("<svg", 0, i):]
+        svg = svg[:svg.index("</svg>")]
+        drawn = set(re.findall(r"\$([\d.]+)", svg))
+        assert "5.06" in drawn and "4.55" in drawn
+        assert len(drawn) <= 3, f"unexplained prices drawn: {drawn}"
