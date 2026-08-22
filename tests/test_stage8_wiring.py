@@ -23,7 +23,26 @@ from catalyst.cost import CostEstimate
 from catalyst.cost.governor import BASE_CAP_CENTS, authorize
 from catalyst.execution.broker import Broker
 
-NOW = datetime(2026, 8, 10, 14, 0, tzinfo=timezone.utc)
+#: THE CURRENT MONTH, ALWAYS - house rule 6.
+#:
+#: This was `datetime(2026, 8, 10, ...)`, a hardcoded August date, while
+#: the cost governor computes month-to-date against the REAL clock. In
+#: August 2026 the two agreed. From 1 September 2026 they never agree
+#: again: seeded spend lands outside the month being measured, so
+#: month-to-date reads 0 and every budget-denial test fails - not on the
+#: 1st, but on every day thereafter, permanently.
+#:
+#: upgrade.sh runs this suite before it will install anything, so that
+#: would have blocked every upgrade from September onward. Found by
+#: moving the system clock forward, which is the only thing that finds
+#: it: the suite is green today and would have stayed green until the
+#: month turned.
+#:
+#: Same day-of-month and time as before so nothing else shifts, clamped
+#: so it is never in the future on the 1st through the 9th.
+_REAL_NOW = datetime.now(timezone.utc)
+NOW = _REAL_NOW.replace(day=min(10, _REAL_NOW.day), hour=14, minute=0,
+                        second=0, microsecond=0)
 
 
 @pytest.fixture

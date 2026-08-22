@@ -38,8 +38,24 @@ from catalyst.cost.backfill import (
 )
 
 SCHEMA = Path(__file__).resolve().parents[1] / "catalyst" / "storage" / "schema.sql"
-NOW = datetime.now(timezone.utc)
-DAY = (NOW - timedelta(days=3)).date()
+#: PINNED, deliberately - the opposite of house rule 6, for the opposite
+#: reason. Nothing here measures against datetime.now(): every call below
+#: injects now=NOW, and backfill.py only defaults when it is omitted. So
+#: there is no live clock to drift against, and pinning is safe.
+#:
+#: It is also REQUIRED. REAL_BILLED is what Anthropic actually charged
+#: for 2026-08-15, and a bill is inseparable from the rates in force on
+#: its day. DAY used to slide with the real clock, so once it drifted
+#: past 2026-08-31 the same verbatim usage repriced at Sonnet 5's
+#: standard rates - 64.1169c against a recorded 45.7446c - and eight
+#: tests failed on pricing the code had exactly right. Found by moving
+#: the system clock forward; they were green today and would have gone
+#: red in mid-September, blocking the upgrade.
+#:
+#: DAY is now the real day the sample came from, which is what it should
+#: always have been: a fixture of real observed data has a real date.
+NOW = datetime(2026, 8, 18, 12, 0, tzinfo=timezone.utc)
+DAY = (NOW - timedelta(days=3)).date()          # 2026-08-15
 
 #: The real 2026-08-15 usage group, verbatim from the Usage API.
 REAL_GROUP = {

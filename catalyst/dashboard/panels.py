@@ -1540,14 +1540,23 @@ def _daily_ceiling_tile(db: Db, c) -> tuple:
     """
     from datetime import datetime, timezone
 
-    from catalyst.cost.governor import DAILY_CAP_CENTS
+    from catalyst.cost.governor import daily_cap_cents
+
+    # DERIVED from the owner's cap, never the flat constant. The governor
+    # calls daily_cap_cents(), so on a $100/month cap it allows $10/day -
+    # while this tile measured against a hardcoded $5 and would have
+    # painted a $9 day as 180% CRIT RED with nothing actually wrong. That
+    # is the identical defect already fixed for the monthly gauge: the
+    # dashboard printing a base constant while the governor spends
+    # against something else.
+    ceiling = daily_cap_cents(c.base_cap_cents)
 
     today = datetime.now(timezone.utc).date()
     res = db.q("SELECT COALESCE(SUM(CAST(priced_cents AS REAL)), 0) FROM "
                "cost_events WHERE kind = 'scheduled' AND date(priced_at) = ? "
                "AND priced_cents IS NOT NULL", (today.isoformat(),))
     spent_today = Decimal(str(res.rows[0][0])) if res.rows else Decimal(0)
-    used = (spent_today / DAILY_CAP_CENTS * 100) if DAILY_CAP_CENTS else 0
+    used = (spent_today / ceiling * 100) if ceiling else 0
     state = "crit" if used >= 100 else "warn" if used >= 75 else "good"
 
     # WHICH ONE BINDS FIRST, at today's rate.
@@ -1559,9 +1568,11 @@ def _daily_ceiling_tile(db: Db, c) -> tuple:
             note = (f" At today's rate the MONTHLY budget runs out in about "
                     f"{days_left:.0f} day(s) - that is the limit that will "
                     "stop the bot, not this one.")
-        else:
-            note = " The monthly budget is not close at this rate."
-    label = f"{used:.0f}% of the ${DAILY_CAP_CENTS / 100:.0f} daily ceiling"
+    # No "the monthly budget is not close" line for the quiet case: the
+    # monthly gauge directly below already says "at that rate the budget
+    # lasts the whole month", and two sentences of the same reassurance
+    # is the essay this page is measured against.
+    label = f"{used:.0f}% of the {dollars(ceiling)} daily ceiling"
     return ("Spent today", dollars(spent_today),
             pill(state, label)
             + " a guard against a runaway, not a throttle - it resets at "

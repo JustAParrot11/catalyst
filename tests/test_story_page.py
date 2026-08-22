@@ -23,6 +23,7 @@ import json
 import os
 import sqlite3
 import tempfile
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -30,11 +31,31 @@ from catalyst.dashboard import panels, queries
 from catalyst.dashboard.db import Db
 from catalyst.storage import init_db
 
+#: RELATIVE TO NOW - house rule 6. news_map() takes days=30 and measures
+#: that window back from datetime.now(), while this fixture used to seed
+#: its story at a literal 2026-08-15. The two agreed for about a month
+#: and then never again: from 2026-09-15 the story sat 31 days back, fell
+#: out of the window, and the page under test had no story nodes to make
+#: clickable - so the tests reported "headlines are still not clickable"
+#: about a feature that works. Found by moving the system clock forward.
+_SEEN = datetime.now(timezone.utc) - timedelta(days=2)
+
+
+def _at(hour, minute=0):
+    """A timestamp on the seeded day, so relative ordering is kept."""
+    return _SEEN.replace(hour=hour, minute=minute, second=0,
+                         microsecond=0).isoformat()
+
+
+#: The catalyst is still AHEAD of the story, as a real one would be.
+_CATALYST_DATE = (_SEEN + timedelta(days=17)).date().isoformat()
+_EXIT_DATE = (_SEEN + timedelta(days=18)).date().isoformat()
+
 STORY = {
     "ticker": "REGN",
     "headline": "FDA grants priority review",
     "publisher": "Reuters",
-    "filed_date": "2026-08-15",
+    "filed_date": _SEEN.date().isoformat(),
     "catalyst_type": "fda_decision",
     "direction_hint": 1,
 }
@@ -45,19 +66,18 @@ def _db(tmp_path, *, corroborated=False, candidate=False, decision=None,
     path = str(tmp_path / "c.db")
     conn = init_db(path)
     conn.execute(
-        "INSERT INTO raw_events VALUES ('alpaca_news','n1',"
-        "'2026-08-15T12:00:00+00:00',?)", (json.dumps(STORY),))
+        "INSERT INTO raw_events VALUES ('alpaca_news','n1',?,?)",
+        (_at(12), json.dumps(STORY)))
     if corroborated:
         conn.execute(
-            "INSERT INTO raw_events VALUES ('edgar_fts','e9',"
-            "'2026-08-15T09:00:00+00:00',?)",
-            (json.dumps({"ticker": "REGN",
-                         "headline": "8-K: PDUFA date disclosed"}),))
+            "INSERT INTO raw_events VALUES ('edgar_fts','e9',?,?)",
+            (_at(9), json.dumps({"ticker": "REGN",
+                                 "headline": "8-K: PDUFA date disclosed"})))
     if candidate:
         conn.execute(
             "INSERT INTO candidates VALUES ('cand-1','REGN','fda_decision',"
-            "'2026-09-01','confirmed',?,'2026-08-15T12:05:00+00:00',"
-            "'health','[]')", (json.dumps(["n1"]),))
+            "?,'confirmed',?,?,'health','[]')",
+            (_CATALYST_DATE, json.dumps(["n1"]), _at(12, 5)))
         conn.execute(
             "INSERT INTO research_views VALUES ('cand-1','long',0.72,"
             "'Priority review shortens the path.','Readout slips past Q4',"
@@ -67,10 +87,10 @@ def _db(tmp_path, *, corroborated=False, candidate=False, decision=None,
             "INSERT INTO risk_decisions (id,candidate_id,action,side,"
             "notional_usd,qty,stop_price,planned_exit_date,skip_reasons,"
             "adaptive_params_snapshot,decided_at) VALUES "
-            "('dec-1','cand-1',?,'long','200.00','4','46.00','2026-09-02',"
-            "?,'{}','2026-08-15T12:06:00+00:00')",
-            (decision, json.dumps(["below_conviction_floor"])
-             if decision == "skip" else "[]"))
+            "('dec-1','cand-1',?,'long','200.00','4','46.00',?,"
+            "?,'{}',?)",
+            (decision, _EXIT_DATE, json.dumps(["below_conviction_floor"])
+             if decision == "skip" else "[]", _at(12, 6)))
     if note:
         conn.execute("INSERT INTO limit_application_notes VALUES "
                      "('dec-1','per_stock_stop_width',?)", (note,))
@@ -199,9 +219,8 @@ class TestItNeverRendersAConfusingBlank:
         path = str(tmp_path / "c.db")
         conn = init_db(path)
         conn.execute(
-            "INSERT INTO raw_events VALUES ('alpaca_news','n2',"
-            "'2026-08-15T12:00:00+00:00',?)",
-            (json.dumps({"headline": "A story about nobody"}),))
+            "INSERT INTO raw_events VALUES ('alpaca_news','n2',?,?)",
+            (_at(12), json.dumps({"headline": "A story about nobody"})))
         conn.commit()
         conn.close()
         db = Db(path)
