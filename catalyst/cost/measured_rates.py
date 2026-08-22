@@ -122,6 +122,73 @@ def _sole_model(conn: sqlite3.Connection, target_date: date) -> str | None:
     return rows[0][0] if len(rows) == 1 else None
 
 
+#: How far ahead to look for the next change in the BUILT-IN schedule.
+#: Comfortably past any announced pricing window; the probe is a few
+#: hundred calls to a pure function, run at most once a day.
+SCHEDULE_HORIZON_DAYS = 400
+
+
+def _future_schedule_changes(
+    model: str, after: date,
+) -> list[tuple[date, tuple[Decimal, Decimal]]]:
+    """Dates after `after` where the BUILT-IN rate for `model` changes.
+
+    PROBED FROM THE REAL FUNCTION, never a hand-written list of known
+    windows (house rule 7). Whoever adds the next introductory-pricing
+    window will not remember to update a list here, and the failure that
+    causes is silent and expensive - see below for what it costs.
+    """
+    from catalyst.cost.pricing import rates_for
+
+    out: list[tuple[date, tuple[Decimal, Decimal]]] = []
+    prev = rates_for(model, after)
+    for i in range(1, SCHEDULE_HORIZON_DAYS + 1):
+        d = after + timedelta(days=i)
+        cur = rates_for(model, d)
+        if cur != prev:
+            out.append((d, cur))
+            prev = cur
+    return out
+
+
+def _preserve_scheduled_changes(
+    conn: sqlite3.Connection, model: str, effective: date,
+) -> list[date]:
+    """Stop a learned rate from swallowing a future scheduled change.
+
+    THE BUG THIS EXISTS FOR. rates_for_on() resolves a rate as "the
+    newest override effective on or before that day wins". An override
+    is therefore not a correction to the schedule - it REPLACES the
+    schedule from its date onward, forever. So a rate learned on 25
+    August would still be winning on 1 September, and Sonnet 5's
+    introductory pricing would never end as far as the ledger was
+    concerned: the bot would price at ~220 against a real 300 and
+    under-price itself by 27%, which is the overspending direction this
+    module exists to prevent.
+
+    THE CORRECTION IS NOT CARRIED ACROSS THE BOUNDARY, deliberately. The
+    measurement said "our pricing ran k low WHILE PRICING AT THE OLD
+    RATE" and cannot tell whether the old rate was itself the reason. At
+    a scheduled change the schedule wins and the correction is re-learned
+    from fresh evidence - which costs at most one day of measurement,
+    and self-corrects. Carrying it would compound a guess, and since
+    corrections downward need a human, an over-tightened rate would then
+    stay over-tightened.
+    """
+    restored = []
+    for when, (sched_in, sched_out) in _future_schedule_changes(model, effective):
+        set_override(
+            conn, model, when, sched_in, sched_out,
+            set_by="scheduled rate restored",
+            note=(f"the published rate changes to {sched_in}/{sched_out} per "
+                  f"Mtok on {when}. Re-stated here so the correction learned "
+                  f"for {effective} cannot outlive it - an override otherwise "
+                  "replaces the schedule from its date onward for good."),
+            allow_large_change=True)
+        restored.append(when)
+    return restored
+
+
 def _record(conn: sqlite3.Connection, m: MeasuredRate) -> None:
     """Every observation lands, applied or not - including the ones that
     changed nothing. 'The rate was checked and agreed' is the evidence
@@ -267,6 +334,10 @@ def learn_from_closed_day(
         set_override(conn, model, effective,
                      new_in, new_out, set_by="measured against the bill",
                      note=reason)
+        # ...and immediately re-state any scheduled change that the
+        # override just buried. Order matters: written AFTER, so a later
+        # effective_from wins on its own day.
+        _preserve_scheduled_changes(conn, model, effective)
         m = _replace(base, applied=True, reason=reason,
                      old_input=base_in, old_output=base_out,
                      new_input=new_in, new_output=new_out)

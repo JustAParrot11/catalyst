@@ -170,6 +170,53 @@ class TestItOnlyEverTightens:
         assert db.execute("SELECT COUNT(*) FROM pricing_overrides"
                           ).fetchone()[0] == overrides_before
 
+    def test_a_learned_rate_cannot_outlive_a_LATER_scheduled_change(self, db):
+        """THE SECOND HOLE, and the one that was live on the VPS.
+
+        rates_for_on() resolves "the newest override effective on or
+        before that day wins", so an override does not correct the
+        schedule - it REPLACES it from its date onward, forever. A rate
+        learned on 25 August would still be winning on 1 September, and
+        Sonnet 5's introductory pricing would never end as far as the
+        ledger knew: ~220 against a real 300, under-priced by 27%.
+
+        The first fix only guarded a change scheduled on the exact day
+        the override took effect. This is a change scheduled LATER.
+        """
+        from catalyst.cost.pricing import SONNET5_INTRO_ENDS, rates_for
+
+        # A day inside the introductory window, wherever "now" is.
+        measured = SONNET5_INTRO_ENDS - timedelta(days=7)
+        effective = measured + timedelta(days=1)
+        after = SONNET5_INTRO_ENDS + timedelta(days=1)
+        assert rates_for(MODEL, after) != rates_for(MODEL, measured), (
+            "this test is asserting nothing unless the schedule really "
+            "changes across the window it uses")
+
+        seed_day(db, "100", day=measured)
+        learn_from_closed_day(db, measured, Decimal("100"), Decimal("110"))
+
+        assert in_force(db, effective)[0] > rates_for(MODEL, measured)[0], (
+            "the correction did not apply inside the intro window")
+        assert in_force(db, after) >= rates_for(MODEL, after), (
+            "the learned rate swallowed the scheduled price rise - the bot "
+            "would price below the real rate and overspend")
+
+    def test_the_restored_schedule_says_why_it_is_there(self, db):
+        """A second override appearing from nowhere is a mystery in the
+        price history unless it explains itself."""
+        from catalyst.cost.pricing import SONNET5_INTRO_ENDS
+
+        measured = SONNET5_INTRO_ENDS - timedelta(days=7)
+        seed_day(db, "100", day=measured)
+        learn_from_closed_day(db, measured, Decimal("100"), Decimal("110"))
+
+        rows = db.execute(
+            "SELECT note FROM pricing_overrides "
+            "WHERE set_by = 'scheduled rate restored'").fetchall()
+        assert rows, "the scheduled change was not re-stated at all"
+        assert "cannot outlive" in rows[0][0]
+
     def test_no_override_row_is_written_when_it_would_loosen(self, db):
         """Not merely 'the rate is unchanged' - nothing was recorded that
         a later lookup could pick up."""
