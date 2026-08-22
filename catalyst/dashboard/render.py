@@ -972,6 +972,8 @@ NAV_GROUPS = [
         ("/next", "What happens next",
          "When Claude next re-reads each thesis, and what closes when"),
         ("/funnel", "Pipeline", "Raw filings through to orders"),
+        ("/capital", "Capital in use",
+         "How much of the account is deployed, and what caps it"),
     ]),
     ("Investigate", [
         ("/chain", "Every decision", "Found \u2192 linked \u2192 judged \u2192 sized \u2192 traded"),
