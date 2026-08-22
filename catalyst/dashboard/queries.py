@@ -1317,6 +1317,11 @@ class CostPanel:
     last_reconciled_ok: str | None
     reconcile_gap_days: int | None
     admin_key_present: bool
+    #: The last time the rate table was checked against the REAL bill,
+    #: or None if it never has been. This is the evidence that answers
+    #: "is the table right"; rates_stale only answers "how long ago did
+    #: a human look at it".
+    measured_rate: dict | None = None
     owner_budget_usd: Decimal | None = None
     #: (seed, observed, sample) tokens per web search. The seed
     #: is a constant from ONE call; observed is measured from the
@@ -1330,6 +1335,25 @@ class CostPanel:
     #: Non-None when the credentials file could not be READ. A read
     #: failure must never be displayed as "nothing was entered".
     creds_error: str | None = None
+
+
+def _measured_rate(db: Db) -> dict | None:
+    """The last closed-day check of the rate table against the real bill.
+
+    Wrapped, because this is a display nicety sitting on the page that
+    reports whether the bot can afford to run. An install whose database
+    predates the table, or any read fault at all, must lose one line -
+    never the cost page.
+    """
+    try:
+        rows = db.q(
+            "SELECT target_date, model, local_total_cents, "
+            "       billed_total_cents, applied, reason "
+            "FROM measured_rate_observations "
+            "ORDER BY target_date DESC, observed_at DESC LIMIT 1").rows
+        return dict(rows[0]) if rows else None
+    except Exception:
+        return None
 
 
 def cost_panel(db: Db, as_of: date | None = None) -> CostPanel:
@@ -1483,6 +1507,7 @@ def cost_panel(db: Db, as_of: date | None = None) -> CostPanel:
         check_failed_q=check_failed_q, last_reconciled_ok=last_reconciled_ok,
         reconcile_gap_days=reconcile_gap_days,
         admin_key_present=admin_key_present,
+        measured_rate=_measured_rate(db),
         owner_budget_usd=owner_budget_usd,
         search_tokens_seed=_seed_tokens,
         search_tokens_observed=_observed_tokens,

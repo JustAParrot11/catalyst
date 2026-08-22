@@ -1130,6 +1130,24 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
                     "can be told apart.",
         ))
 
+    # MEASURED, not asserted. rates_stale() answers "how long since a
+    # human looked at the table"; this answers "is the table RIGHT",
+    # by comparing a closed day's local pricing against what Anthropic
+    # actually billed for it. Shown in both branches - it is the
+    # evidence that either justifies the alarm or retires it.
+    m = c.measured_rate
+    if m:
+        local, billed = esc(m["local_total_cents"]), esc(m["billed_total_cents"])
+        verdict = ("and the table was raised to match"
+                   if m["applied"] else "and they agreed")
+        measured_line = (
+            f' Checked against the real bill for {esc(m["target_date"])}: '
+            f"priced {local}c locally against {billed}c billed, {verdict}.")
+    else:
+        measured_line = (
+            " The table has not yet been checked against a real bill - that "
+            "needs one closed day with an admin key set and spend on it.")
+
     if c.rates_stale:
         out.append(alarm(
             f'<b id="{p}-rates-stale">Pricing table is stale.</b> '
@@ -1137,11 +1155,12 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
             f"on {esc(c.rates_verified_on)}; rates_stale() is True as of "
             f"{esc(c.as_of)}. Every cost number on this page is priced from that "
             "table, so treat them as provenance-suspect until it is re-verified."
+            + measured_line
         ))
     else:
         out.append(prov(
             f"Pricing table provenance: verified {c.rates_verified_on}, "
-            f"rates_stale() = False as of {c.as_of}."
+            f"rates_stale() = False as of {c.as_of}." + measured_line
         ))
 
     if c.unpriced_q.rows:

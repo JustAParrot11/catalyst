@@ -493,7 +493,7 @@ _TIME_COLUMNS = (
     "submitted_at", "filled_at", "confirmed_at", "replaced_at", "set_at",
     "first_seen_at", "asserted_at", "recorded_at", "created_at", "run_at",
     "repriced_at", "taken_at", "triggered_at", "checked_at",
-    "nominated_at",
+    "nominated_at", "observed_at",
 )
 
 
