@@ -104,10 +104,11 @@ class TestItOnlyEverTightens:
         assert new_in > old_in and new_out > old_out
         assert "LOW" in m.reason and "spend less" in m.reason
 
-    def test_a_bill_lower_than_we_priced_changes_nothing(self, db):
-        """THE ONE THAT MATTERS. We over-priced. Correcting the table
-        down would let the bot spend MORE, so it is reported and the
-        rate is left exactly where it was."""
+    def test_ONE_bill_lower_than_we_priced_changes_nothing(self, db):
+        """We over-priced. That direction LOOSENS the budget, so a single
+        reading is never enough - it is recorded and the rate is left
+        exactly where it was. Three agreeing readings can lower it; one
+        cannot, and that asymmetry is the safety property."""
         seed_day(db, "100")
         days = [YESTERDAY + timedelta(days=n) for n in (1, 30, 365)]
         before = [in_force(db, d) for d in days]
@@ -115,9 +116,9 @@ class TestItOnlyEverTightens:
         m = learn_from_closed_day(db, YESTERDAY, Decimal("100"), Decimal("70"))
 
         assert m is not None
-        assert m.applied is False, "a rate must never be LOWERED automatically"
+        assert m.applied is False, "one reading must never lower a rate"
         assert [in_force(db, d) for d in days] == before
-        assert "HIGH" in m.reason and "a human decides" in m.reason
+        assert "HIGH" in m.reason and "day 1 of 3" in m.reason
 
     def test_a_correction_can_never_land_below_a_SCHEDULED_rise(self, db):
         """THE HOLE THE CLOCK SWEEP FOUND, as a test.
@@ -223,6 +224,88 @@ class TestItOnlyEverTightens:
         seed_day(db, "100")
         learn_from_closed_day(db, YESTERDAY, Decimal("100"), Decimal("50"))
         assert measured_overrides(db) == []
+
+
+class TestItFollowsAPriceCutSlowly:
+    """Asymmetric speed, the brief's rule verbatim: tighten quickly on
+    evidence of harm, loosen slowly on evidence of over-caution. This is
+    what lets the table track a price CUT - and so track reality in both
+    directions - without one bad day being able to make the bot
+    overspend."""
+
+    def _high_day(self, db, days_ago, local="100", billed="70"):
+        day = datetime.now(timezone.utc).date() - timedelta(days=days_ago)
+        seed_day(db, local, day=day)
+        return learn_from_closed_day(db, day, Decimal(local), Decimal(billed))
+
+    def test_three_agreeing_readings_lower_the_rate(self, db):
+        effective = datetime.now(timezone.utc).date()
+        before = in_force(db, effective)[0]
+
+        self._high_day(db, 3)
+        self._high_day(db, 2)
+        m = self._high_day(db, 1)
+
+        assert m is not None and m.applied is True
+        assert in_force(db, effective)[0] < before, (
+            "three agreeing readings did not move the rate down at all")
+        assert "3 readings running" in m.reason
+
+    def test_two_are_not_enough(self, db):
+        effective = datetime.now(timezone.utc).date()
+        before = in_force(db, effective)[0]
+        self._high_day(db, 3)
+        m = self._high_day(db, 2)
+        assert m is not None and m.applied is False
+        assert in_force(db, effective)[0] == before
+        assert "day 2 of 3" in m.reason
+
+    def test_a_disagreeing_reading_breaks_the_run(self, db):
+        """Two high days, then a day that agrees, then a high day. That
+        is not three in a row and must not lower anything."""
+        effective = datetime.now(timezone.utc).date()
+        before = in_force(db, effective)[0]
+
+        self._high_day(db, 4)
+        self._high_day(db, 3)
+        self._high_day(db, 2, billed="100")      # agrees - breaks the run
+        m = self._high_day(db, 1)
+
+        assert m is not None and m.applied is False
+        assert in_force(db, effective)[0] == before
+
+    def test_a_cut_is_bounded_harder_than_a_rise(self, db):
+        """A 60% overstatement still moves at most DOWN_MAX_STEP, which
+        is deliberately smaller than the rise cap."""
+        from catalyst.cost.measured_rates import DOWN_MAX_STEP
+
+        effective = datetime.now(timezone.utc).date()
+        before = in_force(db, effective)[0]
+
+        self._high_day(db, 3, billed="40")
+        self._high_day(db, 2, billed="40")
+        m = self._high_day(db, 1, billed="40")
+
+        assert m is not None and m.applied is True
+        floor = (before * (Decimal("1") - DOWN_MAX_STEP)).quantize(Decimal("1"))
+        assert in_force(db, effective)[0] >= floor
+        assert DOWN_MAX_STEP < MAX_STEP, (
+            "a cut must be bounded harder than a rise, or the asymmetry "
+            "that keeps the bot from overspending is gone")
+        assert "capped" in m.reason
+
+    def test_a_cut_still_cannot_swallow_a_scheduled_change(self, db):
+        """The same hole as the upward path, on the downward one."""
+        from catalyst.cost.pricing import SONNET5_INTRO_ENDS, rates_for
+
+        after = SONNET5_INTRO_ENDS + timedelta(days=1)
+        for n in (3, 2, 1):
+            day = SONNET5_INTRO_ENDS - timedelta(days=n)
+            seed_day(db, "100", day=day)
+            learn_from_closed_day(db, day, Decimal("100"), Decimal("70"))
+
+        assert in_force(db, after) == rates_for(MODEL, after), (
+            "a learned CUT buried the scheduled price change")
 
 
 class TestItRefusesToLearnFromNoise:

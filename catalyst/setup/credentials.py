@@ -756,6 +756,62 @@ if __name__ == "__main__":
     raise SystemExit(_cli())
 
 
+def _today_freshness(client_factory, key: str, today) -> str:
+    """Does the Cost API report TODAY, or only closed days?
+
+    WHY THIS IS ASKED OUT LOUD. TRAPS.md records, as learned the
+    expensive way, that "today's spend is not queryable until the day
+    closes". Anthropic's own documentation says the opposite - that
+    usage and cost data "typically appears within 5 minutes of API
+    request completion", with daily buckets being the GRANULARITY rather
+    than a withholding period.
+
+    Both cannot be true, and the difference matters: if today is
+    readable, the governor can check what has REALLY been spent instead
+    of trusting a local estimate, which is a far larger improvement than
+    anything the rate table does. One read-only call settles it, and it
+    is free.
+
+    Never raises - this decorates a success message. A probe that cannot
+    answer says so rather than turning a working key into a failure.
+    """
+    from datetime import timedelta as _td
+
+    try:
+        with client_factory() as client:
+            r = client.get(
+                "https://api.anthropic.com/v1/organizations/cost_report",
+                headers={"x-api-key": key, "anthropic-version": "2023-06-01"},
+                params={"starting_at": f"{today}T00:00:00Z",
+                        "ending_at": f"{today + _td(days=1)}T00:00:00Z",
+                        "limit": 1})
+        if r.status_code != 200:
+            return ("Could not check whether today's spend is readable "
+                    f"(the API answered HTTP {r.status_code}), so the bot "
+                    "keeps assuming it is not - which is the safe way round.")
+        body = r.json()
+        records = [rec for b in (body.get("data") or [])
+                   for rec in (b.get("results") or [])]
+        amounts = [rec.get("amount") for rec in records if rec.get("amount")]
+        if amounts:
+            return ("Today's spend IS readable from the API - it reported "
+                    f"{amounts[0]} for today so far. That is worth telling "
+                    "whoever maintains this, because the bot currently "
+                    "assumes only closed days can be read and estimates "
+                    "today's spend locally instead.")
+        # A ZERO IS NEVER LEFT UNEXPLAINED (house rule 3). An empty answer
+        # here has two very different meanings and the raw body is what
+        # tells them apart.
+        return ("Today's spend came back empty. That is expected if nothing "
+                "has been spent yet today; if the bot HAS run today, it "
+                "means Anthropic really does only report closed days. Raw "
+                f"answer: {str(body)[:300]}")
+    except Exception as exc:  # noqa: BLE001
+        return ("Could not check whether today's spend is readable "
+                f"({type(exc).__name__}), so the bot keeps assuming it is "
+                "not - which is the safe way round.")
+
+
 def test_admin_key(key: str, *, transport: "Transport | None" = None,
                    ) -> tuple[bool, str]:
     """Read-only ping of the Cost API (one bucket). Never calls anything
@@ -791,10 +847,10 @@ def test_admin_key(key: str, *, transport: "Transport | None" = None,
         return False, redact(f"Could not reach the Anthropic Cost API: {exc}")
     if resp.status_code == 200:
         return True, ("The admin key works: the nightly bill check can read "
-                      "your organization's real API costs. Anthropic reports "
-                      "whole days only, so today's spend does not appear "
-                      "until the day closes - a fresh account reading zero "
-                      "is normal, not broken.")
+                      "your organization's real API costs. " +
+                      _today_freshness(client_factory=lambda: _httpx.Client(
+                          transport=transport, timeout=20.0), key=key,
+                          today=today))
     if resp.status_code in (401, 403):
         why = ("This key does not start sk-ant-admin, so it is most likely "
                "the ordinary API key - the bot's thinking key cannot read a "
