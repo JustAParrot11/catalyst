@@ -184,6 +184,11 @@ def route_trades(db: Db, params: dict) -> str:
                        "/trades", db.path, db=db)
 
 
+def route_capital(db: Db, params: dict) -> str:
+    return render_page("Capital in use", panels.capital_panel(db, p="cap"),
+                       "/capital", db.path, db=db)
+
+
 def route_next(db: Db, params: dict) -> str:
     return render_page("What happens next",
                        panels.next_actions_panel(db, p="na"),
@@ -767,6 +772,7 @@ HTML_ROUTES = {
     "/performance": route_performance,
     "/trades": route_trades,
     "/next": route_next,
+    "/capital": route_capital,
     "/funnel": route_funnel,
     "/costs": route_costs,
     "/decisions": route_decisions,

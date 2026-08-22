@@ -6427,3 +6427,139 @@ def _cost_desk(db: Db, p: str) -> str:
         "so a number like that would be one nothing in the system stands "
         "behind."))
     return "".join(out)
+
+
+def capital_panel(db: Db, p: str = "cap") -> str:
+    """How much of the account is deployed, and WHICH limit is stopping
+    it deploying more.
+
+    OWNER-ASKED, 2026-08-22: "if we use leverage we could make more
+    money right? ... Can we factor leverage in to ensure we can trade
+    more than we could?"
+
+    This panel exists to answer that with a number instead of an
+    argument, because the answer is not obvious and is easy to get
+    backwards. Every ceiling in risk/sizing.py is a percentage of
+    EQUITY - the per-position risk budget, the slot ceiling, the
+    exposure cap, the cluster cap. Borrowed money does not change
+    equity, so it does not move any of them. The single place buying
+    power enters is a final clamp at settled cash.
+
+    So the question "would leverage let the bot trade more?" reduces to
+    "is settled cash the binding limit?" - and that is a fact this
+    panel reads off the record rather than something anyone needs to
+    reason about. If cash is never the binding limit, leverage cannot
+    buy a single extra dollar of position, and the only thing it would
+    change is what is owed when a trade goes wrong.
+    """
+    from catalyst.risk.hard_bounds import HARD_BOUNDS
+
+    out = []
+    snap = db.q(
+        "SELECT day, taken_at, equity_usd, settled_cash_usd, "
+        "       positions_notional FROM equity_snapshots "
+        "WHERE source = 'broker_read' ORDER BY day DESC, taken_at DESC LIMIT 1")
+
+    if not snap.rows:
+        out.append(note(
+            f'<b id="{p}-none">No broker reading yet.</b> This panel needs '
+            "one account snapshot from Alpaca before it can say anything "
+            "about how much of the account is in use. It fills in on the "
+            "first cycle that reaches the broker."))
+        out.append(empty_block(f"{p}-q", snap,
+                               meaning="no broker equity snapshot recorded"))
+        return section(f"{p}-section", "Capital in use", "".join(out))
+
+    row = snap.rows[0]
+
+    def _dec(v):
+        try:
+            d = Decimal(str(v))
+            return d if d.is_finite() else None
+        except (ArithmeticError, TypeError, ValueError):
+            return None
+
+    equity = _dec(row["equity_usd"])
+    cash = _dec(row["settled_cash_usd"])
+    deployed = _dec(row["positions_notional"]) or Decimal("0")
+
+    if not equity or equity <= 0:
+        out.append(alarm(
+            f'<b id="{p}-noequity">The account equity read as '
+            f'{esc(row["equity_usd"])}.</b> Every position limit is a '
+            "percentage of equity, so nothing below can be computed from "
+            "it. The raw snapshot row is printed here rather than a zero."))
+        return section(f"{p}-section", "Capital in use", "".join(out))
+
+    deployed_pct = deployed / equity * 100
+    # THE LEVERAGE NUMBER, defined so it cannot be misread: gross
+    # position value against what the account is actually worth. At or
+    # under 1.00x the bot is using its own money and nothing else.
+    leverage = deployed / equity
+
+    out.append(
+        f'<p id="{p}-intro">Broker reading for <b>{esc(row["day"])}</b>. '
+        f'Equity <b>${esc(f"{equity:,.2f}")}</b>, settled cash '
+        f'<b>${esc(f"{cash:,.2f}")}</b> if known, positions '
+        f'<b>${esc(f"{deployed:,.2f}")}</b>.</p>')
+
+    out.append(table(f"{p}-use", ["Measure", "Now", "Limit", "Headroom"], [
+        ["Gross positions vs equity (leverage)",
+         f"{leverage:.2f}x", "1.00x without borrowing",
+         f"{(Decimal('1') - leverage):.2f}x"],
+        ["Deployed",
+         f"{deployed_pct:.1f}% of equity",
+         f"{HARD_BOUNDS.max_total_exposure_pct * 100:.0f}% (hard bound)",
+         f"{HARD_BOUNDS.max_total_exposure_pct * 100 - deployed_pct:.1f} points"],
+    ], numeric_cols={1, 2, 3}))
+
+    # WHICH LIMIT ACTUALLY BOUND, from the record. This is the whole
+    # answer to the leverage question and it is not a matter of opinion:
+    # limit_applications records every clamp that fired, by type.
+    binding = db.q(
+        "SELECT rule_name, COUNT(*) AS times FROM limit_applications "
+        "WHERE binding = 1 GROUP BY rule_name ORDER BY times DESC LIMIT 8")
+    if binding.rows:
+        out.append(f'<h3 id="{p}-binding-h">What has actually stopped it '
+                   'sizing bigger</h3>')
+        out.append(table(f"{p}-binding", ["Limit", "Times it bound"],
+                         [[esc(r["rule_name"]), r["times"]]
+                          for r in binding.rows], numeric_cols={1}))
+        # "settled_cash" is the ONLY rule in sizing.py that a bigger
+        # buying power could relax; every other one is a fraction of
+        # equity. Matched on the rule's meaning rather than a fixed
+        # string list (house rule 7).
+        cash_bound = sum(r["times"] for r in binding.rows
+                         if "cash" in str(r["rule_name"]).lower())
+        total_bound = sum(r["times"] for r in binding.rows)
+        if cash_bound == 0:
+            out.append(note(
+                f'<b id="{p}-verdict">Available cash has never been the '
+                'limit.</b> Every clamp above is a percentage of EQUITY, '
+                'and borrowing does not change equity - so margin would '
+                'not have made a single one of these positions larger. '
+                'It would only change what is owed if a trade goes '
+                'against the account. To size bigger, the hard bounds '
+                'themselves would have to move, which is a different '
+                'decision and needs evidence the bot makes money first.'))
+        else:
+            out.append(note(
+                f'<b id="{p}-verdict">Cash was the binding limit '
+                f'{cash_bound} of {total_bound} times.</b> That is the '
+                'only condition under which more buying power would '
+                'change position sizes at all. It is still not a reason '
+                'to borrow on its own - it is the point at which the '
+                'question becomes worth asking with closed-trade '
+                'evidence in hand.'))
+    else:
+        out.append(empty_block(
+            f"{p}-binding-q", binding,
+            meaning="no sizing limit has bound yet, because the bot has "
+                    "not sized a position - it has never traded"))
+
+    out.append(prov(
+        "Leverage is gross position value divided by equity, from the "
+        "broker's own snapshot. Limits come from risk/hard_bounds.py, "
+        "which has no runtime writer: changing one takes a human-authored "
+        "pull request."))
+    return section(f"{p}-section", "Capital in use", "".join(out))
