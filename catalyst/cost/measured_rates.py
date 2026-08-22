@@ -79,6 +79,22 @@ DEADBAND = Decimal("0.02")          # 2%
 #: days instead of arriving in one jump, and every step is on the record.
 MAX_STEP = Decimal("0.25")          # at most +25% per adjustment
 
+#: ASYMMETRIC SPEED, which is the brief's rule verbatim: "tighten
+#: quickly on evidence of harm; loosen slowly on evidence of
+#: over-caution." A rate that is too HIGH only costs opportunity - the
+#: bot runs more cautiously than the owner allowed. A rate that is too
+#: LOW costs money. So a rise applies on one day's evidence at up to
+#: MAX_STEP, and a CUT has to clear a higher bar in both directions:
+#: more days agreeing, and a smaller move when they do.
+#:
+#: Owner's decision, asked directly: "3 agreeing days, small step".
+#:
+#: Worst case from a single bad measurement is therefore bounded at
+#: DOWN_MAX_STEP of under-pricing for one day, and only after two
+#: earlier days already said the same thing.
+DOWN_MAX_STEP = Decimal("0.10")     # at most -10% per adjustment
+DOWN_AGREEING_DAYS = 3              # this reading plus two before it
+
 
 @dataclass(frozen=True)
 class MeasuredRate:
@@ -189,6 +205,53 @@ def _preserve_scheduled_changes(
     return restored
 
 
+def _recent_ratios(
+    conn: sqlite3.Connection, model: str, before: date, limit: int,
+) -> list[Decimal]:
+    """The `limit` most recent measured ratios for `model` before `before`."""
+    rows = conn.execute(
+        "SELECT ratio FROM measured_rate_observations "
+        "WHERE model = ? AND target_date < ? "
+        "ORDER BY target_date DESC, observed_at DESC LIMIT ?",
+        (model, before.isoformat(), limit)).fetchall()
+    return [Decimal(str(r[0])) for r in rows]
+
+
+def _prior_high_readings(
+    conn: sqlite3.Connection, model: str, before: date, want: int,
+) -> bool:
+    """True when the `want` readings before `before` ALL said the table
+    is running high.
+
+    Counts READINGS, not calendar days: a day with no spend produces no
+    evidence either way, and demanding literal consecutive dates would
+    let a quiet weekend reset a run that is genuinely three measurements
+    long. Every reading still has to agree - one disagreement in the
+    window and the run is broken.
+    """
+    if want <= 0:
+        return True
+    got = _recent_ratios(conn, model, before, want)
+    if len(got) < want:
+        return False
+    return all(r < Decimal("1") - DEADBAND for r in got)
+
+
+def _high_run_length(
+    conn: sqlite3.Connection, model: str, upto: date,
+) -> int:
+    """How many readings in a row now say the table is high, counting
+    the one being taken. Shown to the owner so a pending cut reads as
+    progress rather than as nothing happening."""
+    run = 1
+    for r in _recent_ratios(conn, model, upto, DOWN_AGREEING_DAYS):
+        if r < Decimal("1") - DEADBAND:
+            run += 1
+        else:
+            break
+    return min(run, DOWN_AGREEING_DAYS)
+
+
 def _record(conn: sqlite3.Connection, m: MeasuredRate) -> None:
     """Every observation lands, applied or not - including the ones that
     changed nothing. 'The rate was checked and agreed' is the evidence
@@ -277,14 +340,41 @@ def learn_from_closed_day(
         if ratio <= Decimal("1") + DEADBAND:
             if ratio < Decimal("1") - DEADBAND:
                 # The table is charging the bot MORE than Anthropic does.
-                # Correcting it would loosen the budget, so it is shown
-                # and not done - the owner decides (BUILD-BRIEF: hard
-                # bounds and anything that loosens need a human).
-                m = _replace(base, reason=(
+                # This direction LOOSENS the budget, so it needs more
+                # evidence than a rise and moves less far when it gets it.
+                agreeing = _prior_high_readings(
+                    conn, model, target_date, DOWN_AGREEING_DAYS - 1)
+                if not agreeing:
+                    m = _replace(base, reason=(
+                        f"billed {billed}c against {local}c priced locally - "
+                        f"the table is running {(1 - ratio) * 100:.1f}% HIGH. "
+                        f"Lowering a rate lets the bot spend more, so it needs "
+                        f"{DOWN_AGREEING_DAYS} days agreeing; this is day "
+                        f"{_high_run_length(conn, model, target_date)} of "
+                        f"{DOWN_AGREEING_DAYS}."))
+                    _record(conn, m)
+                    return m
+
+                down = max(ratio, Decimal("1") - DOWN_MAX_STEP)
+                cut_in = (base_in * down).quantize(Decimal("1"))
+                cut_out = (base_out * down).quantize(Decimal("1"))
+                if cut_in <= 0 or cut_out <= 0:
+                    return None
+                capped = (" (capped at the maximum single cut)"
+                          if down > ratio else "")
+                reason = (
                     f"billed {billed}c against {local}c priced locally - the "
-                    f"table is running {(1 - ratio) * 100:.1f}% HIGH. Lowering "
-                    "a rate would let the bot spend more, so this is reported "
-                    "and not applied; a human decides."))
+                    f"table has run {(1 - ratio) * 100:.1f}% HIGH for "
+                    f"{DOWN_AGREEING_DAYS} readings running, so it has been "
+                    f"lowered by {(1 - down) * 100:.1f}%{capped}.")
+                set_override(conn, model, effective, cut_in, cut_out,
+                             set_by="measured against the bill", note=reason)
+                _preserve_scheduled_changes(conn, model, effective)
+                m = _replace(base, applied=True, reason=reason,
+                             old_input=base_in, old_output=base_out,
+                             new_input=cut_in, new_output=cut_out)
+                _record(conn, m)
+                return m
             else:
                 m = _replace(base, reason=(
                     f"agreed within {DEADBAND * 100:.0f}%: billed {billed}c "
