@@ -47,6 +47,7 @@ from catalyst.cost.pricing import (
     rates_for,
 )
 from catalyst.cost import CostEvent
+from catalyst.cost.measured_rates import learn_from_closed_day
 from catalyst.research.schema import UsageComponents
 
 _MTOK = Decimal("1000000")
@@ -577,6 +578,17 @@ def reconcile_day(
     action = "scheduled_paused" if paused else "none"
     _insert_row(api_total, discrepancy, threshold, drift, action,
                 auto_ack=not paused, reason=reason)
+
+    # THE SAME TWO NUMBERS, ASKED A SECOND QUESTION. The comparison above
+    # asks "is the ledger honest?"; this asks "is the RATE TABLE right?" -
+    # and it is the only place both figures exist for a closed day.
+    #
+    # Deliberately after the row is written and never able to change it:
+    # a paused day stays paused for the human, and learning a rate can
+    # only ever tighten the table (measured_rates.py). Runs on paused
+    # days too - a large discrepancy is exactly when a rate is wrong, and
+    # correcting it is what stops the same pause recurring tomorrow.
+    learn_from_closed_day(conn, target_date, local_total, api_total)
 
     return ReconciliationResult(
         target_date=target_date,

@@ -479,3 +479,27 @@ CREATE TABLE IF NOT EXISTS benchmark_baselines (
 );
 CREATE INDEX IF NOT EXISTS idx_benchmark_baselines_at
     ON benchmark_baselines (set_at DESC);
+
+-- Every closed-day comparison of what the ledger PRICED against what
+-- Anthropic actually BILLED, and what that said about the rate table.
+-- Written whether or not it changed anything: the quiet "checked and
+-- agreed" rows are the evidence that replaces pricing.py's 90-day
+-- calendar guess with a measurement (catalyst/cost/measured_rates.py).
+CREATE TABLE IF NOT EXISTS measured_rate_observations (
+    id                        TEXT PRIMARY KEY,
+    target_date               TEXT NOT NULL,   -- the closed day measured
+    model                     TEXT NOT NULL,
+    local_total_cents         TEXT NOT NULL,   -- decimal string
+    billed_total_cents        TEXT NOT NULL,
+    ratio                     TEXT NOT NULL,   -- billed / local
+    applied                   INTEGER NOT NULL,-- 1 = the table was changed
+    reason                    TEXT NOT NULL,
+    old_input_cents_per_mtok  TEXT,
+    new_input_cents_per_mtok  TEXT,
+    old_output_cents_per_mtok TEXT,
+    new_output_cents_per_mtok TEXT,
+    observed_at               TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_measured_rate_observations_day
+    ON measured_rate_observations (target_date DESC);
