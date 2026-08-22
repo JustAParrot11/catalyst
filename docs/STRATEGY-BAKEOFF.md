@@ -419,3 +419,66 @@ condition is NOT triggered; by its own reopen condition, C reopens.**
 
 Raw per-symbol measurements: scratchpad `c_spreads.json` /
 `a_spreads.json` (session-local); method script `measure_spreads.py`.
+
+---
+
+## Sector enrichment, measured 2026-08-22
+
+The graded insider-cluster arm keyed every candidate's sector as
+`"unknown"`, because Form 4 payloads carry no sector field. Since
+`correlation.py` clusters on `sector|catalyst_type|resolution_week`,
+every same-week insider cluster collapsed into ONE key and
+`max_correlated_cluster_pct` capped unrelated companies as a single bet.
+
+7,668 issuer SIC codes were fetched from EDGAR's submissions API
+(`scripts/fetch_sic.py`), joined to ticker symbols via `purchases.csv`
+(`scripts/build_symbol_sic.py`), and the arm re-graded both ways.
+**92.6% of traded symbols resolved to a SIC, across 379 distinct codes**
+— pharma (28xx) is the largest group at 20%, so the split is real rather
+than one bucket becoming another.
+
+`--no-sectors` reproduces the originally graded run exactly
+(OOS api$0 excess **−20.09%** against the recorded −0.2009), so the two
+columns below are comparable rather than merely different.
+
+### Excess return vs SPY
+
+| Run | Baseline | Sector-enriched | Change |
+|---|---|---|---|
+| OOS 2024-01..2026-08, api $0 | −20.09% | **+1.83%** | **+21.9 pp** |
+| OOS 2024-01..2026-08, api $8/mo | −45.00% | **−23.09%** | +21.9 pp |
+| Full 2016-01..2026-08, api $0 | −296.40% | −234.23% | +62.2 pp |
+| Full 2016-01..2026-08, api $8/mo | −398.07% | −335.89% | +62.2 pp |
+
+### The mechanism is confirmed
+
+`max_correlated_cluster` skips: **OOS 55 → 0**, full period **204 → 1**.
+The bound essentially stopped binding, which is exactly the predicted
+cause. Per-trade quality improved with the SAME trade count (230 OOS
+either way), which is the harness's "selection effect, not a scale one"
+showing up as predicted:
+
+| OOS metric | Baseline | Enriched |
+|---|---|---|
+| hit rate | 0.500 | **0.535** |
+| mean per trade | +1.26% | **+1.58%** |
+| max drawdown | 20.12% | **19.23%** |
+
+The binding constraint moved from the cluster cap to `no_free_slot`
+(1,241 → 1,290) and settled cash (0 → 6).
+
+### What this does NOT show — read this before acting on the table
+
+**The strategy still loses to SPY at any realistic API cost.** The only
+column that beats the benchmark is out-of-sample with the API bill set
+to **zero**, which is not a configuration that can be run. At $8/month
+it is **−23.09%**; at the owner's current $100/month cap the hurdle is
+far higher again (60% a year on $2,000).
+
+The full ten-year period remains catastrophic: **+118.9% against SPY's
++353.1%** with no API cost at all.
+
+So this validates **the fix**, not **the strategy**. Sector enrichment
+recovered roughly 22 points of a 30-point defect, exactly where the
+harness said the defect was. It did not make this arm viable, and
+nothing here supports expecting it to beat holding the index.

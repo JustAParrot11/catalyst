@@ -891,6 +891,41 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
 
         from catalyst.discovery.conjunctions import merge_with_form4
 
+        # SECTOR FIRST, or the cluster cap treats every insider candidate
+        # as one bet. Form 4 payloads carry no sector, so without this
+        # they all key on "unknown" and max_correlated_cluster_pct caps
+        # a biotech, a bank and a miner as a single wager. Measured in
+        # backtest/harness.py: the cluster bound costs 30.5 points of
+        # excess return, and does it by excluding the BEST weeks - the
+        # ones where several clusters complete at once.
+        #
+        # Best-effort by construction: a company whose SIC cannot be
+        # fetched keeps an unknown sector and clusters conservatively,
+        # which is exactly today's behaviour. This can only ever loosen
+        # the bound, never tighten it (discovery/correlation.py).
+        try:
+            import sqlite3 as _sq3
+
+            from catalyst.data.sources.edgar_company import (
+                enrich_form4_sectors,
+            )
+
+            _c = _sq3.connect(db_file)
+            try:
+                _enriched, _looked = enrich_form4_sectors(raw_events, conn=_c)
+            finally:
+                _c.close()
+            # BOTH NUMBERS. "enriched 0 of 0" (all cached) and
+            # "enriched 0 of 12" (every lookup failed) are different
+            # facts and only one of them needs attention.
+            _log.info("Sector enrichment: %d event(s) given a sector from "
+                      "%d company lookup(s).", _enriched, _looked)
+        except Exception:  # noqa: BLE001
+            _log.exception(
+                "Sector enrichment failed; the pass continues. Insider "
+                "candidates will cluster as 'unknown', which is the "
+                "conservative behaviour, not a broken one.")
+
         out = list(build_candidates(raw_events, as_of))
         try:
             extra, dropped = build_conjunction_candidates(raw_events, as_of)

@@ -87,6 +87,10 @@ def main() -> int:
     ap.add_argument("--variant", default="pre", choices=["pre", "tuned"])
     ap.add_argument("--api0", action="store_true",
                     help="add a $0/mo API sensitivity run")
+    ap.add_argument("--no-sectors", action="store_true",
+                    help="ignore the SIC map and key every insider "
+                         "candidate on 'unknown', reproducing the "
+                         "originally graded run for comparison")
     ap.add_argument("--cost-bps", type=int, default=15,
                     help="per-side spread/slippage haircut in bps (default 15)")
     ap.add_argument("--is-only", action="store_true",
@@ -130,7 +134,17 @@ def main() -> int:
         icache = BarCache(BARS_INSIDER)
         events = insider_cluster.read_events_csv(
             REPO_ROOT / "data" / "insider" / "cluster_events.csv")
-        cands, table = insider_cluster.build_candidates(events)
+        # SECTOR-AWARE CLUSTERING. Without the map every insider
+        # candidate keys on "unknown" and the correlated-cluster bound
+        # treats unrelated companies as one bet; with it they are told
+        # apart. --no-sectors reproduces the old graded run exactly, so
+        # the two are comparable rather than merely different.
+        sectors = ({} if args.no_sectors
+                   else insider_cluster.load_sector_map(
+                       REPO_ROOT / "data" / "insider" / "symbol_sic.csv"))
+        print(f"    sector map: {len(sectors)} symbol(s)"
+              if sectors else "    sector map: none (all 'unknown')")
+        cands, table = insider_cluster.build_candidates(events, sectors)
         fn = insider_cluster.make_signal_fn(table)
         name = "C-insider-cluster-pre(2x10d,50k,hold12,liq5/1M)"
         for api in apis:
