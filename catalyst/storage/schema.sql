@@ -524,3 +524,16 @@ CREATE TABLE IF NOT EXISTS measured_factors (
 
 CREATE INDEX IF NOT EXISTS idx_measured_factors_lookup
     ON measured_factors (model, effective_from DESC);
+
+-- One company's SIC industry code, cached from EDGAR's submissions API.
+-- A SIC changes when a company reorganises - years apart, if ever - so a
+-- hit is kept indefinitely and only failures are retried. Exists so
+-- insider candidates carry a real sector: without one they all key on
+-- "unknown" and the correlated-cluster cap treats unrelated companies as
+-- a single bet (catalyst/data/sources/edgar_company.py).
+CREATE TABLE IF NOT EXISTS company_sic (
+    cik        TEXT PRIMARY KEY,
+    sic        TEXT NOT NULL,        -- "" = EDGAR has none for this company
+    fetched_at TEXT NOT NULL,
+    note       TEXT                  -- why it is empty, when it is
+);
