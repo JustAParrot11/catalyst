@@ -48,7 +48,15 @@ def seeded(tmp_path):
     conn = init_db(path)
     conn.executescript(SCHEMA_LOGS.read_text())
     today = datetime.now(timezone.utc).date()
-    d5, d1 = today - timedelta(days=5), today - timedelta(days=1)
+    d5 = today - timedelta(days=5)
+    # d1 carries this fixture's SPEND, and the cost panel sums spend by
+    # calendar month. Plain `today - 1 day` lands in the previous month
+    # on the 1st, so the ledger read empty and the page fell back to its
+    # explaining-a-zero prose - three tests failed on the 1st of every
+    # month and on no other day (house rule 6). Clamped to the month it
+    # is spend for; on the 1st that is today, which is the only day it
+    # can be.
+    d1 = max(today - timedelta(days=1), today.replace(day=1))
 
     conn.execute("INSERT INTO raw_events VALUES (?,?,?,?)",
                  ("edgar", "acc-1", _iso(d5), '{"form":"4"}'))
@@ -499,19 +507,73 @@ def test_the_page_shows_the_rate_actually_in_force_not_the_newest_row(seeded):
     """A rate dated in the future must NOT be shown as today's rate -
     that would silently misstate what the ledger is pricing at."""
     from catalyst.cost.overrides import set_override
+    from catalyst.cost.pricing import rates_for
+
+    # The built-in rate in force TODAY, asked of the code rather than
+    # written down: Sonnet 5's introductory pricing ended 2026-08-31, so
+    # a literal 200/1000 here was correct until it silently was not, and
+    # would have failed every day from 2026-09-01 onward - blocking the
+    # upgrade over pricing the code had right (house rule 6).
+    live_in, live_out = rates_for("claude-sonnet-5", date.today())
+    # A sentinel no real rate can equal, so "the future row is not being
+    # shown as today's" cannot pass by coinciding with the true rate.
     conn = sqlite3.connect(seeded)
     set_override(conn, "claude-sonnet-5", date.today() + timedelta(days=30),
-                 "300", "1500", set_by="a-human")
+                 "517", "2503", set_by="a-human")
     conn.close()
     html_out = panels.cost_panel(Db(seeded))
     live = html_out.split('id="cost-price-live"')[1].split("</table>")[0]
     row = [r for r in live.split("<tr>") if "claude-sonnet-5<" in r]
     assert len(row) == 1, live
-    assert ">200<" in row[0] and ">1000<" in row[0]   # intro rate still in force
-    assert ">300<" not in row[0] and "built-in table" in row[0]
+    assert f">{live_in}<" in row[0] and f">{live_out}<" in row[0]
+    assert ">517<" not in row[0] and "built-in table" in row[0]
     # ...but the future change is visible in the history table.
     hist = html_out.split('id="cost-price-history"')[1].split("</table>")[0]
-    assert ">300<" in hist and "a-human" in hist
+    assert ">517<" in hist and "a-human" in hist
+
+
+class TestTheDailyCeilingTileMatchesTheGovernor:
+    """The tile must measure against the ceiling the governor ENFORCES.
+
+    It read a flat DAILY_CAP_CENTS ($5) while the governor calls
+    daily_cap_cents(owner_cap), which allows $10/day on the owner's
+    $100/month budget. So a $9 day - authorized, unremarkable - was
+    painted 180% CRIT RED. Exactly the defect already fixed once for
+    the monthly gauge: the dashboard printing a base constant while the
+    governor spends against something else.
+    """
+
+    class _Cap:
+        def __init__(self, cap_cents):
+            from decimal import Decimal
+
+            self.base_cap_cents = Decimal(cap_cents)
+            self.scheduled_mtd_cents = Decimal("0")
+
+    def _tile(self, tmp_path, cap_cents, spent_cents):
+        path = str(tmp_path / "ceil.db")
+        conn = init_db(path)
+        conn.execute("INSERT INTO cost_events VALUES (?,?,?,?,?,?,?,?)",
+                     ("ce-x", "{}", "claude-haiku-4-5", "scheduled",
+                      "research", str(spent_cents),
+                      _iso(datetime.now(timezone.utc).date()), None))
+        conn.commit()
+        conn.close()
+        return panels._daily_ceiling_tile(Db(path), self._Cap(cap_cents))
+
+    def test_a_nine_dollar_day_on_a_hundred_dollar_cap_is_not_red(self, tmp_path):
+        _, value, sub = self._tile(tmp_path, 10000, 900)
+        assert "$9.00" in value
+        assert "$10.00 daily ceiling" in sub, sub
+        assert "90%" in sub
+        assert "crit" not in sub, "the governor authorizes this day"
+
+    def test_the_ceiling_still_floors_at_the_owners_own_figure(self, tmp_path):
+        """Lowering the monthly cap can never strangle the bot below the
+        $5/day the owner already agreed - daily_cap_cents() floors it."""
+        _, _, sub = self._tile(tmp_path, 500, 900)
+        assert "$5.00 daily ceiling" in sub, sub
+        assert "crit" in sub, "180% of the ceiling in force IS red"
 
 
 def test_a_rate_in_force_names_who_set_it(seeded):
@@ -1906,11 +1968,29 @@ class TestThePageReadsAsAnInstrumentNotAnEssay:
 
     def test_the_provenance_is_still_there_word_for_word(self, seeded):
         """Folded, never deleted. The rule is that every figure says
-        where it came from, and it still does."""
+        where it came from, and it still does - in EITHER state the
+        pricing table can be in.
+
+        RATES_VERIFIED_ON + RATES_MAX_AGE_DAYS make the table declare
+        itself stale 90 days after it was last checked, and the panel
+        then REPLACES the folded provenance line with a louder alarm
+        above the fold that says the same thing and more. Asserting only
+        the fresh wording, in the fresh location, made this test fail
+        from 2026-11-08 - on the staleness warning working exactly as
+        designed. upgrade.sh runs this suite, so the alarm meant to
+        prompt a re-check would instead have blocked every upgrade, and
+        the owner would have seen ROLLBACK with nothing naming the
+        cause. Found by moving the system clock forward.
+        """
+        from catalyst.cost.pricing import RATES_VERIFIED_ON
+
         html_out = panels.cost_panel(Db(seeded), p="cost")
-        fold = html_out.split('class="workings"')[1]
-        assert 'class="prov"' in fold
-        assert "Pricing table provenance" in fold
+        assert 'class="prov"' in html_out.split('class="workings"')[1]
+        # Whichever state it is in, the page says when it was last
+        # checked against published rates - that is the actual rule.
+        assert RATES_VERIFIED_ON in html_out
+        assert ("Pricing table provenance" in html_out
+                or "Pricing table is stale" in html_out)
 
     def test_a_lone_provenance_line_is_left_where_it_is(self, seeded):
         """Folding one line behind a disclosure costs a click and saves
@@ -1935,9 +2015,26 @@ class TestThePageReadsAsAnInstrumentNotAnEssay:
         # it comes before every panel
         assert html_out.index('id="state-line"') < html_out.index("-section")
 
-    def test_the_overview_is_no_longer_mostly_prose(self, seeded):
+    def test_the_overview_is_no_longer_mostly_prose(self, seeded, monkeypatch):
         """The number that started this. Not a styling opinion - a count
-        of words the reader has to walk past to reach a figure."""
+        of words the reader has to walk past to reach a figure.
+
+        Measured on the page's STEADY state. rates_stale() says of
+        itself that it is "deliberately NOT a test failure: a stale
+        pricing table must be loud on the dashboard without blocking the
+        upgrade path" - and then this test broke that contract by
+        accident, because the stale alarm is ~40 words and the budget
+        had no headroom. From 2026-11-08 it would have failed every day,
+        rolling back the owner's upgrade over a warning working exactly
+        as designed. The alarm's own wording is covered by
+        test_the_provenance_is_still_there_word_for_word.
+
+        Pinned rather than loosened, so the budget keeps its original
+        strength - the guardrail is what stops the page drifting back
+        into an essay.
+        """
+        monkeypatch.setattr("catalyst.cost.pricing.RATES_VERIFIED_ON",
+                            date.today().isoformat())
         html_out = server.route_overview(Db(seeded), {})
         figures = len(re.findall(r'class="(?:tile-value|big|funnel-n)"', html_out))
         assert figures >= 8

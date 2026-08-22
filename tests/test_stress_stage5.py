@@ -1606,10 +1606,25 @@ class TestGovernorUnderTheBoundary:
     def test_cap_exhausted_mid_run_skips_and_says_so(self, db):
         """SURVIVED: BUILD-BRIEF - 'if a cycle would breach the cap, it
         skips and reports that it skipped'."""
+        # authorize() sums month-to-date against datetime.now() - it takes
+        # no as_of from the cycle - so the spend must be seeded into the
+        # REAL current month. A literal '2026-08-...' here passed only for
+        # as long as the real clock agreed with it, and from 2026-09-01
+        # would have failed forever, blocking every upgrade (house rule 6).
+        today = datetime.now(timezone.utc).date()
+        seeded = today.replace(day=1)
         db.execute("INSERT INTO cost_events VALUES "
                    "('spent','{}','claude-sonnet-5','scheduled','research',"
-                   "'499','2026-08-10T00:00:00+00:00','a')")
+                   "'499',?,'a')",
+                   (datetime(seeded.year, seeded.month, seeded.day,
+                             tzinfo=timezone.utc).isoformat(),))
         db.commit()
+        # The daily ceiling is checked BEFORE the monthly cap, so which
+        # one names the refusal depends on whether the seeded spend is
+        # also today's spend. On the 1st the two windows are the same
+        # window and the monthly cap cannot bind first - that is the
+        # governor being right, not the test being loose.
+        expect = "daily_cap_exceeded" if seeded == today else "cap_exceeded"
         broker, state = broker_for()
         report = run(db, broker, model_transport(), [candidate()])
         assert report.funnel["researched"] == 0
@@ -1618,7 +1633,7 @@ class TestGovernorUnderTheBoundary:
         assert state["posts"] == []
         assert db.execute(
             "SELECT reason FROM cost_governor_events WHERE decision='deny'"
-        ).fetchone()[0].startswith("cap_exceeded")
+        ).fetchone()[0].startswith(expect)
 
     def test_unacknowledged_reconciliation_pause_blocks_spend(self, db):
         """SURVIVED: a paused reconciliation stops all model spend until
