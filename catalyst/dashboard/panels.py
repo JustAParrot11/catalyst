@@ -2681,8 +2681,14 @@ def bundle_buttons(p: str) -> str:
            "are stripped twice &mdash; once where each value is "
            "captured, and again over the whole file before it is "
            "written.</p>",
+           # A FOLDER WITH A READER IN IT, not a wall of JSON.
+           # OWNER-ASKED: "can we attach a html reader for all the
+           # files ttached to make it easier for me to troubleshoot
+           # before sending it to you, still include raw logs in the
+           # folder". index.html opens with a double-click; bundle.json
+           # and logs.txt are the untouched originals beside it.
            f'<form id="{p}-bundle-form" method="get" '
-           'action="/diagnostics.json">']
+           'action="/diagnostics.zip">']
     for key in ("everything", "all", "pricing", "logic", "data",
                 "execution"):
         spec = DIAGNOSTIC_SCOPES[key]
@@ -2714,8 +2720,11 @@ def bundle_buttons(p: str) -> str:
         "were.</span></p>"
         f'<p class="bundlerow"><button class="bundlebtn master" '
         f'type="submit" id="{p}-bundle-go">Download</button>'
-        '<span class="bundlewhy">One file, named for what you picked.'
-        "</span></p></form>")
+        '<span class="bundlewhy">A zip named for what you picked. Open '
+        "<b>index.html</b> inside it to read everything in your browser "
+        "&mdash; offline, nothing to install. <b>bundle.json</b> and "
+        "<b>logs.txt</b> are the raw files, unchanged, and are what to "
+        "send on.</span></p></form>")
     out.append(prov(
         "If the page itself will not load, the same file can be produced "
         "on the server with:  sudo -u catalyst /opt/catalyst/venv/bin/python "

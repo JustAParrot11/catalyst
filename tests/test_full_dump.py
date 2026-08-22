@@ -131,7 +131,11 @@ class TestTheButtonIsThere:
 
         report = maintenance.build_report(Db(bare), None, run_active=False)
         html_out = panels.maintenance_panel(report)
-        assert 'action="/diagnostics.json"' in html_out
+        # THE DOWNLOAD IS NOW A FOLDER, not a bare JSON file. Owner-asked:
+        # "can we attach a html reader ... still include raw logs in the
+        # folder". The zip carries index.html beside the untouched
+        # bundle.json, so the route moved; what the button DOES has not.
+        assert 'action="/diagnostics.zip"' in html_out
         assert 'value="everything"' in html_out
         assert "bundlebtn master" in html_out
         # ...and it is the FIRST one, because it is what to send when
