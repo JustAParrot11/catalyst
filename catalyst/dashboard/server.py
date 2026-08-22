@@ -1025,6 +1025,25 @@ class Handler(BaseHTTPRequestHandler):
                  if filename else None)
         self._send(code, body, "application/json; charset=utf-8", extra=extra)
 
+    def _send_zip(self, code: int, files: dict, filename: str):
+        """A folder, not a file. OWNER-ASKED: "can we attach a html
+        reader for all the files ttached to make it easier for me to
+        troubleshoot before sending it to you, still include raw logs in
+        the folder"."""
+        import io
+        import zipfile
+
+        buf = io.BytesIO()
+        # DEFLATED, because the reader embeds the bundle and the folder
+        # therefore carries the same data twice. It compresses to
+        # roughly the size of the JSON alone.
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for name, blob in files.items():
+                zf.writestr(name, blob)
+        self._send(code, buf.getvalue(), "application/zip",
+                   extra={"Content-Disposition":
+                          f'attachment; filename="{filename}"'})
+
     def log_message(self, fmt, *args):  # quieter, and to stderr
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
@@ -1082,6 +1101,44 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json(
                     200, diagnostics_bundle(db, scope=scope, days=days),
                     filename=f"catalyst-{scope}-{span}-{stamp}.json")
+            if parsed.path == "/diagnostics.zip":
+                # THE SAME BUNDLE, AS A FOLDER YOU CAN READ. index.html
+                # opens with a double-click and needs nothing installed;
+                # bundle.json and logs.txt are the untouched originals,
+                # still there to grep or forward. Nothing is summarised
+                # away - the page renders the object sitting beside it.
+                from catalyst.dashboard.bundle_reader import (
+                    logs_as_text, render_bundle_html,
+                )
+
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+                params = parse_qs(parsed.query or "")
+                raw = (params.get("scope") or ["all"])[0]
+                scope = raw if raw in DIAGNOSTIC_SCOPES else "all"
+                days = window_days((params.get("days") or [None])[0])
+                span = f"{days}d" if days else "all"
+                bundle = diagnostics_bundle(db, scope=scope, days=days)
+                stem = f"catalyst-{scope}-{span}-{stamp}"
+                return self._send_zip(200, {
+                    f"{stem}/index.html": render_bundle_html(bundle),
+                    f"{stem}/bundle.json": json.dumps(
+                        bundle, indent=2, default=str),
+                    f"{stem}/logs.txt": logs_as_text(bundle),
+                    f"{stem}/README.txt": (
+                        "Catalyst diagnostic bundle\n"
+                        "==========================\n\n"
+                        "index.html   open this first - it reads the whole\n"
+                        "             bundle in your browser, offline, with\n"
+                        "             filters for the logs. Nothing to\n"
+                        "             install and no internet needed.\n"
+                        "bundle.json  the raw export, unchanged. This is\n"
+                        "             the file to send on.\n"
+                        "logs.txt     the log lines as plain text, one per\n"
+                        "             line, for grep.\n\n"
+                        "Credentials are stripped twice before any of this\n"
+                        "is written. Environment variable NAMES are listed;\n"
+                        "their values are never collected.\n"),
+                }, filename=f"{stem}.zip")
             handler = HTML_ROUTES.get(parsed.path)
             if handler is None:
                 return self._send_html(404, render_page(

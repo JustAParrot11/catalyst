@@ -13,6 +13,7 @@ supplies the live pieces.
 """
 
 import json
+import logging
 import sqlite3
 import uuid
 from dataclasses import dataclass, field, replace
@@ -35,6 +36,24 @@ from catalyst.risk.adaptive_params import current_values
 from catalyst.risk.evaluate import evaluate
 from catalyst.risk.hard_bounds import HARD_BOUNDS
 from catalyst.risk.kill_switches import check as kill_check
+
+#: OWNER-ASKED 2026-08-21: "is every action being accurately logged
+#: aswell in the logs tab for me to review any possible sitution".
+#:
+#: It was not. This file sizes positions, places orders, arms stops and
+#: takes exits, and it emitted NOT ONE log line - all 54 in the
+#: orchestrator were in scheduler.py. Failures did reach the page,
+#: because run_cycle collects them into report.errors and the scheduler
+#: logs those; what was missing was everything that went RIGHT. A cycle
+#: that worked wrote nothing, so "what did the bot do at 14:32?" could
+#: not be answered from the Logs tab at all - only by reading the
+#: orders and positions tables directly.
+#:
+#: EVERY LINE BELOW IS AN OBSERVATION AND NOTHING ELSE. No branch, no
+#: value and no order depends on any of them; they are additions to a
+#: file that otherwise did not change, and a test asserts this module
+#: still makes no decision it did not make before.
+_log = logging.getLogger("orchestrator.cycle")
 
 MAX_RESEARCH_PER_CYCLE = 3     # bounds worst-case spend per cycle; the
                                # governor is the real cap, this is belt
@@ -283,6 +302,11 @@ def _protective_duties(conn, broker: Broker, report: "CycleReport",
             f"decision_id={p['decision_id']!r}) - not exited, needs review")
     due = [p for p in due if p not in unsellable]
     if due:
+        # WHAT WAS SOLD AND WHY, before the attempt - so a manage_exits
+        # that dies mid-way still leaves a record of what it was doing.
+        _log.info("Hard exit date reached for %s - selling at market.",
+                  ", ".join(f"{p['ticker']} (position {p['id']})"
+                            for p in due))
         try:
             manage_exits(due, now, broker, conn)
         except BrokerError as exc:
@@ -991,6 +1015,14 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
             conn.commit()
             report.drop_reasons.setdefault("proposed", []).append(
                 f"{c.id}: {','.join(decision.skip_reasons)}")
+            # A DECLINE IS A DECISION AND BELONGS IN THE RECORD. Most
+            # candidates end here, and "the risk engine said no, for
+            # this reason" is the single most common thing to want to
+            # look up afterwards.
+            _log.info("Declined %s: %s. Price at refusal %s; the refusals "
+                      "page scores what it goes on to do.",
+                      c.ticker, ", ".join(decision.skip_reasons) or "no reason recorded",
+                      market.last_close)
             continue
         proposed += 1
 
@@ -1003,6 +1035,13 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
             # the account may not hold (stress-tester defect 8).
             report.drop_reasons.setdefault("orders_placed", []).append(
                 f"{c.id}: entry_{entry.status}")
+            # An order the broker refused, at WARNING - the risk engine
+            # approved this trade and the broker did not take it, which
+            # is a different situation from the bot declining it itself.
+            _log.warning(
+                "Entry order for %s was %s by the broker. Broker said: %s",
+                c.ticker, entry.status,
+                str(entry.raw_response)[:300] or "nothing recorded")
             if entry.status == "submit_unconfirmed":
                 report.errors.append(
                     f"entry submit unconfirmed for {c.id}: reconcile must "
@@ -1082,6 +1121,24 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
              stop_broker_id, now.isoformat(),
              decision.planned_exit_date.isoformat(), "open"))
         conn.commit()
+        # THE MONEY MOMENT, in one readable line. Everything needed to
+        # recognise this trade later without opening a table: what, how
+        # much, at what, where the stop sits, and when it closes.
+        _log.info(
+            "Opened %s: %s share(s) near %s, stop %s (%s), closes %s. "
+            "Candidate %s.",
+            # EVERY VALUE HERE IS ONE THE SURROUNDING CODE HAS ALREADY
+            # READ SUCCESSFULLY on this path. The first version reached
+            # for market.live_price, which MarketSnapshot does not have,
+            # and an AttributeError inside a log call kills the cycle it
+            # was only supposed to describe - 22 tests caught it, and
+            # the static check in test_cycle_logging.py did not. That is
+            # the whole hazard of logging inside execution code, and the
+            # answer is to name nothing the code has not already used.
+            c.ticker, filled_qty, market.last_close, decision.stop_price,
+            "armed at the broker" if stop_broker_id
+            else "NOT armed - next cycle will arm it",
+            decision.planned_exit_date, c.id)
         placed += 1
         entered_this_cycle.add(c.ticker)
         # keep in-cycle exposure honest for the NEXT candidate
@@ -1100,6 +1157,18 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
     report.funnel["researched"] = researched
     report.funnel["proposed"] = proposed
     report.funnel["orders_placed"] = placed
+    # ONE CLOSING LINE PER CYCLE, WHETHER OR NOT ANYTHING HAPPENED.
+    # A working bot writing nothing is the failure this whole page keeps
+    # running into: silence and a dead service look identical. A cycle
+    # that did nothing says so, and says what it looked at first.
+    _log.info(
+        "Cycle done in %.1fs: %d candidate(s) -> %d researched -> "
+        "%d proposed -> %d order(s). %s",
+        (datetime.now(timezone.utc) - now).total_seconds(),
+        report.funnel.get("candidates", len(fresh)), researched, proposed,
+        placed,
+        f"{len(report.errors)} problem(s) recorded." if report.errors
+        else "No problems recorded.")
     return report
 
 

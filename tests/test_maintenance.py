@@ -295,7 +295,9 @@ class TestDiagnosticExport:
         # A form now, not six links: it also has to ASK how far back
         # (owner-asked, "so im not getting a massive file"), and a link
         # cannot carry an answer the reader has not given yet.
-        assert 'action="/diagnostics.json"' in html
+        # See the note in test_full_dump: the export is a zip now, with
+        # index.html beside the raw bundle.json and logs.txt.
+        assert 'action="/diagnostics.zip"' in html
         for scope in DIAGNOSTIC_SCOPES:
             assert f'value="{scope}"' in html, scope
         assert 'name="days"' in html, "nothing asks how far back"
