@@ -35,6 +35,19 @@ def db(tmp_path):
     conn.close()
 
 
+def in_force(db, day):
+    """The rate the ledger would use on `day` right now.
+
+    ALWAYS COMPARED ON THE SAME DATE. The rate table is a SCHEDULE, not
+    a constant - Sonnet 5's introductory pricing ends 2026-08-31 - so
+    reading "before" on one day and "after" on the next compares two
+    different questions and fails on the boundary for a reason that has
+    nothing to do with what is being tested (house rule 6; this file's
+    own first draft did exactly that and the clock sweep caught it).
+    """
+    return rates_for_on(db, MODEL, day)
+
+
 def seed_day(conn, cents, day=YESTERDAY, model=MODEL, n=1):
     """n priced events on `day` totalling `cents`."""
     each = Decimal(str(cents)) / n
@@ -54,13 +67,14 @@ class TestItOnlyEverTightens:
         """We under-priced, so the real rate is higher than the table
         says. Raising it makes the bot spend LESS - safe, so automatic."""
         seed_day(db, "100")
-        old_in, old_out = rates_for_on(db, MODEL, YESTERDAY)
+        effective = YESTERDAY + timedelta(days=1)
+        old_in, old_out = in_force(db, effective)
 
         m = learn_from_closed_day(db, YESTERDAY, Decimal("100"), Decimal("110"))
 
         assert m is not None and m.applied is True
         assert m.ratio == Decimal("1.1")
-        new_in, new_out = rates_for_on(db, MODEL, YESTERDAY + timedelta(days=1))
+        new_in, new_out = in_force(db, effective)
         assert new_in > old_in and new_out > old_out
         assert "LOW" in m.reason and "spend less" in m.reason
 
@@ -69,22 +83,66 @@ class TestItOnlyEverTightens:
         down would let the bot spend MORE, so it is reported and the
         rate is left exactly where it was."""
         seed_day(db, "100")
-        before = rates_for_on(db, MODEL, YESTERDAY)
+        days = [YESTERDAY + timedelta(days=n) for n in (1, 30, 365)]
+        before = [in_force(db, d) for d in days]
 
         m = learn_from_closed_day(db, YESTERDAY, Decimal("100"), Decimal("70"))
 
         assert m is not None
         assert m.applied is False, "a rate must never be LOWERED automatically"
-        assert rates_for_on(db, MODEL, YESTERDAY + timedelta(days=1)) == before
-        # Far forward too - and compared against the BUILT-IN rate for
-        # that day, not against today's. A fixed expectation here would
-        # assert that Sonnet 5's introductory pricing never ends, which
-        # is a thing the code knows and a test has no business denying.
-        from catalyst.cost.pricing import rates_for
-
-        far = YESTERDAY + timedelta(days=365)
-        assert rates_for_on(db, MODEL, far) == rates_for(MODEL, far)
+        assert [in_force(db, d) for d in days] == before
         assert "HIGH" in m.reason and "a human decides" in m.reason
+
+    def test_a_correction_can_never_land_below_a_SCHEDULED_rise(self, db):
+        """THE HOLE THE CLOCK SWEEP FOUND, as a test.
+
+        The rate table is a schedule, not a constant. A correction
+        measured on day D used to be computed from D's rate and written
+        effective D+1 - so when a price rise was already scheduled for
+        D+1, the override REPLACED it with a lower number and the bot
+        under-priced itself into spending more. Exactly the direction
+        this module exists to make impossible.
+
+        Built from an override rather than the real Sonnet 5 intro
+        expiry, so it tests the invariant on every date rather than on
+        one day a year (house rule 6).
+        """
+        from catalyst.cost.overrides import set_override
+
+        effective = YESTERDAY + timedelta(days=1)
+        priced_at, _ = rates_for_on(db, MODEL, YESTERDAY)
+        scheduled_in = priced_at * 2          # a big rise, already booked
+        set_override(db, MODEL, effective, scheduled_in, priced_at * 10,
+                     set_by="a-human", allow_large_change=True)
+        seed_day(db, "100")
+
+        # A small correction: 5% - far less than the scheduled doubling.
+        learn_from_closed_day(db, YESTERDAY, Decimal("100"), Decimal("105"))
+
+        assert in_force(db, effective)[0] >= scheduled_in, (
+            "the correction overwrote a scheduled price rise with a LOWER "
+            "rate - the bot would now under-price and overspend")
+
+    def test_a_scheduled_rise_that_already_covers_it_writes_nothing(self, db):
+        """If the schedule has already absorbed the whole discrepancy -
+        which is what a day priced at the old rate looks like on the eve
+        of a known price change - there is nothing to correct."""
+        from catalyst.cost.overrides import set_override
+
+        effective = YESTERDAY + timedelta(days=1)
+        priced_at, priced_out = rates_for_on(db, MODEL, YESTERDAY)
+        set_override(db, MODEL, effective, priced_at * 2, priced_out * 2,
+                     set_by="a-human", allow_large_change=True)
+        seed_day(db, "100")
+        overrides_before = db.execute(
+            "SELECT COUNT(*) FROM pricing_overrides").fetchone()[0]
+
+        m = learn_from_closed_day(db, YESTERDAY, Decimal("100"), Decimal("110"))
+
+        assert m is not None and m.applied is False
+        assert "covers it in full" in m.reason or "covers in full" in m.reason
+        assert db.execute("SELECT COUNT(*) FROM pricing_overrides"
+                          ).fetchone()[0] == overrides_before
 
     def test_no_override_row_is_written_when_it_would_loosen(self, db):
         """Not merely 'the rate is unchanged' - nothing was recorded that
@@ -107,12 +165,13 @@ class TestItRefusesToLearnFromNoise:
 
     def test_agreement_inside_the_deadband_moves_nothing(self, db):
         seed_day(db, "100")
-        before = rates_for_on(db, MODEL, YESTERDAY)
+        effective = YESTERDAY + timedelta(days=1)
+        before = in_force(db, effective)
         m = learn_from_closed_day(db, YESTERDAY, Decimal("100"),
                                   Decimal("100") * (1 + DEADBAND / 2))
         assert m is not None and m.applied is False
         assert "agreed within" in m.reason
-        assert rates_for_on(db, MODEL, YESTERDAY + timedelta(days=1)) == before
+        assert in_force(db, effective) == before
 
     def test_two_models_on_one_day_is_not_a_rate(self, db):
         """The Cost API returns the day's money without a per-model
@@ -143,14 +202,18 @@ class TestTheStepIsBounded:
         per adjustment, however emphatic the evidence.' A billing
         correction or a credit must not be able to jump the table."""
         seed_day(db, "100")
-        old_in, _ = rates_for_on(db, MODEL, YESTERDAY)
+        priced_at, _ = rates_for_on(db, MODEL, YESTERDAY)
+        effective = YESTERDAY + timedelta(days=1)
+        scheduled, _ = in_force(db, effective)
 
         m = learn_from_closed_day(db, YESTERDAY, Decimal("100"),
                                   Decimal("400"))     # 4x
 
         assert m is not None and m.applied is True
-        new_in, _ = rates_for_on(db, MODEL, YESTERDAY + timedelta(days=1))
-        assert new_in <= (old_in * (1 + MAX_STEP)).quantize(Decimal("1"))
+        new_in, _ = in_force(db, effective)
+        ceiling = max((priced_at * (1 + MAX_STEP)).quantize(Decimal("1")),
+                      scheduled)
+        assert new_in <= ceiling
         assert "capped" in m.reason
 
     def test_repeated_days_converge_rather_than_jump(self, db):
@@ -211,9 +274,10 @@ class TestItCannotBreakTheThingItRunsInside:
     ])
     def test_unreadable_figures_leave_the_table_alone(self, db, local, billed):
         seed_day(db, "100")
-        before = rates_for_on(db, MODEL, YESTERDAY)
+        effective = YESTERDAY + timedelta(days=1)
+        before = in_force(db, effective)
         learn_from_closed_day(db, YESTERDAY, local, billed)
-        assert rates_for_on(db, MODEL, YESTERDAY + timedelta(days=1)) == before
+        assert in_force(db, effective) == before
 
 
 class TestItIsActuallyWiredIntoTheReconciliation:
@@ -311,12 +375,12 @@ class TestTheLearnedRateActuallyReachesTheLedger:
         call is priced by it. If this passes, the governor is spending
         against a measured number rather than an asserted one."""
         seed_day(db, "100")
+        effective = YESTERDAY + timedelta(days=1)
+        asserted = in_force(db, effective)          # the table's own answer
+
         learn_from_closed_day(db, YESTERDAY, Decimal("100"), Decimal("120"))
 
-        from catalyst.cost.pricing import rates_for
-
-        asserted = rates_for(MODEL, YESTERDAY + timedelta(days=1))
-        measured = rates_for_on(db, MODEL, YESTERDAY + timedelta(days=1))
+        measured = in_force(db, effective)          # same day, after learning
         assert measured[0] > asserted[0], (
             "the ledger is still pricing from the hand-written table")
 

@@ -176,7 +176,23 @@ def learn_from_closed_day(
             return None
 
         ratio = billed / local
+        # THE DAY WAS PRICED AT THIS...
         old_in, old_out = rates_for_on(conn, model, target_date)
+        # ...BUT THIS IS WHAT WOULD OTHERWISE APPLY once the correction
+        # takes effect, and the two are NOT always the same rate.
+        #
+        # The rate table is a SCHEDULE, not a constant: Sonnet 5's
+        # introductory pricing ends 2026-08-31, so 31 August prices at
+        # 200 and 1 September at 300 with nothing wrong. An override
+        # written from the measured day's rate alone would land on 1
+        # September at 200 x step and REPLACE the scheduled 300 -
+        # under-pricing the bot into spending more, which is the exact
+        # direction this module exists to make impossible.
+        #
+        # Found by the clock sweep, in this module's own tests, on the
+        # one date in the year where it bites.
+        effective = target_date + timedelta(days=1)
+        base_in, base_out = rates_for_on(conn, model, effective)
 
         base = MeasuredRate(
             target_date=target_date, model=model, local_total_cents=local,
@@ -211,10 +227,31 @@ def learn_from_closed_day(
 
         # Under-priced. Raise the rate - bounded, and toward the truth.
         step = min(ratio, Decimal("1") + MAX_STEP)
-        new_in = (old_in * step).quantize(Decimal("1"))
-        new_out = (old_out * step).quantize(Decimal("1"))
+        # What the measurement says the true rate is: the rate the day
+        # was actually priced at, scaled by how far the bill came out.
+        implied_in = (old_in * step).quantize(Decimal("1"))
+        implied_out = (old_out * step).quantize(Decimal("1"))
+        # NEVER BELOW WHAT IS ALREADY SCHEDULED. This floor is what makes
+        # "only ever tightens" structural rather than an argument - no
+        # arithmetic above it, however wrong, can produce a rate lower
+        # than the table would have used anyway.
+        new_in = max(implied_in, base_in)
+        new_out = max(implied_out, base_out)
         if new_in <= 0 or new_out <= 0:
             return None
+
+        if new_in == base_in and new_out == base_out:
+            # The schedule already covers the whole discrepancy - which
+            # is precisely what a priced-at-the-old-rate day looks like
+            # on the eve of a known price change. Nothing to write.
+            m = _replace(base, old_input=base_in, old_output=base_out,
+                         reason=(
+                             f"billed {billed}c against {local}c priced locally, "
+                             f"which the rate already scheduled for {effective} "
+                             f"({base_in}/{base_out} per Mtok) covers in full - "
+                             "no override needed"))
+            _record(conn, m)
+            return m
 
         capped = " (capped at the maximum single step)" if step < ratio else ""
         reason = (
@@ -227,10 +264,11 @@ def learn_from_closed_day(
         # already-priced history keeps the rate that was actually in
         # force when it was priced, and a backfill of an earlier day
         # still reprices it correctly.
-        set_override(conn, model, target_date + timedelta(days=1),
+        set_override(conn, model, effective,
                      new_in, new_out, set_by="measured against the bill",
                      note=reason)
         m = _replace(base, applied=True, reason=reason,
+                     old_input=base_in, old_output=base_out,
                      new_input=new_in, new_output=new_out)
         _record(conn, m)
         return m
