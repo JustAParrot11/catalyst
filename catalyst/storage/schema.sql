@@ -503,3 +503,24 @@ CREATE TABLE IF NOT EXISTS measured_rate_observations (
 
 CREATE INDEX IF NOT EXISTS idx_measured_rate_observations_day
     ON measured_rate_observations (target_date DESC);
+
+-- The pricing MULTIPLIERS (cache write/read, web search), measured from
+-- the bill's own token_type breakdown rather than typed in from
+-- documentation. Absent row = the documented defaults in pricing.py, so
+-- an install that never measures prices exactly as it always did
+-- (catalyst/cost/factors.py).
+CREATE TABLE IF NOT EXISTS measured_factors (
+    id               TEXT PRIMARY KEY,
+    model            TEXT NOT NULL,
+    effective_from   TEXT NOT NULL,   -- ISO date, inclusive
+    cache_write      TEXT NOT NULL,   -- decimal string, x input rate
+    cache_write_1h   TEXT NOT NULL,
+    cache_read       TEXT NOT NULL,
+    web_search_cents TEXT NOT NULL,   -- cents per query
+    set_by           TEXT NOT NULL,
+    set_at           TEXT NOT NULL,
+    note             TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_measured_factors_lookup
+    ON measured_factors (model, effective_from DESC);
