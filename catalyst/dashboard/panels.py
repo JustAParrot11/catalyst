@@ -1531,10 +1531,12 @@ def adaptation_block(db: Db, p: str = "adapt") -> str:
 def _daily_ceiling_tile(db: Db, c) -> tuple:
     """Today's spend against the rate ceiling, and WHICH limit binds first.
 
-    The owner set two numbers that can disagree: "$5 a day usage is ok"
-    and a $25/month budget. $5 a day for 30 days is $150, so on a busy
-    month the MONTHLY cap runs out long before the daily one ever fires.
-    Saying which one will stop the bot, and roughly when, is the
+    The two ceilings can disagree even though only ONE number is set.
+    The owner picks a monthly cap; daily_cap_cents() derives the daily
+    rate ceiling from it, floored at the $5/day already agreed. On a
+    $100 cap that is $10/day, and $10 a day for 30 days is $300 - so on
+    a busy month the MONTHLY cap runs out long before the daily one ever
+    fires. Saying which one will stop the bot, and roughly when, is the
     difference between a limit the owner chose and a limit that
     surprises them mid-month.
     """
