@@ -47,7 +47,10 @@ from catalyst.cost.pricing import (
     rates_for,
 )
 from catalyst.cost import CostEvent
-from catalyst.cost.measured_rates import learn_from_closed_day
+from catalyst.cost.measured_rates import (
+    learn_factors_from_closed_day,
+    learn_from_closed_day,
+)
 from catalyst.research.schema import UsageComponents
 
 _MTOK = Decimal("1000000")
@@ -180,6 +183,18 @@ def make_usage_components(raw_usage: dict) -> UsageComponents:
 
 
 
+def _owner_factors(conn, model: str, on_date: date):
+    """Measured multipliers in force on `on_date`, or None for the
+    documented defaults. Same contract and same reasons as _owner_rates
+    below: never raises, and a missing table simply means nothing has
+    been measured yet."""
+    try:
+        from catalyst.cost.factors import factors_for_on
+        return factors_for_on(conn, model, on_date)
+    except Exception:  # noqa: BLE001 - fall back to the documented values
+        return None
+
+
 def _owner_rates(conn, model: str, on_date: date):
     """Owner-entered rate in force on `on_date`, or None to use the
     built-in table. Never raises for a missing table - an older database
@@ -195,7 +210,8 @@ def _owner_rates(conn, model: str, on_date: date):
 
 def price(usage: UsageComponents, model: str,
           on_date: date | None = None,
-          rates: tuple | None = None) -> Decimal:
+          rates: tuple | None = None,
+          factors=None) -> Decimal:
     """Cents, as Decimal. Reads ALL usage fields, always. Refuses to
     price a usage object carrying unrecognized billing fields - pricing
     a payload we do not fully understand understates it silently.
@@ -228,6 +244,14 @@ def price(usage: UsageComponents, model: str,
         input_rate, output_rate = rates
     else:
         input_rate, output_rate = rates_for(model, on_date)
+    # The MULTIPLIERS, same shape as `rates` above: passed in when the
+    # caller has a database to read measured ones from, and otherwise
+    # the documented defaults. None here prices exactly as this function
+    # did before any of it was measurable.
+    if factors is None:
+        from catalyst.cost.factors import DEFAULT_FACTORS
+
+        factors = DEFAULT_FACTORS
 
     cache_1h = 0
     cache_5m = usage.cache_creation_input_tokens
@@ -240,13 +264,14 @@ def price(usage: UsageComponents, model: str,
     input_cents = Decimal(usage.input_tokens) * input_rate / _MTOK
     output_cents = Decimal(usage.output_tokens) * output_rate / _MTOK
     cache_write_cents = (
-        Decimal(cache_5m) * input_rate * CACHE_WRITE_MULTIPLIER / _MTOK
-        + Decimal(cache_1h) * input_rate * CACHE_WRITE_MULTIPLIER_1H / _MTOK
+        Decimal(cache_5m) * input_rate * factors.cache_write / _MTOK
+        + Decimal(cache_1h) * input_rate * factors.cache_write_1h / _MTOK
     )
     cache_read_cents = (
-        Decimal(usage.cache_read_input_tokens) * input_rate * CACHE_READ_MULTIPLIER / _MTOK
+        Decimal(usage.cache_read_input_tokens) * input_rate * factors.cache_read / _MTOK
     )
-    web_search_cents = Decimal(usage.web_search_requests) * WEB_SEARCH_CENTS_PER_QUERY
+    web_search_cents = (
+        Decimal(usage.web_search_requests) * factors.web_search_cents)
 
     return input_cents + output_cents + cache_write_cents + cache_read_cents + web_search_cents
 
@@ -292,7 +317,8 @@ def record_usage(
     pricing_error = None
     try:
         priced = price(usage, model, on_date=priced_at.date(),
-                       rates=_owner_rates(conn, model, priced_at.date()))
+                       rates=_owner_rates(conn, model, priced_at.date()),
+                       factors=_owner_factors(conn, model, priced_at.date()))
     except (UnknownModelError, UnrecognizedUsageFieldError) as exc:
         pricing_error = exc
 
@@ -347,7 +373,8 @@ def reprice_all(conn: sqlite3.Connection) -> RepriceOutcome:
                 # use the August intro rate
                 spend_date = datetime.fromisoformat(priced_at).date()
                 new = price(usage, model, on_date=spend_date,
-                            rates=_owner_rates(conn, model, spend_date))
+                            rates=_owner_rates(conn, model, spend_date),
+                            factors=_owner_factors(conn, model, spend_date))
             except (UnknownModelError, UnrecognizedUsageFieldError):
                 still_unpriced.append((row_id, model))
                 continue
@@ -588,7 +615,17 @@ def reconcile_day(
     # only ever tighten the table (measured_rates.py). Runs on paused
     # days too - a large discrepancy is exactly when a rate is wrong, and
     # correcting it is what stops the same pause recurring tomorrow.
-    learn_from_closed_day(conn, target_date, local_total, api_total)
+    learned = learn_from_closed_day(conn, target_date, local_total, api_total)
+
+    # AND THE MULTIPLIERS, from the same day's ITEMISED bill. Only here:
+    # page.records is the one place the per-line breakdown exists, and it
+    # is not stored anywhere a later pass could read it from.
+    if learned is not None:
+        try:
+            learn_factors_from_closed_day(
+                conn, target_date, learned.model, api_total, page.records)
+        except Exception:  # noqa: BLE001
+            pass          # never at the cost of the reconciliation itself
 
     return ReconciliationResult(
         target_date=target_date,

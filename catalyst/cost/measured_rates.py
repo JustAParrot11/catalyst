@@ -252,6 +252,80 @@ def _high_run_length(
     return min(run, DOWN_AGREEING_DAYS)
 
 
+def _day_token_counts(conn: sqlite3.Connection, target_date: date) -> dict:
+    """The day's token counts by component, from the RAW usage objects.
+
+    Read back from `raw_usage_json` rather than from any parsed column,
+    because the raw object is the thing TRAPS.md insists is stored
+    verbatim for exactly this reason: a field that was renamed or nested
+    is still in there to be found.
+    """
+    import json as _json
+
+    from catalyst.cost.tracker import make_usage_components
+
+    got = {"input": 0, "output": 0, "cache_5m": 0, "cache_1h": 0,
+           "cache_read": 0, "web_search": 0}
+    for (raw,) in conn.execute(
+            "SELECT raw_usage_json FROM cost_events "
+            "WHERE date(priced_at) = ? AND priced_cents IS NOT NULL",
+            (target_date.isoformat(),)).fetchall():
+        try:
+            u = make_usage_components(_json.loads(raw))
+        except Exception:  # noqa: BLE001 - one bad row must not blind the day
+            continue
+        got["input"] += u.input_tokens
+        got["output"] += u.output_tokens
+        got["cache_read"] += u.cache_read_input_tokens
+        got["web_search"] += u.web_search_requests
+        nested = u.raw.get("cache_creation") if isinstance(u.raw, dict) else None
+        if isinstance(nested, dict):
+            h1 = int(nested.get("ephemeral_1h_input_tokens", 0) or 0)
+            got["cache_1h"] += h1
+            got["cache_5m"] += int(nested.get(
+                "ephemeral_5m_input_tokens",
+                u.cache_creation_input_tokens - h1) or 0)
+        else:
+            got["cache_5m"] += u.cache_creation_input_tokens
+    return got
+
+
+#: Below this many tokens a component's derived rate is division noise,
+#: not a measurement. A handful of cache-read tokens against a
+#: five-decimal cost figure can imply almost any multiplier.
+MIN_COMPONENT_TOKENS = 10_000
+MIN_COMPONENT_REQUESTS = 5
+
+
+def _derive_factors(counts: dict, billed, input_rate: Decimal):
+    """Measured multipliers from the split bill, or None per component.
+
+    Each is a RATIO to the input rate, which is how price() uses them -
+    so they stay meaningful when the input rate itself moves.
+    """
+    mtok = Decimal("1000000")
+
+    def per_mtok(cents: Decimal, tokens: int):
+        if tokens < MIN_COMPONENT_TOKENS or cents <= 0:
+            return None
+        return cents / Decimal(tokens) * mtok
+
+    out = {}
+    if input_rate > 0:
+        for name, cents, tokens in (
+                ("cache_write", billed.cache_write, counts["cache_5m"]),
+                ("cache_write_1h", billed.cache_write_1h, counts["cache_1h"]),
+                ("cache_read", billed.cache_read, counts["cache_read"])):
+            rate = per_mtok(cents, tokens)
+            if rate is not None:
+                out[name] = rate / input_rate
+    if (counts["web_search"] >= MIN_COMPONENT_REQUESTS
+            and billed.web_search > 0):
+        out["web_search_cents"] = (
+            billed.web_search / Decimal(counts["web_search"]))
+    return out
+
+
 def _record(conn: sqlite3.Connection, m: MeasuredRate) -> None:
     """Every observation lands, applied or not - including the ones that
     changed nothing. 'The rate was checked and agreed' is the evidence
@@ -274,6 +348,97 @@ def _record(conn: sqlite3.Connection, m: MeasuredRate) -> None:
          datetime.now(timezone.utc).isoformat()),
     )
     conn.commit()
+
+
+def learn_factors_from_closed_day(
+    conn: sqlite3.Connection,
+    target_date: date,
+    model: str,
+    billed_total_cents: Decimal,
+    records: list[dict],
+) -> str:
+    """Measure the cache and web-search multipliers from the itemised
+    bill. Returns a sentence saying what happened, always.
+
+    THE MULTIPLIERS WERE THE LAST ASSUMPTIONS LEFT. The rate table is
+    measured; these four ratios were still typed in from documentation,
+    so a corrected day's cost was still built out of guesses. This
+    measures them on the same evidence.
+
+    Applies on the SAME asymmetry as a rate, and for the same reason: a
+    multiplier that comes out HIGHER means the bot has been under-pricing
+    and applying it tightens the budget, so it lands at once. A LOWER one
+    loosens, so it waits for the agreement a cut already requires.
+
+    Never raises. A split that cannot be trusted leaves every multiplier
+    exactly as it was, and says so.
+    """
+    from catalyst.cost.components import (
+        ComponentSplitRefused, classify,
+    )
+    from catalyst.cost.factors import (
+        COMPONENT_SUM_TOLERANCE, Factors, factors_for_on, set_measured_factors,
+    )
+    from catalyst.cost.overrides import rates_for_on
+
+    effective = target_date + timedelta(days=1)
+    try:
+        billed = classify(records, Decimal(billed_total_cents),
+                          COMPONENT_SUM_TOLERANCE)
+    except ComponentSplitRefused as exc:
+        # NOT SILENT. "there was no breakdown" and "the breakdown did not
+        # add up" are different facts, and the second one means this code
+        # is reading somebody else's API wrongly - which is worth seeing.
+        return f"Multipliers not measured: {exc.why}."
+    except Exception as exc:  # noqa: BLE001
+        return f"Multipliers not measured ({type(exc).__name__})."
+
+    try:
+        counts = _day_token_counts(conn, target_date)
+        input_rate = rates_for_on(conn, model, target_date)[0]
+        derived = _derive_factors(counts, billed, input_rate)
+        if not derived:
+            return ("The bill split cleanly, but no component had enough "
+                    "volume to measure a multiplier from.")
+
+        current = factors_for_on(conn, model, effective)
+        changes, held = [], []
+        fields = {}
+        for name in ("cache_write", "cache_write_1h", "cache_read",
+                     "web_search_cents"):
+            now = getattr(current, name)
+            new = derived.get(name)
+            if new is None:
+                fields[name] = now
+                continue
+            new = new.quantize(Decimal("0.0001"))
+            if new == now:
+                fields[name] = now
+            elif new > now:
+                fields[name] = new                 # tightens - apply now
+                changes.append(f"{name} {now}->{new}")
+            elif _prior_high_readings(conn, model, target_date,
+                                      DOWN_AGREEING_DAYS - 1):
+                fields[name] = new                 # loosens, but agreed
+                changes.append(f"{name} {now}->{new}")
+            else:
+                fields[name] = now
+                held.append(f"{name} measured {new}, held at {now}")
+
+        if not changes:
+            msg = "Multipliers measured from the bill and unchanged."
+            return msg + (" " + "; ".join(held) + "." if held else "")
+
+        set_measured_factors(
+            conn, model, effective, Factors(**fields),
+            set_by="measured against the bill",
+            note=("measured from the bill's own itemisation for "
+                  f"{target_date}: " + "; ".join(changes)
+                  + ("; " + "; ".join(held) if held else "")))
+        return ("Multipliers measured from the bill: " + "; ".join(changes)
+                + (". Held: " + "; ".join(held) + "." if held else "."))
+    except Exception as exc:  # noqa: BLE001
+        return f"Multipliers not measured ({type(exc).__name__})."
 
 
 def learn_from_closed_day(
