@@ -30,9 +30,35 @@ YESTERDAY = datetime.now(timezone.utc).date() - timedelta(days=1)
 
 @pytest.fixture
 def db(tmp_path):
+    """A database whose rate is FLAT across the window under test.
+
+    The built-in table is a SCHEDULE - Sonnet 5's introductory pricing
+    ends 2026-08-31 - so on 1 September the rate in force on the
+    measured day and on the day a correction takes effect are different
+    numbers, through no fault of anything being tested. Left alone,
+    every test here silently becomes a test of the Sonnet price
+    calendar, and seven of them failed on exactly one date of the year.
+
+    Pinning a baseline makes these tests about the LOGIC on every date.
+    The schedule-boundary behaviour is tested deliberately instead, in
+    the two tests that set their own scheduled rise.
+    """
+    from catalyst.cost.overrides import set_override
+    from catalyst.cost.pricing import rates_for
+
     conn = init_db(str(tmp_path / "rates.db"))
+    flat_in, flat_out = rates_for(MODEL, YESTERDAY)
+    set_override(conn, MODEL, YESTERDAY - timedelta(days=1),
+                 flat_in, flat_out, set_by="test-baseline")
     yield conn
     conn.close()
+
+
+def measured_overrides(db):
+    """Overrides written by the LEARNER, ignoring the fixture baseline."""
+    return db.execute(
+        "SELECT note FROM pricing_overrides "
+        "WHERE set_by LIKE 'measured%'").fetchall()
 
 
 def in_force(db, day):
@@ -149,8 +175,7 @@ class TestItOnlyEverTightens:
         a later lookup could pick up."""
         seed_day(db, "100")
         learn_from_closed_day(db, YESTERDAY, Decimal("100"), Decimal("50"))
-        assert db.execute(
-            "SELECT COUNT(*) FROM pricing_overrides").fetchone()[0] == 0
+        assert measured_overrides(db) == []
 
 
 class TestItRefusesToLearnFromNoise:
@@ -181,8 +206,7 @@ class TestItRefusesToLearnFromNoise:
         seed_day(db, "100", model="claude-haiku-4-5")
         assert learn_from_closed_day(
             db, YESTERDAY, Decimal("200"), Decimal("400")) is None
-        assert db.execute(
-            "SELECT COUNT(*) FROM pricing_overrides").fetchone()[0] == 0
+        assert measured_overrides(db) == []
 
     def test_a_day_with_no_spend_teaches_nothing(self, db):
         assert learn_from_closed_day(
@@ -249,10 +273,10 @@ class TestItIsWrittenDownEvenWhenNothingHappens:
         caused it - the old value, the new one, and what it rested on."""
         seed_day(db, "100")
         learn_from_closed_day(db, YESTERDAY, Decimal("100"), Decimal("115"))
-        note, set_by = db.execute(
-            "SELECT note, set_by FROM pricing_overrides").fetchone()
+        rows = measured_overrides(db)
+        assert len(rows) == 1, rows
+        note = rows[0][0]
         assert "115" in note and "100" in note
-        assert "measured" in set_by
         obs = latest_observation(db)
         assert obs["applied"] is True and obs["reason"] == note
 
