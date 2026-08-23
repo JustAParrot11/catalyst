@@ -39,6 +39,13 @@ def connect(db_path: str) -> sqlite3.Connection:
 #: migration, and it goes through a session of its own with a backup.
 ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("cost_reconciliation_events", "pause_reason", "TEXT"),
+    # The ACCUMULATED drift that caused a pause, as opposed to the day's
+    # own discrepancy. Without it, clear_pauses_that_no_longer_qualify
+    # re-judged a drift-caused pause against the DAY figure - which is
+    # small by definition in that case - cleared it, and the next cycle
+    # paused on the same drift again. That loop is what the owner saw as
+    # the discrepancy "showing up frequently".
+    ("cost_reconciliation_events", "drift_cents", "TEXT"),
 ]
 
 

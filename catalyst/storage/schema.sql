@@ -331,6 +331,11 @@ CREATE TABLE IF NOT EXISTS cost_reconciliation_events (
     -- trading is the last thing on this dashboard that should be
     -- unexplained (house rule 3).
     pause_reason         TEXT,
+    -- The ACCUMULATED drift behind a pause, as distinct from the day's
+    -- own discrepancy. A drift-caused pause has a SMALL day figure by
+    -- definition, so re-judging it against that figure always cleared
+    -- it and the next cycle paused again on the same drift.
+    drift_cents          TEXT,
     acknowledged_by      TEXT,
     acknowledged_at      TEXT,
     reconciled_at        TEXT NOT NULL

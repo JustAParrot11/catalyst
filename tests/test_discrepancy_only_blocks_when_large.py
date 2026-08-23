@@ -67,7 +67,7 @@ class TestSmallDriftDoesNotHaltTheBot:
         today = date(2026, 8, 13)
         for i in range(30):
             day = today - timedelta(days=i + 1)
-            _event(conn, day, local=1000, api=1001)   # 1c a day
+            _event(conn, day, local=1001, api=1000)   # 1c a day, bot HIGH
         drift = tracker._trailing_signed_drift(conn, today)
         assert drift.copy_abs() >= 5, "the fixture should exceed the old 5c"
         assert not tracker.drift_is_material(drift, conn, today), (
@@ -81,7 +81,7 @@ class TestSmallDriftDoesNotHaltTheBot:
         today = date(2026, 8, 13)
         for i in range(30):
             day = today - timedelta(days=i + 1)
-            _event(conn, day, local=500, api=1000)    # local is HALF
+            _event(conn, day, local=1000, api=500)    # bot claims DOUBLE
         drift = tracker._trailing_signed_drift(conn, today)
         assert tracker.drift_is_material(drift, conn, today), (
             f"{drift}c of drift on a month of ~$300 is a 50% miss and "

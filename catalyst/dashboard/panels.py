@@ -1190,24 +1190,21 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
             "your whole ORGANISATION that day - which includes anything "
             "else the same account was used for, by you or by any other "
             "tool.</p>"
-            "<p>SO A GAP IS NOT AUTOMATICALLY AN ERROR. If local reads "
-            "$0.00 and the Cost API reads a few dollars on a day this bot "
-            "was not running, that is your own use of the API, not drift in "
-            "the bot's ledger. Days before the bot's first recorded spend "
-            "are no longer compared at all, because there is nothing of the "
-            "bot's to compare. Acknowledging one of these changes no "
-            "figure anywhere: it records that a human looked, and lets "
-            "scheduled spending resume. It cannot break anything.</p>"
-            "<p>WHAT WOULD BE A REAL PROBLEM is local and Cost API "
-            "disagreeing on a day the bot DID run, because then the bot's "
-            "own arithmetic has drifted from the real bill - and that "
-            "number is what decides whether this project is viable.</p>"
-            "<p>WHAT TO DO: read the two figures, decide whether the gap is "
-            "explainable, and type your name to acknowledge it. That records "
-            "who accepted it and restarts spending on the next cycle. It is NOT a daily "
-            "chore - it appears only when the figures disagree on a day the "
-            "bot ran. If that keeps happening, the cost tracking is wrong "
-            "and it should be reported rather than clicked through.</p>"
+            "<p>ONLY ONE DIRECTION CAN BE THE BOT'S FAULT. <b>Cost API "
+            "higher than Local</b> just means the account was used for "
+            "something else - your own Claude use, not drift in the bot's "
+            "ledger - and no longer pauses anything. It used to, and a "
+            "month of your own use halted the bot on days its own figures "
+            "agreed to the cent.</p>"
+            "<p>WHAT PAUSED IT is the reverse: <b>Local higher than Cost "
+            "API</b>. The bot cannot outspend the whole organisation, so "
+            "if it says it did, its arithmetic is wrong.</p>"
+            "<p>WHAT TO DO: read the two figures and type your name. That "
+            "records who accepted it and restarts spending next cycle; it "
+            "changes no figure and cannot break anything. It is not a "
+            "daily chore and should now be RARE - if it keeps appearing, "
+            "the cost tracking is wrong and should be reported rather "
+            "than clicked through.</p>"
         ))
         for i, r in enumerate(c.unacked_q.rows):
             zero_note = ""
@@ -3313,7 +3310,24 @@ def state_line(db: Db, p: str = "state") -> str:
     except Exception:  # noqa: BLE001
         pass
 
-    # The one thing that should interrupt a glance.
+    # BOTH THINGS THAT SHOULD INTERRUPT A GLANCE, because there are two
+    # and only one of them used to appear here.
+    #
+    # governor.authorize() refuses ALL new spend on either an
+    # unacknowledged reconciliation OR an unpriced cost row, and they
+    # are equally silent from the outside: the bot keeps running, keeps
+    # protecting open positions, and simply stops researching anything.
+    # The unpriced-row case was visible only on the Cost page, so a bot
+    # halted on a Tuesday looked identical to a quiet one until somebody
+    # went looking.
+    #
+    # An unpriced row is not exotic. It is what happens when Anthropic
+    # adds a billing field the allowlist does not know - which has
+    # happened twice in this project's short life (output_tokens_details
+    # and inference_geo) - and the governor fails closed by design,
+    # because pricing an unknown field at zero is the TRAPS.md failure
+    # this whole subsystem exists to prevent. Failing closed is right.
+    # Failing closed QUIETLY, while the owner is away for a week, is not.
     try:
         blocked = db.q("SELECT COUNT(*) n FROM cost_reconciliation_events "
                        "WHERE action_taken = 'scheduled_paused' "
@@ -3321,6 +3335,16 @@ def state_line(db: Db, p: str = "state") -> str:
         if blocked.rows and int(blocked.rows[0]["n"]):
             bits.append('<b class="neg">spending is PAUSED pending a '
                         "reconciliation you need to acknowledge</b>")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        unpriced = db.q("SELECT COUNT(*) n FROM cost_events "
+                        "WHERE priced_cents IS NULL")
+        if unpriced.rows and int(unpriced.rows[0]["n"]):
+            n = int(unpriced.rows[0]["n"])
+            bits.append(
+                f'<b class="neg">spending is PAUSED: {n} cost row(s) could '
+                "not be priced, so the bot has stopped researching</b>")
     except Exception:  # noqa: BLE001
         pass
 
@@ -6563,3 +6587,139 @@ def capital_panel(db: Db, p: str = "cap") -> str:
         "which has no runtime writer: changing one takes a human-authored "
         "pull request."))
     return section(f"{p}-section", "Capital in use", "".join(out))
+
+
+CONVICTION_WINDOW_DAYS = 7
+
+
+def conviction_panel(db: Db, p: str = "conv",
+                     days: int = CONVICTION_WINDOW_DAYS) -> str:
+    """Why it did not trade, as one number instead of a scroll.
+
+    THE GAP THIS FILLS. Every ingredient was already on the dashboard -
+    each decision has a conviction gauge with its floor marked, and the
+    funnel lists every drop reason. What was missing is the AGGREGATE,
+    and that is the only form the question actually gets asked in: the
+    bot runs unattended for a week, places no orders, and the owner
+    needs to know whether the model is scoring 0.58 against a 0.60 bar
+    or 0.30 against it. Those are the same funnel and completely
+    different problems - one is a threshold a few points too high, the
+    other is a strategy that has nothing to say.
+
+    Reading it one candidate at a time cannot answer that, and nobody
+    scrolls forty gauges to average them by eye.
+
+    IT ALSO NAMES THE BAR EACH CANDIDATE ACTUALLY FACED. A priced-in
+    candidate is held to conviction_floor + PRICED_IN_CONVICTION_PREMIUM
+    (0.60 + 0.15 = 0.75), and on the owner's last live day 26 of 30
+    views were priced in. Averaging against the base floor would
+    therefore flatter the model by fifteen points on most of the sample
+    and make a premium that is too high look like a model that is too
+    timid.
+    """
+    from catalyst.risk.adaptive_params import DEFAULT_PARAMS
+    from catalyst.risk.evaluate import PRICED_IN_CONVICTION_PREMIUM
+
+    q = db.q(
+        "SELECT v.conviction AS conviction, v.priced_in AS priced_in, "
+        "       v.direction AS direction, d.skip_reasons AS skip_reasons "
+        "FROM research_views v "
+        "JOIN risk_decisions d ON d.candidate_id = v.candidate_id "
+        "WHERE d.decided_at >= datetime('now', ?) ",
+        (f"-{int(days)} days",))
+
+    out = [f'<h3 id="{p}-h">Why it did not trade</h3>']
+
+    if q.error or not q.rows:
+        out.append(note(
+            f'<b id="{p}-none">Nothing researched in the last {days} days.</b> '
+            "This panel answers 'the model looked and said no - how close "
+            "was it?'. With no research in the window the funnel above is "
+            "the right place to look instead: the candidates are stopping "
+            "before they reach the model, not at it."))
+        out.append(empty_block(f"{p}-q", q,
+                               meaning=f"no research views decided in {days} days"))
+        return section(f"{p}-section", "Conviction against the bar", "".join(out))
+
+    floor = Decimal(str(DEFAULT_PARAMS["conviction_floor"]))
+    raised = floor + PRICED_IN_CONVICTION_PREMIUM
+
+    rows, cleared, priced_in_n = [], 0, 0
+    gaps = []
+    for r in q.rows:
+        try:
+            c = Decimal(str(r["conviction"]))
+        except (ArithmeticError, TypeError, ValueError):
+            continue
+        pin = bool(r["priced_in"])
+        bar = raised if pin else floor
+        priced_in_n += 1 if pin else 0
+        if r["direction"] == "no_trade":
+            continue          # not a scored call; the model declined outright
+        rows.append((c, bar, pin))
+        gaps.append(c - bar)
+        cleared += 1 if c >= bar else 0
+
+    if not rows:
+        out.append(note(
+            f'<b id="{p}-allno">Every one of the {len(q.rows)} views in the '
+            f"last {days} days was <code>no_trade</code>.</b> The model is "
+            "not scoring these setups low - it is declining to score them at "
+            "all, which is a judgement about the candidates rather than "
+            "about the conviction floor. Lowering the floor would change "
+            "nothing here."))
+        return section(f"{p}-section", "Conviction against the bar", "".join(out))
+
+    ordered = sorted(c for c, _, _ in rows)
+    med = ordered[len(ordered) // 2]
+    best = max(c for c, _, _ in rows)
+    worst_gap = max(gaps)          # the closest any candidate came
+
+    out.append(
+        f'<p id="{p}-summary">Over the last <b>{days} days</b> the model '
+        f"returned a direction on <b>{len(rows)}</b> candidate(s). Median "
+        f"conviction <b>{med:.2f}</b>, best <b>{best:.2f}</b>. "
+        f"<b>{cleared}</b> cleared the bar they faced.</p>")
+
+    out.append(table(f"{p}-bars", ["Bar", "Applies to", "Value", "Cleared it"], [
+        ["conviction floor", "candidates NOT judged priced in",
+         f"{floor:.2f}", str(sum(1 for c, b, pin in rows if not pin and c >= b))],
+        ["floor + priced-in premium", f"{priced_in_n} judged priced in",
+         f"{raised:.2f}", str(sum(1 for c, b, pin in rows if pin and c >= b))],
+    ], numeric_cols={2, 3}))
+
+    # THE SENTENCE THAT ANSWERS THE QUESTION. A gap of two points and a
+    # gap of thirty need opposite responses, and only one of them is
+    # about the threshold.
+    if cleared:
+        verdict = (f"It is trading: {cleared} candidate(s) cleared their bar "
+                   "in this window.")
+    elif worst_gap >= Decimal("-0.05"):
+        verdict = (f"<b>The closest candidate missed by "
+                   f"{abs(worst_gap):.2f}.</b> That is a threshold question: "
+                   "the model and the bar disagree by a few points, so the "
+                   "refusal tracker's scored outcomes are the thing to read "
+                   "before moving anything.")
+    elif worst_gap >= Decimal("-0.20"):
+        verdict = (f"<b>The closest candidate missed by "
+                   f"{abs(worst_gap):.2f}.</b> The model is consistently "
+                   "below the bar rather than near it. Worth checking how "
+                   "many of these were held to the raised priced-in bar "
+                   f"({priced_in_n} of {len(q.rows)}) before concluding the "
+                   "floor itself is wrong.")
+    else:
+        verdict = (f"<b>The closest candidate missed by "
+                   f"{abs(worst_gap):.2f}.</b> That is not a threshold "
+                   "problem. The model is finding little worth trading in "
+                   "these candidates, and moving the floor would buy trades "
+                   "the model does not believe in.")
+    out.append(note(f'<span id="{p}-verdict">{verdict}</span>'))
+
+    out.append(prov(
+        f"Conviction from research_views, joined to risk_decisions for the "
+        f"{days}-day window. The bar is conviction_floor "
+        f"({floor:.2f}) plus PRICED_IN_CONVICTION_PREMIUM "
+        f"({PRICED_IN_CONVICTION_PREMIUM:.2f}) where the model judged the "
+        "move already priced in. no_trade views are counted but not scored "
+        "- they carry no directional call to compare against a bar."))
+    return section(f"{p}-section", "Conviction against the bar", "".join(out))

@@ -77,7 +77,16 @@ class TestAnExistingDatabaseIsUpgraded:
         conn.execute("CREATE TABLE cost_reconciliation_events (id TEXT)")
         conn.commit()
         added = add_missing_columns(conn)
-        assert added == ["cost_reconciliation_events.pause_reason"]
+        # EVERY column it added must be reported, not a hardcoded one.
+        # A fixed list here rots the next time a column is added, and
+        # the failure looks like a migration bug rather than a stale
+        # test - which is exactly the confusion this file exists to
+        # prevent (house rule 7: assert the rule, not an enumeration).
+        expected = [f"{t}.{c}" for t, c, _ in ADDED_COLUMNS
+                    if t == "cost_reconciliation_events"]
+        assert added == expected, (
+            "a column was added to the database without being reported")
+        assert expected, "this test asserts nothing if the list is empty"
         conn.close()
 
     def test_a_table_that_does_not_exist_yet_is_left_alone(self, tmp_path):
