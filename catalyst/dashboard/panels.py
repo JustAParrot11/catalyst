@@ -1256,6 +1256,7 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
         for i, r in enumerate(c.reconciliation_q.rows)
     ]
     out.append(_billed_breakdown(c.reconciliation_q, p))
+    out.append(_spend_by_key(db, p))
 
     out.append("<h3>Reconciliation history (local ledger vs Cost API, one closed day each)</h3>")
     if recon_rows:
@@ -1292,6 +1293,173 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
 
     out.append(_token_price_editor(db, p, c.as_of))
     return section(f"{p}-section", "Cost, with provenance on every number", "".join(out))
+
+
+#: How many corrected days the per-key table looks back over. Long
+#: enough to see a pattern, short enough that the table stays readable.
+SPEND_BY_KEY_DAYS = 30
+
+
+def _spend_by_key(db: Db, p: str) -> str:
+    """WHOSE spend the bill was, key by key.
+
+    OWNER-REPORTED 2026-08-23: "on 17th dashboard says i spent $3.64 but
+    admin console says $2.95".
+
+    Both figures are real and neither is a bug in the arithmetic: on
+    2026-08-17 the Cost API and our own pricing of Anthropic's token
+    counts agreed to four decimal places at 364.2052c. What differs is
+    WHOSE money is in the total. The Cost API and the usage report both
+    bill the whole ORGANISATION, and this account also signs in to
+    Claude Code - so a console view filtered to one key, or to one
+    workspace, is a smaller and equally true number.
+
+    Until this table existed, that was an argument. The usage report is
+    already fetched grouped by api_key_id, and the nightly correction
+    stores those groups verbatim beside the day it corrected, so the
+    answer has been sitting in the database the whole time with nothing
+    rendering it.
+
+    Read from that stored payload, never re-fetched: this panel cannot
+    spend money and cannot disagree with the correction above it.
+    """
+    from collections import OrderedDict
+
+    by_key: "OrderedDict[str, Decimal]" = OrderedDict()
+    per_day: list = []
+    unreadable: list = []
+    grand = Decimal("0")
+
+    def _place(day, key, cents, day_keys):
+        nonlocal grand
+        day_keys[key] = day_keys.get(key, Decimal("0")) + cents
+        by_key[key] = by_key.get(key, Decimal("0")) + cents
+        grand += cents
+
+    # THE SIDE TABLE FIRST. usage_by_key is written on every backfill
+    # pass, including days that needed no correction, so it covers days
+    # the adjustment payload never existed for.
+    days_q = db.q(
+        "SELECT DISTINCT target_date FROM usage_by_key "
+        "ORDER BY target_date DESC LIMIT ?", (SPEND_BY_KEY_DAYS,))
+    seen_days: set = set()
+    for d in days_q.rows:
+        day = str(d["target_date"])
+        rows_q = db.q(
+            "SELECT api_key_id, cents FROM usage_by_key WHERE target_date = ?",
+            (day,))
+        day_keys: "OrderedDict[str, Decimal]" = OrderedDict()
+        day_total = Decimal("0")
+        for r in rows_q.rows:
+            cents = _dec_or_none(r["cents"])
+            if cents is None:
+                unreadable.append(f"{day}:{r['api_key_id']!r}")
+                continue
+            _place(day, str(r["api_key_id"] or "(no key id)"), cents, day_keys)
+            day_total += cents
+        if day_keys:
+            seen_days.add(day)
+            # What the bot's OWN ledger holds for that day, read live and
+            # excluding the correction itself - the closest thing on this
+            # page to "what the bot alone spent".
+            own = db.q(
+                "SELECT COALESCE(SUM(CAST(priced_cents AS REAL)), 0) FROM "
+                "cost_events WHERE date(priced_at) = ? AND component != ? "
+                "AND priced_cents IS NOT NULL", (day, "backfill_adjustment"))
+            recorded = _dec_or_none(own.scalar(None))
+            per_day.append((day, day_total, recorded, day_keys))
+
+    # THEN THE STORED CORRECTION PAYLOADS, for days already on the owner's
+    # machine before the side table existed. Same evidence, older home.
+    q = db.q(
+        "SELECT priced_at, raw_usage_json FROM cost_events "
+        "WHERE component = ? ORDER BY priced_at DESC LIMIT ?",
+        ("backfill_adjustment", SPEND_BY_KEY_DAYS))
+    for r in q.rows:
+        payload = jload(r["raw_usage_json"], None)
+        if not isinstance(payload, dict) or not isinstance(
+                payload.get("groups"), list):
+            unreadable.append(str(r["priced_at"])[:10])
+            continue
+        day = str(payload.get("target_date") or r["priced_at"])[:10]
+        if day in seen_days:
+            continue           # the side table already has it, verbatim
+        recorded = _dec_or_none(payload.get("ledger_cents_before"))
+        day_total = Decimal("0")
+        day_keys = OrderedDict()
+        for g in payload["groups"]:
+            if not isinstance(g, dict):
+                unreadable.append(f"{day}:(not an object)")
+                continue
+            cents = _dec_or_none(g.get("cents"))
+            if cents is None:
+                # House rule 3: shown, never silently zeroed.
+                unreadable.append(f"{day}:{g.get('api_key_id')!r}")
+                continue
+            _place(day, str(g.get("api_key_id") or "(no key id)"), cents,
+                   day_keys)
+            day_total += cents
+        if day_keys:
+            per_day.append((day, day_total, recorded, day_keys))
+    if not by_key or grand <= 0:
+        return ""
+    per_day.sort(key=lambda t: t[0], reverse=True)
+
+    ordered = sorted(by_key.items(), key=lambda kv: kv[1], reverse=True)
+    rows = [[esc(key), dollars(amount), f"{(amount / grand * 100):.1f}%",
+             meter(f"{p}-key-{i}", float(amount), float(grand))]
+            for i, (key, amount) in enumerate(ordered)]
+    out = [f"<h3>Which API key the billed money belongs to, across "
+           f"{len(per_day)} corrected day(s)</h3>",
+           table(f"{p}-spend-by-key",
+                 ["API key, as Anthropic identifies it", "billed", "share", ""],
+                 rows, numeric_cols={1, 2})]
+
+    # THE DAY-BY-DAY SPLIT, because the owner's question was about ONE
+    # day. "What did the bot itself record" beside "what the whole
+    # organisation was billed" is the comparison that settles whether a
+    # console figure smaller than this dashboard's is a disagreement or
+    # a different question being answered.
+    day_rows = []
+    for day, total, recorded, day_keys in per_day:
+        biggest = max(day_keys.items(), key=lambda kv: kv[1])
+        day_rows.append([
+            esc(day), dollars(total),
+            (dollars(recorded) if recorded is not None else DASH),
+            esc(str(len(day_keys))),
+            f"{esc(biggest[0])} &mdash; {dollars(biggest[1])}"])
+    out.append(table(
+        f"{p}-spend-by-key-days",
+        ["closed day", "billed to the whole account",
+         "of which this bot recorded itself", "keys billed that day",
+         "largest single key"],
+        day_rows, numeric_cols={1, 2, 3}))
+    out.append(prov(
+        "Per-key figures come from Anthropic's usage report, grouped by "
+        "api_key_id, stored verbatim when the nightly check corrected "
+        "each day - not re-fetched here. THE WHOLE ORGANISATION IS IN "
+        "THIS TABLE, not just this bot: the Cost API cannot be filtered "
+        "to one key, so a figure read from a console view that IS "
+        "filtered will legitimately be smaller than the total above. "
+        "The third column is what this bot's own ledger had recorded "
+        "before the correction, which is the closest thing here to "
+        "\"what the bot alone spent\"."))
+    if unreadable:
+        out.append(alarm(
+            f'<b id="{p}-key-unreadable">{len(unreadable)} usage group(s) '
+            "could not be read and are NOT in the totals above:</b> "
+            + esc(", ".join(str(u) for u in unreadable[:10]))))
+    return "".join(out)
+
+
+def _dec_or_none(value):
+    """A Decimal, or None if the stored text is not one. Never raises and
+    never returns zero for an unreadable value - a zero here would quietly
+    remove somebody's money from the table."""
+    try:
+        return Decimal(str(value))
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _billed_breakdown(recon_q, p: str) -> str:

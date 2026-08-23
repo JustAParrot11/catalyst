@@ -155,6 +155,63 @@ class TestItRebuildsTheBillFromAnthropicsOwnCounts:
             "apikey_01DXXtR5LfFyDuhhghpDQ1h9", "apikey_other"}
 
 
+class TestItKeepsWhoseSpendItWas:
+    """OWNER-REPORTED 2026-08-23: "on 17th dashboard says i spent $3.64
+    but admin console says $2.95".
+
+    Both were right. The Cost API bills the whole ORGANISATION and
+    cannot be filtered to one key; a console view can be. The usage
+    report is already fetched grouped by api_key_id, so the split was
+    being priced, summed and then discarded. These hold that it is kept.
+    """
+
+    def test_the_per_key_split_is_kept(self, db):
+        second = dict(REAL_GROUP, api_key_id="apikey_other",
+                      output_tokens=1000)
+        backfill_day(db, DAY, fetch=fetch([REAL_GROUP, second]), now=NOW)
+        rows = db.execute(
+            "SELECT api_key_id, model, cents FROM usage_by_key "
+            "WHERE target_date = ? ORDER BY api_key_id",
+            (DAY.isoformat(),)).fetchall()
+        assert [r[0] for r in rows] == [
+            "apikey_01DXXtR5LfFyDuhhghpDQ1h9", "apikey_other"]
+        assert sum(Decimal(r[2]) for r in rows) == (
+            REAL_BILLED + REAL_BILLED - Decimal("2.328") + Decimal("1"))
+
+    def test_a_day_needing_no_correction_still_records_who_spent_it(self, db):
+        """The evidence must exist for every closed day, not only the
+        ones that disagreed - otherwise the days that look fine are
+        exactly the ones nobody can check."""
+        seed_local(db, DAY, str(REAL_BILLED))
+        r = backfill_day(db, DAY, fetch=fetch([REAL_GROUP]), now=NOW)
+        assert not r.applied, "this day needed no adjustment"
+        assert db.execute(
+            "SELECT COUNT(*) FROM usage_by_key WHERE target_date = ?",
+            (DAY.isoformat(),)).fetchone()[0] == 1
+
+    def test_re_running_restates_rather_than_doubles(self, db):
+        for _ in range(3):
+            backfill_day(db, DAY, fetch=fetch([REAL_GROUP]), now=NOW)
+        rows = db.execute(
+            "SELECT cents FROM usage_by_key WHERE target_date = ?",
+            (DAY.isoformat(),)).fetchall()
+        assert len(rows) == 1
+        assert Decimal(rows[0][0]) == REAL_BILLED
+
+    def test_a_database_without_the_table_still_gets_its_correction(
+            self, tmp_path):
+        """The evidence is worth having; it is not worth losing the day's
+        correction over, which is the half that touches money."""
+        conn = sqlite3.connect(tmp_path / "old.db")
+        conn.executescript(SCHEMA.read_text())
+        conn.execute("DROP TABLE usage_by_key")
+        conn.commit()
+        r = backfill_day(conn, DAY, fetch=fetch([REAL_GROUP]), now=NOW)
+        assert r.applied
+        assert ledger_total(conn, DAY) == REAL_BILLED
+        conn.close()
+
+
 class TestItCorrectsRatherThanRewrites:
     def test_nothing_already_recorded_is_altered(self, db):
         seed_local(db, DAY, "20")
