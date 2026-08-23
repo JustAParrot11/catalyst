@@ -69,7 +69,12 @@ class TestAdapter:
         conn.executescript(open("catalyst/storage/schema.sql").read())
         r = reconcile_day(date(2026, 8, 4), conn, lambda d: page)
         assert str(r.cost_api_total_cents) == "525.64452"
-        assert r.action_taken != "none"      # empty local ledger disagrees
+        # An empty local ledger against real ORGANISATION spend is not a
+        # fault and no longer pauses: it is a day the bot did not run
+        # while the account was used for something else. The figure is
+        # still recorded in full, which is what this test is about.
+        assert r.action_taken == "none"
+        assert r.discrepancy_cents == Decimal("525.64452")
         conn.close()
 
     def test_explicit_limit_and_no_key_leak_in_url(self):

@@ -583,7 +583,8 @@ class TestReconciliation:
         reason = tmp_db.execute(
             "SELECT pause_reason FROM cost_reconciliation_events"
         ).fetchone()[0]
-        assert reason and "out by" in reason, reason
+        assert reason, "a pause with no recorded reason"
+        assert "arithmetic is wrong" in reason, reason
         assert "1000" in reason and "1" in reason, (
             "the reason does not carry the two numbers that caused it")
 
@@ -646,10 +647,16 @@ class TestReconciliation:
 
     def test_discrepancy_pauses_both_kinds(self, tmp_db):
         """Audit F11, made explicit and deliberate: a mispriced table
-        poisons both ledgers, so the pause is global."""
-        self.seed_local(tmp_db, "100")
+        poisons both ledgers, so the pause is global.
+
+        The bot priced MORE than the whole organisation was billed,
+        which is the direction that indicates its own arithmetic is
+        wrong. The reverse (the account billed more than this bot spent)
+        is the normal state of a shared account and no longer pauses -
+        see test_shared_account_reconciliation.py."""
+        self.seed_local(tmp_db, "200")
         reconcile_day(YESTERDAY, tmp_db,
-                      lambda d: clean_page([{"amount": "200"}]))
+                      lambda d: clean_page([{"amount": "100"}]))
         for kind in ("scheduled", "manual"):
             d = authorize(
                 CostEstimate(estimated_cents=Decimal("1"), basis="t",

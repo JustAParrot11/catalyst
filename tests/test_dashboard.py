@@ -2329,7 +2329,7 @@ def test_the_paused_spend_message_says_what_to_do(seeded):
     html_out = panels.cost_panel(Db(seeded), p="cost")
     assert "WHAT THE TWO NUMBERS ARE" in html_out and "WHAT TO DO" in html_out
     assert "not a daily chore" in html_out.lower()
-    assert "type your name to acknowledge" in html_out
+    assert "type your name" in html_out
 
 
 class TestReconciliationExplainsItself:
@@ -2361,9 +2361,14 @@ class TestReconciliationExplainsItself:
         assert "cannot break anything" in html_out
 
     def test_it_distinguishes_a_real_problem_from_your_own_api_use(self, seeded):
+        """Owner-reported 2026-08-23: paused with 'local $0.08 vs Cost
+        API $0.08, discrepancy $0.00' on screen. The page has to say
+        which DIRECTION is the bot's fault, because only one of them
+        can be - the Cost API bills the whole account."""
         html_out = panels.cost_panel(Db(seeded), p="cost")
-        assert "not drift in" in html_out
-        assert "on a day the bot DID run" in html_out
+        assert "not drift in the bot's" in html_out
+        assert "ONLY ONE DIRECTION" in html_out
+        assert "cannot outspend the whole organisation" in html_out
 
     def test_the_price_box_says_the_real_bill_still_wins(self, seeded):
         """Owner-asked: "Ensure that if i do manually update cost itll

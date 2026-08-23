@@ -458,22 +458,31 @@ class TestItIsActuallyWiredIntoTheReconciliation:
     def test_a_paused_day_still_learns(self, db):
         """A large discrepancy is exactly when a rate is wrong. Fixing it
         is what stops the same pause recurring tomorrow - the pause still
-        stands for the human either way."""
-        seed_day(db, "100")
-        result = self._reconcile(db, "400")
+        stands for the human either way.
+
+        The pausing direction is the bot pricing MORE than the whole
+        account was billed; the reverse is the normal state of a shared
+        account and no longer pauses."""
+        seed_day(db, "400")
+        result = self._reconcile(db, "100")
         assert result.action_taken == "scheduled_paused"
         obs = latest_observation(db)
         assert obs is not None, "a paused day skipped the learner"
-        assert obs["applied"] is True
+        # An OBSERVATION is what proves the learner ran. Whether it
+        # APPLIED depends on direction: the pausing direction is the bot
+        # pricing above the bill, which is a downward correction and
+        # needs three agreeing readings before it moves anything.
+        assert obs["target_date"] == YESTERDAY.isoformat()
+        assert Decimal(str(obs["ratio"])) < 1
 
     def test_learning_never_changes_the_reconciliation_verdict(self, db):
         """The ledger check is the thing that guards the money. Learning
         a rate rides alongside it and must not soften it."""
-        seed_day(db, "100")
-        result = self._reconcile(db, "400")
+        seed_day(db, "400")
+        result = self._reconcile(db, "100")
         assert result.action_taken == "scheduled_paused"
-        assert result.local_total_cents == Decimal("100")
-        assert result.cost_api_total_cents == Decimal("400")
+        assert result.local_total_cents == Decimal("400")
+        assert result.cost_api_total_cents == Decimal("100")
         assert result.discrepancy_cents == Decimal("300")
 
 

@@ -524,13 +524,14 @@ def reconcile_day(
             "INSERT INTO cost_reconciliation_events "
             "(id, target_date, kind, component, local_total_cents, cost_api_total_cents, "
             " discrepancy_cents, threshold_cents, api_raw_response, api_record_count, "
-            " action_taken, pause_reason, acknowledged_by, acknowledged_at, reconciled_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " action_taken, pause_reason, drift_cents, acknowledged_by, "
+            " acknowledged_at, reconciled_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (str(uuid.uuid4()), target_date.isoformat(),
              "all", json.dumps({k: str(v) for k, v in by_kind.items()}),
              str(local_total), str(api_total), str(discrepancy), str(threshold),
              json.dumps(page.raw_response, sort_keys=True), len(page.records),
-             action, reason,
+             action, reason, str(drift),
              "auto" if auto_ack else None,
              datetime.now(timezone.utc).isoformat() if auto_ack else None,
              datetime.now(timezone.utc).isoformat()),
@@ -553,7 +554,18 @@ def reconcile_day(
 
     api_total = sum((Decimal(str(rec["amount"])) for rec in page.records), Decimal("0"))
     signed = local_total - api_total
+    # ONE-SIDED, for the reason spelled out on _trailing_signed_drift:
+    # the Cost API bills the whole ORGANISATION, and this account also
+    # runs Claude Code. `api > local` is the normal state of a shared
+    # account and is not evidence about this bot; `local > api` says the
+    # bot claims to have outspent the entire organisation, which cannot
+    # happen and means its arithmetic is wrong.
+    #
+    # The absolute value is still RECORDED, so the row and the dashboard
+    # keep showing the true size of the gap either way. Only what
+    # PAUSES trading is narrowed.
     discrepancy = signed.copy_abs()
+    pauseable = max(signed, Decimal("0"))
     # THE SAME TWO-PART TEST THE DRIFT PATH USES, and for the identical
     # reason. OWNER-REPORTED 2026-08-20: "on 17th we spent $2.95 yet
     # dashboard says $3.36 ... its yet again paused the bot".
@@ -575,7 +587,10 @@ def reconcile_day(
     threshold = max(RECONCILE_PAUSE_FLOOR_CENTS,
                     RECONCILE_REL_THRESHOLD * max(local_total, api_total))
 
-    drift = signed + _trailing_signed_drift(conn, target_date)
+    # TODAY'S CONTRIBUTION IS ONE-SIDED TOO. The trailing sum already
+    # is; leaving today raw meant a single heavy day of the owner's
+    # OWN Claude Code use still halted the bot on its own.
+    drift = pauseable + _trailing_signed_drift(conn, target_date)
     suspicious_empty = (not page.records) and local_total > 0
     # WHICH TEST FIRED, in the row itself. Owner-reported 2026-08-20:
     # seven consecutive "scheduled_paused" rows, three of them with a
@@ -588,10 +603,11 @@ def reconcile_day(
     # window moves, so a reason computed later is a reason for a
     # different day.
     reason = None
-    if discrepancy > threshold:
-        reason = (f"the day itself was out by {discrepancy}c, over the "
-                  f"{threshold}c allowed for a day of this size "
-                  f"(local {local_total}c vs billed {api_total}c)")
+    if pauseable > threshold:
+        reason = (f"the bot priced {local_total}c of its own spend on a day "
+                  f"the whole organisation was billed only {api_total}c - it "
+                  f"cannot have outspent the account by {pauseable}c, so its "
+                  "arithmetic is wrong")
     elif suspicious_empty:
         reason = (f"the Cost API returned no records at all while the local "
                   f"ledger recorded {local_total}c - an empty answer is not "
@@ -636,15 +652,49 @@ def reconcile_day(
 
 
 def _trailing_signed_drift(conn: sqlite3.Connection, before: date) -> Decimal:
-    """Sum of signed (local - api) over the trailing DRIFT_WINDOW_DAYS of
-    already-reconciled days strictly before `before`."""
+    """Drift over the trailing window that could indicate a BOT fault.
+
+    ONE-SIDED, and this is the whole correctness of the check.
+
+    OWNER-REPORTED 2026-08-23, with the numbers on screen: "local $0.08
+    vs Cost API $0.08, discrepancy $0.00" - and spending PAUSED anyway.
+    The day agreed to the cent; the accumulated drift is what halted it.
+
+    The Cost API reports what Anthropic billed the whole ORGANISATION,
+    and this owner runs Claude Code on the same account. So on any day
+    they do their own work, `api` exceeds `local` by a lot - not because
+    the bot's ledger drifted, but because the bot is one of several
+    things spending on that account. Summing the signed difference and
+    taking its absolute value counted every hour of the owner's own use
+    as evidence against the bot, which is why the pause "keeps showing
+    up" and stops trading.
+
+    Only ONE direction can indicate a fault here:
+
+      local > api   the bot claims to have spent MORE than the entire
+                    organisation was billed. That is impossible, so it
+                    is real evidence its arithmetic is wrong. COUNTED.
+
+      api > local   the organisation spent more than the bot did. On a
+                    shared account that is the normal state of affairs
+                    and says nothing whatever about the bot. IGNORED.
+
+    The other direction - the bot UNDER-pricing - is genuinely invisible
+    to this comparison and always was, because a shared account cannot
+    tell "the bot under-priced" from "someone else used the API". That
+    case is now caught properly by cost/measured_rates.py, which
+    compares the bot's OWN priced total against the bill and raises the
+    rate table when the bill is higher. The two checks cover the two
+    directions between them; this one stops pretending to cover both.
+    """
     rows = conn.execute(
         "SELECT local_total_cents, cost_api_total_cents FROM cost_reconciliation_events "
         "WHERE target_date < ? AND action_taken != 'check_failed' "
         "ORDER BY target_date DESC LIMIT ?",
         (before.isoformat(), DRIFT_WINDOW_DAYS),
     ).fetchall()
-    return sum((Decimal(l) - Decimal(a) for l, a in rows), Decimal("0"))
+    return sum((max(Decimal(l) - Decimal(a), Decimal("0")) for l, a in rows),
+               Decimal("0"))
 
 
 def has_unacknowledged_discrepancy(conn: sqlite3.Connection) -> bool:
@@ -692,13 +742,20 @@ def clear_pauses_that_no_longer_qualify(conn: sqlite3.Connection) -> int:
     and on what basis.
     """
     rows = conn.execute(
-        "SELECT id, discrepancy_cents, cost_api_total_cents FROM "
+        "SELECT id, discrepancy_cents, cost_api_total_cents, drift_cents FROM "
         "cost_reconciliation_events WHERE action_taken = 'scheduled_paused' "
         "AND acknowledged_at IS NULL").fetchall()
     cleared = 0
-    for row_id, discrepancy, api_total in rows:
+    for row_id, discrepancy, api_total, drift_cents in rows:
         try:
-            drift = Decimal(str(discrepancy))
+            # THE NUMBER THAT CAUSED THE PAUSE, not the day's own gap.
+            # A drift-caused pause has a small day figure BY DEFINITION,
+            # so judging it on that always cleared it - and the next
+            # cycle paused again on the same drift. Rows written before
+            # this column existed carry NULL and fall back to the old
+            # behaviour, which is the best that can be done for them.
+            drift = Decimal(str(drift_cents if drift_cents is not None
+                                else discrepancy))
             spend = Decimal(str(api_total))
         except (TypeError, ValueError, ArithmeticError):
             continue          # unreadable: leave it blocking, for a human
