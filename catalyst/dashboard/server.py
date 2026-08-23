@@ -200,8 +200,13 @@ def route_funnel(db: Db, params: dict) -> str:
     # question the funnel raises: candidates stopped here - whose
     # candidates? Its own tab would hide it from the person already
     # looking at exactly the right page.
+    # AND WHY IT DID NOT TRADE, directly under the funnel. The funnel
+    # says candidates stopped at the model; this says how far short they
+    # were, which is the difference between a floor two points too high
+    # and a strategy with nothing to say.
     return render_page("Funnel",
                        panels.funnel_panel(db, p="funnel")
+                       + panels.conviction_panel(db, p="conv")
                        + panels.origin_panel(db, p="origin"),
                        "/funnel", db.path, db=db)
 
