@@ -114,6 +114,26 @@ FIELDS: tuple[Field, ...] = (
         default="paper",
     ),
     Field(
+        name="research_model",
+        label="Which Claude model does the research",
+        explanation=(
+            "The model the bot uses to research a candidate and decide "
+            "whether it is worth trading. Sonnet 5 is the default and is "
+            "the one the running costs were measured against. The list "
+            "is fetched from Anthropic when you open this page, so it is "
+            "whatever your key can actually use today rather than a list "
+            "written into the bot months ago. "
+            "Only models the bot knows how to PRICE can be selected: it "
+            "records the cost of every call to the cent, and a model it "
+            "cannot price would record a call it cannot cost and stop "
+            "spending until a human intervened. A newer, cleverer model "
+            "generally costs more per call, which means fewer calls "
+            "inside the same monthly budget - not a free upgrade."
+        ),
+        kind="model_choice",
+        default="claude-sonnet-5",
+    ),
+    Field(
         name="monthly_budget_usd",
         label="Monthly research budget",
         explanation=(
@@ -135,7 +155,7 @@ FIELDS: tuple[Field, ...] = (
     ),
 )
 
-_SETTING_FIELDS = {"monthly_budget_usd", "account_mode"}
+_SETTING_FIELDS = {"monthly_budget_usd", "account_mode", "research_model"}
 _OPTIONAL_FIELDS = {"anthropic_admin_key"}   # blank = feature off, never a refusal
 _SECRET_FIELD_NAMES = tuple(f.name for f in FIELDS
                             if f.name not in _SETTING_FIELDS
@@ -426,7 +446,29 @@ def _shell(title: str, inner: str, prefix: str) -> str:
     )
 
 
-def _field_input(f: Field) -> str:
+def _field_input(f: Field, models=None, models_error: str = "") -> str:
+    if f.kind == "model_choice":
+        # POPULATED FROM ANTHROPIC, not from a list in this file that
+        # would go stale exactly when it matters. If the list cannot be
+        # fetched the current value is still offered and the real reason
+        # is printed beside it - a dropdown quietly showing one entry
+        # looks like an API with one model in it (house rule 3).
+        opts = []
+        for m in (models or []):
+            sel = " selected" if m.id == f.default else ""
+            dis = "" if m.priceable else " disabled"
+            opts.append(f'<option value="{html.escape(m.id)}"{sel}{dis}>'
+                        f"{html.escape(m.label)}</option>")
+        if not opts:
+            opts.append(f'<option value="{html.escape(f.default)}" selected>'
+                        f"{html.escape(f.default)}</option>")
+        note = ""
+        if models_error:
+            note = (f'<p class="explain" id="{f.name}_error">The live list '
+                    f"could not be fetched, so this shows the model in use "
+                    f"now. Reason: {html.escape(models_error)}</p>")
+        return (f'<select id="{f.name}" name="{f.name}">'
+                + "".join(opts) + "</select>" + note)
     if f.kind == "account_mode":
         # Each option is its own row with its own lead-in. Run together
         # as inline text they read as one paragraph, and one of them
@@ -457,9 +499,16 @@ def _field_input(f: Field) -> str:
     )
 
 
-def render_setup_page(prefix: str = "") -> str:
+def render_setup_page(prefix: str = "", models=None,
+                      models_error: str = "") -> str:
     """The form. Every field carries its plain-English explanation; no
-    value is ever pre-filled, not even one already saved."""
+    value is ever pre-filled, not even one already saved.
+
+    `models` is the live Anthropic model list for the dropdown. It is
+    passed IN rather than fetched here so that rendering the form never
+    depends on a network call: the page must still draw when Anthropic
+    is unreachable, with the reason printed beside the field.
+    """
     by_name = {f.name: f for f in FIELDS}
     blocks = []
 
@@ -469,7 +518,7 @@ def render_setup_page(prefix: str = "") -> str:
             f = by_name[name]
             parts.append(f'<label for="{f.name}"><strong>{html.escape(f.label)}</strong></label>')
             parts.append(f'<p class="explain">{html.escape(f.explanation)}</p>')
-            parts.append(_field_input(f))
+            parts.append(_field_input(f, models, models_error))
         parts.append(extra)
         parts.append("</fieldset>")
         return "".join(parts)
@@ -490,6 +539,8 @@ def render_setup_page(prefix: str = "") -> str:
     ))
     blocks.append(block("Practice or real money", ["account_mode"], ""))
     blocks.append(block("Spending limit", ["monthly_budget_usd"], ""))
+    blocks.append(block("Which model does the thinking",
+                        ["research_model"], ""))
 
     inner = (
         "<h1>Welcome - let's get Catalyst running</h1>"

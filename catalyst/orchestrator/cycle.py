@@ -682,6 +682,11 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
               entry_poll_interval_s: float = 1.0,
               account_mode: str = "paper",
               owner_monthly_cap_cents=None,
+              # THE OWNER'S MODEL CHOICE, passed in rather than read
+              # here: the cycle takes no credentials, and the scheduler
+              # already holds them. None keeps the built-in default,
+              # which is what every test and the backtest use.
+              research_model: str | None = None,
               bars_dir: str | None = None) -> CycleReport:
     now = now or datetime.now(timezone.utc)
     # A caller that named a number meant it; otherwise scale the belt to
@@ -926,6 +931,7 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
                            owner_monthly_cap_cents=owner_monthly_cap_cents),
             transport, graph_context=_graph_context(c, conn),
             signals=_signals_for(c, events),
+            **({"model": research_model} if research_model else {}),
             # THE SNAPSHOT WAS ALREADY HERE, three lines up, and went
             # only to the risk engine. The model was being asked what
             # price and volume had done and shown neither.

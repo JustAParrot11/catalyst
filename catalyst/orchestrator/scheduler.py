@@ -438,6 +438,35 @@ def _maybe_refresh_benchmark(state: dict | None, *, force: bool = False) -> None
         _log.exception("The benchmark refresh failed; trading is unaffected.")
 
 
+def _maybe_prune_logs(db_file: str, daily_state: dict) -> None:
+    """Delete log lines past the retention window, once a day.
+
+    Once a day rather than every cycle: it is a whole-table scan, and
+    running it 96 times a day to delete the same nothing is wasted I/O
+    on a small VPS.
+    """
+    import sqlite3 as _sq
+
+    from catalyst.orchestrator.retention import LOG_RETENTION_DAYS, prune_logs
+
+    today = datetime.now(timezone.utc).date().isoformat()
+    if daily_state.get("logs_pruned_on") == today:
+        return
+    conn = _sq.connect(db_file)
+    try:
+        gone = prune_logs(conn)
+    finally:
+        conn.close()
+    daily_state["logs_pruned_on"] = today
+    # SAY IT EVEN WHEN IT IS ZERO. "pruned 0" on a young install and
+    # "pruned 0" because the delete is broken look identical otherwise,
+    # and this is the one job whose failure shows up months later as a
+    # full disk.
+    _log.info("Log retention: deleted %d line(s) older than %d days "
+              "(tracebacks are kept regardless of age).",
+              gone, LOG_RETENTION_DAYS)
+
+
 def _maybe_forecast_budget(db_file: str, state: dict | None) -> None:
     """Say, once a day, when the month's budget is expected to run out.
 
@@ -654,6 +683,23 @@ def _sync_benchmark_baseline(conn, broker, daily_state: dict | None = None,
     # days ago has nothing in that window to index against.
     _maybe_refresh_benchmark(daily_state, force=True)
     return True
+
+
+def _selected_research_model(creds) -> str:
+    """The model the owner picked, or the built-in default.
+
+    Never raises and never returns something unpriceable: a model the
+    cost table cannot price would record an unpriced row and block ALL
+    spend on the next authorize().
+    """
+    try:
+        from catalyst.setup.models import selected_model
+
+        return selected_model(getattr(creds, "settings", None))
+    except Exception:  # noqa: BLE001
+        from catalyst.research.boundary import DEFAULT_RESEARCH_MODEL
+
+        return DEFAULT_RESEARCH_MODEL
 
 
 def _owner_cap_cents(budget_usd):
@@ -1026,6 +1072,13 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
                          build_candidates_all, cluster,
                          account_mode=account_mode,
                          owner_monthly_cap_cents=owner_cap,
+                         # The owner's dropdown choice. selected_model
+                         # falls back to the built-in default whenever
+                         # the setting is absent or names a model this
+                         # bot cannot price - a stored value that has
+                         # since stopped being priceable must not be
+                         # able to halt the governor on start-up.
+                         research_model=_selected_research_model(creds),
                          # ITS OWN DIRECTORY, not the benchmark's. The SPY
                          # cache pins a feed and adjustment basis in its
                          # metadata; writing candidate bars beside it would
@@ -1192,6 +1245,10 @@ def main(argv: list[str] | None = None) -> int:
                     # parameter that moved is the one this cycle uses.
                     ("parameter adaptation", lambda: _maybe_adapt(path, _daily_state)),
                     ("budget forecast", lambda: _maybe_forecast_budget(path, _daily_state)),
+                    # Housekeeping LAST, and in the same
+                    # name-it-then-carry-on wrapper as the rest: nothing
+                    # here may cost a trading cycle.
+                    ("log retention", lambda: _maybe_prune_logs(path, _daily_state)),
             ):
                 try:
                     _job()
