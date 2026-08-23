@@ -50,7 +50,16 @@ from catalyst.research.schema import (
     make_view_from_tool_input,
 )
 
-RESEARCH_MODEL = "claude-sonnet-5"      # judgement calls; cheap enough to
+#: The built-in default. OWNER-SELECTABLE at runtime - setup/models.py
+#: writes a `research_model` setting and the orchestrator passes the
+#: chosen id in. This stays as the fallback for when nothing is stored,
+#: when the stored value names a model this bot cannot price, and for
+#: every test and estimate that does not care which model is in force.
+#:
+#: Kept under the old name too: it is imported in several places and a
+#: rename would be churn for nothing.
+DEFAULT_RESEARCH_MODEL = "claude-sonnet-5"
+RESEARCH_MODEL = DEFAULT_RESEARCH_MODEL   # judgement calls; cheap enough to
                                         # keep the $5/month cap honest
 MAX_EXPLORATION_TURNS = 2               # pause_turn continuations included
 #: Output cap on the EXPLORATION turn - the one that thinks and searches.
