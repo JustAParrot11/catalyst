@@ -542,3 +542,33 @@ CREATE TABLE IF NOT EXISTS company_sic (
     fetched_at TEXT NOT NULL,
     note       TEXT                  -- why it is empty, when it is
 );
+
+-- One closed day's Anthropic usage, split by which API key spent it.
+--
+-- OWNER-REPORTED 2026-08-23: "on 17th dashboard says i spent $3.64 but
+-- admin console says $2.95". Neither figure was wrong arithmetic - the
+-- Cost API and our own pricing of Anthropic's token counts agreed to
+-- four decimal places that day. What differs is SCOPE: the Cost API
+-- bills the whole organisation and cannot be filtered to one key, so a
+-- console view that IS filtered is a smaller and equally true number.
+--
+-- The usage report is already fetched grouped by api_key_id, so the
+-- answer was in the response all along and nothing kept it. This is a
+-- SIDE TABLE on purpose (CLAUDE.md: never add a column to a hot table -
+-- cost_events is written with positional INSERTs in many places).
+--
+-- Written on every backfill pass, including days needing no correction,
+-- so the evidence exists for every closed day rather than only the ones
+-- that disagreed. INSERT OR REPLACE keyed on the day, key and model, so
+-- re-running a day restates it rather than doubling it.
+CREATE TABLE IF NOT EXISTS usage_by_key (
+    target_date TEXT NOT NULL,       -- the closed day, YYYY-MM-DD
+    api_key_id  TEXT NOT NULL,       -- as Anthropic identifies it
+    model       TEXT NOT NULL,
+    cents       TEXT NOT NULL,       -- priced by price(), decimal string
+    recorded_at TEXT NOT NULL,
+    PRIMARY KEY (target_date, api_key_id, model)
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_by_key_day
+    ON usage_by_key (target_date DESC);

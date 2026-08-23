@@ -194,6 +194,44 @@ def local_real_total(conn, target_date: date) -> Decimal:
     return sum((Decimal(r[0]) for r in rows), Decimal("0"))
 
 
+def record_usage_by_key(conn, target_date: date, itemised: list,
+                        now=None) -> int:
+    """Keep WHOSE spend the day's usage was, key by key.
+
+    OWNER-REPORTED 2026-08-23: "on 17th dashboard says i spent $3.64 but
+    admin console says $2.95". Both figures were right. The Cost API and
+    our pricing of Anthropic's own token counts agreed to four decimal
+    places on that day - the difference is that the Cost API bills the
+    WHOLE ORGANISATION and cannot be filtered to one key, while a
+    console view can be. Without the per-key split that is an argument;
+    with it, it is a number.
+
+    The usage report is already requested grouped by api_key_id, so this
+    costs no extra call - the groups were being priced, summed and then
+    thrown away. Written on EVERY pass, including days that need no
+    correction, so the evidence exists for a day that agreed as well as
+    one that did not.
+
+    Never raises: an older database without the table must not cost the
+    day its correction, which is the part that touches money.
+    """
+    now = now or datetime.now(timezone.utc)
+    written = 0
+    try:
+        for model, key_id, cents in itemised:
+            conn.execute(
+                "INSERT OR REPLACE INTO usage_by_key "
+                "(target_date, api_key_id, model, cents, recorded_at) "
+                "VALUES (?,?,?,?,?)",
+                (target_date.isoformat(), key_id, model, str(cents),
+                 now.isoformat()))
+            written += 1
+        conn.commit()
+    except Exception:      # noqa: BLE001 - evidence is not worth a rollback
+        return 0
+    return written
+
+
 def backfill_day(conn, target_date: date, *, fetch=None,
                  now=None) -> BackfillResult:
     """Correct one CLOSED day so the ledger sums to what was billed."""
@@ -204,6 +242,7 @@ def backfill_day(conn, target_date: date, *, fetch=None,
             "yet (TRAPS.md)")
     groups = (fetch or fetch_usage_day)(target_date)
     billed, itemised = price_usage_day(groups, target_date)
+    record_usage_by_key(conn, target_date, itemised, now=now)
     local = local_real_total(conn, target_date)
     result = BackfillResult(target_date=target_date, local_before_cents=local,
                             billed_cents=billed, groups=itemised)
