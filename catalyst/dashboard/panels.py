@@ -3313,7 +3313,24 @@ def state_line(db: Db, p: str = "state") -> str:
     except Exception:  # noqa: BLE001
         pass
 
-    # The one thing that should interrupt a glance.
+    # BOTH THINGS THAT SHOULD INTERRUPT A GLANCE, because there are two
+    # and only one of them used to appear here.
+    #
+    # governor.authorize() refuses ALL new spend on either an
+    # unacknowledged reconciliation OR an unpriced cost row, and they
+    # are equally silent from the outside: the bot keeps running, keeps
+    # protecting open positions, and simply stops researching anything.
+    # The unpriced-row case was visible only on the Cost page, so a bot
+    # halted on a Tuesday looked identical to a quiet one until somebody
+    # went looking.
+    #
+    # An unpriced row is not exotic. It is what happens when Anthropic
+    # adds a billing field the allowlist does not know - which has
+    # happened twice in this project's short life (output_tokens_details
+    # and inference_geo) - and the governor fails closed by design,
+    # because pricing an unknown field at zero is the TRAPS.md failure
+    # this whole subsystem exists to prevent. Failing closed is right.
+    # Failing closed QUIETLY, while the owner is away for a week, is not.
     try:
         blocked = db.q("SELECT COUNT(*) n FROM cost_reconciliation_events "
                        "WHERE action_taken = 'scheduled_paused' "
@@ -3321,6 +3338,16 @@ def state_line(db: Db, p: str = "state") -> str:
         if blocked.rows and int(blocked.rows[0]["n"]):
             bits.append('<b class="neg">spending is PAUSED pending a '
                         "reconciliation you need to acknowledge</b>")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        unpriced = db.q("SELECT COUNT(*) n FROM cost_events "
+                        "WHERE priced_cents IS NULL")
+        if unpriced.rows and int(unpriced.rows[0]["n"]):
+            n = int(unpriced.rows[0]["n"])
+            bits.append(
+                f'<b class="neg">spending is PAUSED: {n} cost row(s) could '
+                "not be priced, so the bot has stopped researching</b>")
     except Exception:  # noqa: BLE001
         pass
 
