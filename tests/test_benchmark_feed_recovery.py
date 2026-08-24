@@ -128,18 +128,45 @@ class TestTheRebuildIsTheDoorOut:
             "a bar from the old feed survived the rebuild, so the series "
             "is now half one basis and half another")
 
-    def test_nothing_calls_it_on_a_schedule(self):
-        """It throws away real history. It may only ever run because a
-        human asked."""
-        import pathlib
+    def test_it_never_runs_without_evidence_that_waiting_cannot_help(self):
+        """THIS TEST USED TO SAY "nothing calls it on a schedule".
 
-        root = pathlib.Path(__file__).resolve().parents[1] / "catalyst"
-        callers = [p for p in root.rglob("*.py")
-                   if "rebuild_benchmark(" in p.read_text()
-                   and p.name != "benchmark.py"]
-        scheduled = [p for p in callers if "scheduler" in p.name]
-        assert not scheduled, (
-            f"the destructive rebuild is wired into the scheduler: {scheduled}")
+        That was the right call while the alternative was a human
+        pressing a button. It stopped being the right call on
+        2026-08-24, when the owner asked for the opposite in as many
+        words - "can we sort it so its got it historical and ready for
+        the future" - against a feed that had refused sixteen times and
+        would refuse forever.
+
+        A button nobody finds is a benchmark that stays dead. So the
+        scheduler may now rebuild, and what this guards is the thing the
+        old rule was really protecting: that it never happens casually.
+        The conditions are asserted directly in
+        tests/test_spy_self_heals.py; what is checked here is that the
+        scheduler's path to it still goes through those conditions
+        rather than calling it outright.
+        """
+        import inspect
+
+        from catalyst.orchestrator import scheduler
+
+        src = inspect.getsource(scheduler)
+        calls = [ln.strip() for ln in src.splitlines()
+                 if "rebuild_benchmark(" in ln and "def " not in ln]
+        assert len(calls) == 1, (
+            f"the destructive rebuild is reachable from {len(calls)} places "
+            "in the scheduler; it must have exactly one guarded caller")
+
+        guarded = inspect.getsource(scheduler._maybe_rebuild_refused_feed)
+        assert "rebuild_benchmark(" in guarded, (
+            "the one caller is not the guarded one")
+        for condition in ("FEED_REFUSED_DAYS_BEFORE_REBUILD",
+                          "_REFUSAL_MARKERS",
+                          "benchmark_rebuild_day"):
+            assert condition in guarded, (
+                f"the rebuild no longer checks {condition}: a transient "
+                "outage, a wrong kind of failure, or a per-cycle loop can "
+                "now throw away real history")
 
 
 # ==========================================================================
