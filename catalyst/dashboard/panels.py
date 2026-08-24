@@ -3429,26 +3429,56 @@ def value_reconciliation_panel(db: Db, p: str = "val") -> str:
             ("Difference", dollars(gap),
              "unrealised marks plus API spend - explained line by line below"),
         ]))
-        out.append(table(f"{p}-bridge", ["line", "amount", "why it differs"], [
+        # THE LABEL USED TO SAY "to date" AND THE NUMBER NEVER MEANT IT.
+        #
+        # OWNER-REPORTED 2026-08-24: "it looks like it barely spent any
+        # API usage", against a $4.26 difference on a month whose real
+        # bill was $23.15. Both figures were right and the page never
+        # said they were different questions: costs here are filtered to
+        # the CURRENT BASELINE, and this account's baseline has been
+        # struck six times. Everything before the newest one drops out.
+        #
+        # Deducting spend from before the comparison began would be
+        # wrong - so the arithmetic stays, the label stops claiming
+        # otherwise, and the excluded money gets its own line instead of
+        # being computed and thrown away.
+        excluded = Decimal(perf.excluded_cost_cents or 0)
+        bridge = [
             ["Alpaca account value", dollars(broker_cents),
              "what the broker says the account is worth right now, including "
              "open positions marked to market"],
             ["less profit not yet banked", "-" + dollars(unrealised),
              "open positions can still move; this dashboard counts a trade "
              "only once it has closed"],
-            ["less API spend to date", "-" + dollars(costs),
+            ["less API spend since the comparison started",
+             "-" + dollars(costs),
              "Alpaca has never heard of the Anthropic bill. Paper P&amp;L is "
              "fictional; this half is real money"],
+        ]
+        if excluded > 0:
+            bridge.append([
+                "(not deducted: API spend from before it started)",
+                dollars(excluded),
+                "real money, and really spent - but before this comparison "
+                "began, so deducting it here would charge the new baseline "
+                "for the old one's bill. The Cost page counts every penny "
+                "of it. THIS is why the figure above can look small beside "
+                "the month-to-date total."])
+        bridge.append(
             ["<b>= net value, the line on the chart</b>",
              "<b>" + dollars(net_cents) + "</b>",
              "<b>the only figure that can honestly be compared with the "
-             "S&amp;P</b>"],
-        ], numeric_cols={1}))
+             "S&amp;P</b>"])
+        out.append(table(f"{p}-bridge", ["line", "amount", "why it differs"],
+                         bridge, numeric_cols={1}))
         out.append(prov(
             "Broker figure from equity_snapshots where source='broker_read' "
             f"({brok.row_count} row read, newest first). Net value from "
             "closed_trades and cost_events, priced locally. The two are "
-            "expected to differ; a gap is not an error."))
+            "expected to differ; a gap is not an error. API spend here is "
+            "the spend SINCE THE CURRENT BASELINE, not the lifetime bill - "
+            "the Cost page is where every penny is counted, and the "
+            "Anthropic billing figure sits beside it for closed days."))
     else:
         out.append(tiles(f"{p}-tiles", [
             ("Alpaca account value", "&mdash;",

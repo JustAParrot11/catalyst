@@ -157,11 +157,42 @@ ABSENT_RECHECK_SECONDS = 1800.0
 #: process, not to one call.
 _absent_since: dict[date, float] = {}
 
+#: A PUBLISHED DAILY INDEX FOR A PAST DAY NEVER CHANGES AGAIN.
+#:
+#: OWNER'S BUNDLE, 2026-08-24, found by grouping the log's 4,903 HTTP
+#: lines by endpoint: 306 successful fetches of the daily index across
+#: FOUR dates - about 76 downloads each in a day. The submissions behind
+#: them are cached in `edgar_filings` and were replayed for free; the
+#: index in front of them was re-downloaded every fifteen minutes. At
+#: the measured 1.3 MB per file that is roughly 400 MB a day pulled from
+#: sec.gov for bytes that cannot have changed.
+#:
+#: TODAY IS NEVER CACHED. The daily index publishes in the evening and
+#: filings keep arriving until it does, so only a date strictly before
+#: the caller's own clock is treated as final. Process memory only: a
+#: restart re-fetches, so nothing here can go permanently stale.
+#:
+#: Keyed by (date, forms) because the parse is form-filtered, and bounded
+#: so a long-running process cannot grow without limit.
+INDEX_CACHE_MAX_DAYS = 32
+_index_cache: "dict[tuple[date, tuple[str, ...]], list[IndexRow]]" = {}
+
 
 def clear_absent_index_memo() -> None:
-    """Forget which dates answered absent. For tests, and for anything
-    that wants the next pass to ask again regardless."""
+    """Forget which dates answered absent, and every cached index. For
+    tests, and for anything that wants the next pass to ask again
+    regardless."""
     _absent_since.clear()
+    _index_cache.clear()
+
+
+def _remember_index(day: date, forms: tuple, rows: list) -> None:
+    _index_cache[(day, forms)] = rows
+    while len(_index_cache) > INDEX_CACHE_MAX_DAYS:
+        # Oldest DATE first, not oldest insertion: the window walks
+        # forward, so the earliest day is the one least likely to be
+        # asked for again.
+        del _index_cache[min(_index_cache, key=lambda k: k[0])]
 
 
 class HttpResponse(Protocol):
@@ -550,6 +581,12 @@ class FetchResult:
     #: Filings replayed from local storage rather than re-downloaded.
     #: The gap between this and requests_made IS the rate-limit fix.
     from_cache: int = 0
+    #: Daily INDEXES replayed rather than re-downloaded. The same idea
+    #: one level up, and the level that was missing: the owner's
+    #: 2026-08-24 log shows 306 fetches of four immutable index files,
+    #: about 1.3 MB each, while the submissions behind them were being
+    #: replayed for free.
+    index_days_from_cache: int = 0
     #: Set when sec.gov blocked this IP mid-pass. The pass stops there
     #: on purpose: further requests extend the timeout.
     rate_limited: str = ""
@@ -1032,6 +1069,18 @@ def fetch_form4(
     day = start
     while day <= end:
         url = _daily_index_url(day)
+        # ALREADY HAVE THIS DAY'S INDEX? A published index for a past
+        # day is immutable, so re-downloading it buys nothing and costs
+        # 1.3 MB plus a request from a rate limit shared with every
+        # other SEC feed in this process.
+        cached = _index_cache.get((day, forms))
+        if cached is not None:
+            result.index_rows_seen += len(cached)
+            result.index_days_from_cache += 1
+            for row in cached:
+                rows_by_accession.setdefault(row.accession, row)
+            day += timedelta(days=1)
+            continue
         # ASKED RECENTLY AND TOLD NO? Do not ask again yet. The date is
         # still recorded as missing, with why, so a zero is never left
         # unexplained (house rule 3) - it just costs no request.
@@ -1093,6 +1142,11 @@ def fetch_form4(
         _absent_since.pop(day, None)
         index_text = _response_text(response)
         rows = parse_daily_index(index_text, forms=forms)
+        # ONLY A PAST DAY IS FINAL. Today's index is still being written
+        # to until the evening publish, so caching it would freeze the
+        # day at whatever was filed by the first pass.
+        if day < clock().date():
+            _remember_index(day, forms, rows)
         result.index_rows_seen += len(rows)
         for row in rows:
             # Each accession is listed once per CIK involved (issuer and

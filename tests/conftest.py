@@ -139,8 +139,17 @@ def _no_sec_block_leaks_between_tests():
     that records a rate-limit block would otherwise make every later
     test refuse its SEC calls - a test-ordering bug wearing a code
     bug's clothes."""
-    from catalyst.data.sources.edgar_form4 import reset_sec_pacer
+    from catalyst.data.sources.edgar_form4 import (
+        clear_absent_index_memo, reset_sec_pacer,
+    )
 
+    # The daily-index caches are process-wide for the same reason and
+    # leak the same way: a test that fetches an index would otherwise
+    # serve it to every later test from memory, which reads as "the
+    # request was never made" - a test-ordering bug wearing a code bug's
+    # clothes, exactly as above.
     reset_sec_pacer()
+    clear_absent_index_memo()
     yield
     reset_sec_pacer()
+    clear_absent_index_memo()

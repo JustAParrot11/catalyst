@@ -164,11 +164,18 @@ class TestItAlwaysAsksAgainEventually:
         assert FRIDAY not in f4._absent_since, (
             "a date that has published is still remembered as absent")
 
-        # And the pass after it asks again rather than skipping.
+        # And the pass after it is served from the INDEX cache, not from
+        # the absent memo. The two look identical from the request count
+        # and mean opposite things - one has the day's filings, the other
+        # has nothing - so the result says which.
         before = len(calls)
         clock.advance(60)
-        sweep(FRIDAY, published, clock, calls)
-        assert len(calls) > before
+        again = sweep(FRIDAY, published, clock, calls)
+        assert len(calls) == before, "a published index is not re-downloaded"
+        assert again.index_days_from_cache == 1
+        assert again.missing_index_dates == [], (
+            "the day was served from cache and must not also be reported "
+            "as missing")
 
 
 class TestTheCheckCanFail:
