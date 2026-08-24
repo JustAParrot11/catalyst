@@ -1366,7 +1366,12 @@ class TestValueReconciliation:
         assert "Alpaca account value" in html
         assert "Net value after costs" in html
         assert "not yet banked" in html          # unrealised marks
-        assert "API spend to date" in html       # the bill Alpaca cannot see
+        # The bill Alpaca cannot see. It used to read "API spend to date"
+        # and the number never meant that: costs here are filtered to the
+        # current baseline, so on an account whose baseline has been
+        # restruck, everything before it drops out. Owner-reported
+        # 2026-08-24 as "it looks like it barely spent any API usage".
+        assert "API spend since the comparison started" in html
         assert "a gap is not an error" in html
 
     def test_it_says_so_when_the_broker_has_never_been_read(self, bare):

@@ -941,10 +941,10 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
             got = fetch_form4(since, until, already_have=have,
                               on_fetched=store)
             _log.info(
-                "Form 4: %d request(s), %d filing(s) replayed from local "
-                "storage. Cache hits cost nothing and are what keeps this "
-                "inside sec.gov's fair-use limits.",
-                got.requests_made, got.from_cache)
+                "Form 4: %d request(s), %d filing(s) and %d daily index(es) "
+                "replayed from local storage. Cache hits cost nothing and "
+                "are what keeps this inside sec.gov's fair-use limits.",
+                got.requests_made, got.from_cache, got.index_days_from_cache)
             events = list(flatten_form4_events(got.events))
         except RateLimitBlocked as exc:
             # NOT a feed error to log and continue past. sec.gov blocked
