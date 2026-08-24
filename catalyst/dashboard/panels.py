@@ -131,7 +131,12 @@ def _spy_lag_note(perf, p: str) -> str:
     """
     if not perf.spy_points or perf.spy_lag_days <= 0:
         return ""
-    last_spy = perf.spy_points[-1][0]
+    from catalyst.dashboard.queries import last_real_close_day
+
+    # THE LAST REAL CLOSE, not the end of the drawn line. Both lines now
+    # run to the same right-hand edge, so "the line ends on..." would
+    # describe a picture nobody is looking at.
+    last_spy = last_real_close_day(perf.spy_points) or perf.spy_points[-1][0]
     outcome = perf.spy_refresh_outcome
     # A REAL FAILURE ANYWHERE IN THE WINDOW, not merely the last attempt.
     # The owner's 2026-08-24 bundle is the reason: sixteen "subscription
@@ -147,8 +152,9 @@ def _spy_lag_note(perf, p: str) -> str:
     # strings kept here (house rule 7).
     if perf.spy_failure_outcome:
         body = (
-            f'<b id="{p}-spy-lag">The SPY line stops on {esc(str(last_spy))}, '
-            "and the daily refresh has been failing.</b> "
+            f'<b id="{p}-spy-lag">SPY has no close newer than '
+            f"{esc(str(last_spy))}, and the daily refresh has been "
+            "failing.</b> "
             f"{perf.spy_failure_count} failed attempt(s) in the last few "
             f"days, the most recent at {esc(perf.spy_failure_at)}: "
             f"<code>{esc(perf.spy_failure_outcome)}</code>. Trading is "
@@ -169,17 +175,17 @@ def _spy_lag_note(perf, p: str) -> str:
         return alarm(body) + _spy_rebuild_offer(perf, p)
     if perf.spy_lag_days <= SPY_LAG_ROUTINE_DAYS:
         return note(
-            f'<b id="{p}-spy-lag">The SPY line ends on '
+            f'<b id="{p}-spy-lag">SPY is held at its close of '
             f"{esc(str(last_spy))} and nothing is wrong.</b> There is no "
             "daily close on a weekend or a market holiday, and the current "
-            "session's bar is not final until it closes - so the benchmark "
-            "always ends on the last completed trading day while the bot's "
-            "own line runs to today."
+            "session's bar is not final until it closes - so the newest "
+            "price there is gets marked forward to today, the same way the "
+            "account's own value is the last broker read."
             + (f" Last refresh: <code>{esc(outcome)}</code> at "
                f"{esc(perf.spy_refresh_at)}." if outcome else ""))
     return alarm(
-        f'<b id="{p}-spy-lag">The SPY line stops on {esc(str(last_spy))}, '
-        f"{perf.spy_lag_days} days behind the bot's line.</b> That is longer "
+        f'<b id="{p}-spy-lag">SPY has not closed since {esc(str(last_spy))}, '
+        f"{perf.spy_lag_days} days ago.</b> That is longer "
         "than a weekend, so the once-a-day refresh from Alpaca has probably "
         "stopped working. Trading is unaffected - the benchmark is "
         "reporting only. "
