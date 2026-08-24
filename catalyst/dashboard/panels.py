@@ -531,10 +531,25 @@ def performance_panel(db: Db, p: str = "perf") -> str:
     if perf.spy_points:
         out.append(_exposure_warning(perf, p))
         out.append(_spy_lag_note(perf, p))
+        # THE CLAIM, MADE CHECKABLE. It used to say "indexed to 100 on
+        # the same day as the bot line" and there was no way to see
+        # whether that was true - and on a baseline struck at a weekend
+        # it was not. Both first points are printed now, so the sentence
+        # is a fact a reader can verify off the page rather than take.
+        bot_first = perf.bot_points[0] if perf.bot_points else None
+        spy_first = perf.spy_points[0]
         out.append(prov(
             f"Benchmark: SPY, {len(perf.spy_points)} daily closes from "
-            f"{perf.spy_source}, indexed to 100 on the same day as the bot "
-            "line, total return (adjustment=all) so dividends are included."
+            f"{perf.spy_source}, total return (adjustment=all) so dividends "
+            "are included. Both lines are indexed to 100 on "
+            f"{esc(str(spy_first[0]))}"
+            + ("" if bot_first is None or bot_first[0] == spy_first[0] else
+               f" (SPY) and {esc(str(bot_first[0]))} (the bot) - they "
+               "should match; if they do not, the comparison is measuring "
+               "two different windows")
+            + ". A market that is shut has no close, so SPY holds its "
+            "opening value across weekends and holidays - money committed "
+            "on a closed day buys at the next open."
         ))
     elif perf.spy_stale:
         # A DIFFERENT PROBLEM, and the only one of the two anybody can
