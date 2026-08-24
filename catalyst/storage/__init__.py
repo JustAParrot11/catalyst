@@ -63,9 +63,26 @@ def add_missing_columns(conn: sqlite3.Connection) -> list[str]:
     return added
 
 
+#: The evidence graph's tables. A SEPARATE FILE for the reason
+#: catalyst/graph/store.py gives - schema.sql is single-session-routed -
+#: and, until now, a file nothing ever ran.
+#:
+#: OWNER'S BUNDLE, 2026-08-24: "sqlite3.OperationalError: no such table:
+#: graph_entities", every time research tried to record what it had
+#: found. store.py's docstring says "the stage-5 orchestrator folds it
+#: in"; it never did, so the graph existed as a schema, a store, a set
+#: of hooks and a page, and had no table to write to on any machine that
+#: had ever run. Same shape as the logs table before it: everything
+#: built except the one line that creates it.
+SCHEMA_GRAPH_PATH = Path(__file__).parent / "schema_graph.sql"
+
+
 def init_db(db_path: str) -> sqlite3.Connection:
     conn = connect(db_path)
     conn.executescript(SCHEMA_PATH.read_text())
+    # CREATE TABLE IF NOT EXISTS throughout, so this is safe on every
+    # start and adds the graph to databases that predate it.
+    conn.executescript(SCHEMA_GRAPH_PATH.read_text())
     add_missing_columns(conn)
     conn.commit()
     return conn

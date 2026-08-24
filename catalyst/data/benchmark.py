@@ -59,6 +59,31 @@ class RefreshResult:
     #: Which feed actually produced these bars. Never assumed: a series
     #: labelled sip that is really iex is a lie about its own basis.
     feed: str | None = None
+    #: NOTHING IS WRONG, as opposed to something is. CLAUDE.md: routine
+    #: attrition must not look like damage. Decided HERE, beside the
+    #: reasons themselves, so a reason added later cannot be silently
+    #: misclassified by a list of strings kept in another module
+    #: (house rule 7).
+    routine: bool = False
+
+
+#: A window this short cannot distinguish a market holiday from one
+#: flaky fetch, and both are routine: every US market holiday closes a
+#: SINGLE weekday, and a one-off failure is retried fifteen minutes
+#: later. Two consecutive weekdays with no bar is not a holiday.
+_ROUTINE_MISSING_WEEKDAYS = 1
+
+
+def _weekdays_between(start: date, end: date) -> int:
+    """Weekdays in [start, end]. Weekends are the only non-trading days
+    that can be known without a calendar; holidays are handled by the
+    tolerance above rather than by enumerating them."""
+    days, cur = 0, start
+    while cur <= end:
+        if cur.weekday() < 5:
+            days += 1
+        cur += timedelta(days=1)
+    return days
 
 
 #: Preference order. SIP is the consolidated tape and the right answer
@@ -178,7 +203,7 @@ def refresh_benchmark(
     end = today - timedelta(days=_LAG_DAYS)
     start = (have[-1].day + timedelta(days=1)) if have else SIP_START
     if start > end:
-        return RefreshResult(skipped_reason="already_current",
+        return RefreshResult(skipped_reason="already_current", routine=True,
                              last_day=have[-1].day if have else None)
 
     headers = {"APCA-API-KEY-ID": alpaca_key,
@@ -220,8 +245,16 @@ def refresh_benchmark(
     fresh = by_symbol.get(BENCHMARK_SYMBOL) or []
     if not fresh:
         # A weekend, a holiday, or a broken query all look like this.
-        # None of them is a reason to lose the history we already have.
+        # None of them is a reason to lose the history we already have -
+        # but they are not the same event, and the owner has now twice
+        # read the first as the third. The window itself separates them:
+        # if it holds no trading weekday there was nothing to fetch, and
+        # a single weekday is a market holiday or one flaky fetch that
+        # the next cycle retries. Two is a feed that has stopped
+        # answering.
+        missing = _weekdays_between(start, end)
         return RefreshResult(skipped_reason="no_new_bars_upstream",
+                             routine=missing <= _ROUTINE_MISSING_WEEKDAYS,
                              raw_response=str(notes)[:2000])
 
     # MERGE by day: existing history wins nothing and loses nothing, and
@@ -240,7 +273,8 @@ def refresh_benchmark(
         "rows": len(ordered),
     })
     return RefreshResult(written=len(fresh), first_day=fresh[0].day,
-                         last_day=fresh[-1].day, feed=used_feed)
+                         last_day=fresh[-1].day, feed=used_feed,
+                         routine=True)
 
 
 def rebuild_benchmark(bars_root: str, alpaca_key: str, alpaca_secret: str,

@@ -84,13 +84,34 @@ def redact(text) -> str:
     return text
 
 
+def _could_be_a_secret(value) -> bool:
+    """Could this VALUE carry a credential at all?
+
+    OWNER'S BUNDLE, 2026-08-24: the row count for the `usage_by_key`
+    table came out as "[REDACTED]", because the field name matched
+    /key/ and the name alone decided it. Over-redaction is the safe
+    direction and no secret leaked - but a diagnostic bundle exists to
+    be read, and one that hides how many rows a table has is worse at
+    the only job it has.
+
+    THE RULE IS ABOUT THE VALUE, not the spelling of the name (house
+    rule 7). A credential is text, or a container that might hold text.
+    A number, a boolean and a null cannot be one, whatever the field is
+    called - so those are the only things this ever lets through, and
+    every string (and every list or dict that could hold one) under a
+    credential-shaped name is still masked exactly as before.
+    """
+    return not isinstance(value, (int, float, bool, type(None)))
+
+
 def redact_obj(obj):
     """Recursive redaction for JSON-ish structures, keeping the shape so
     a diagnostic bundle is still readable."""
     if isinstance(obj, dict):
         out = {}
         for key, value in obj.items():
-            if isinstance(key, str) and _SECRET_NAME.search(key):
+            if (isinstance(key, str) and _SECRET_NAME.search(key)
+                    and _could_be_a_secret(value)):
                 out[key] = MASK
             else:
                 out[key] = redact_obj(value)

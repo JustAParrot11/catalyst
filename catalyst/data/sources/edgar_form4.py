@@ -136,6 +136,33 @@ _ABSENT_MARKERS = ("AccessDenied", "NoSuchKey")
 
 _TEN_B5_1_RE = re.compile(r"10\s*b5[\s\-‑–]*1", re.IGNORECASE)
 
+#: HOW LONG AN ABSENT DAILY INDEX IS BELIEVED TO STAY ABSENT.
+#:
+#: OWNER'S BUNDLE, 2026-08-24: 252 requests to sec.gov in one day, all
+#: 403, for three dates - Saturday the 22nd (93 times), Sunday the 23rd
+#: (93 times) and the 24th before its evening publish (66 times). Every
+#: one was correctly understood as "no file yet" and none was an error;
+#: the cost is that the bot spent 252 requests of a rate limit TRAPS.md
+#: warns is shared across all SEC APIs, where an overrun blocks the IP
+#: for every SEC feed in the process.
+#:
+#: A cool-off, never a permanent skip: today's index really does appear
+#: in the evening, so a date must always be asked again eventually. Half
+#: an hour turns 93 requests a day per date into about 48, and the
+#: longest a newly published index can go unnoticed is one cool-off.
+ABSENT_RECHECK_SECONDS = 1800.0
+
+#: date -> monotonic time it last answered "not there". Module level for
+#: the same reason sec_pacer() is: the pacing budget belongs to the
+#: process, not to one call.
+_absent_since: dict[date, float] = {}
+
+
+def clear_absent_index_memo() -> None:
+    """Forget which dates answered absent. For tests, and for anything
+    that wants the next pass to ask again regardless."""
+    _absent_since.clear()
+
 
 class HttpResponse(Protocol):
     """The slice of ``httpx.Response`` this module uses."""
@@ -1005,6 +1032,27 @@ def fetch_form4(
     day = start
     while day <= end:
         url = _daily_index_url(day)
+        # ASKED RECENTLY AND TOLD NO? Do not ask again yet. The date is
+        # still recorded as missing, with why, so a zero is never left
+        # unexplained (house rule 3) - it just costs no request.
+        last_absent = _absent_since.get(day)
+        if (last_absent is not None
+                and monotonic() - last_absent < ABSENT_RECHECK_SECONDS):
+            result.missing_index_dates.append({
+                "date": day.isoformat(),
+                "url": url,
+                "status_code": None,
+                "raw_text": (
+                    "not requested: this date answered 'no such file' "
+                    f"{monotonic() - last_absent:.0f}s ago and is asked again "
+                    f"at most every {ABSENT_RECHECK_SECONDS:.0f}s. Weekends, "
+                    "holidays and today-before-the-evening-publish all look "
+                    "like this; the SEC rate limit is shared across every SEC "
+                    "feed in this process, so re-asking every cycle spends it "
+                    "for nothing."),
+            })
+            day += timedelta(days=1)
+            continue
         response = _request(
             url,
             http_get=getter,
@@ -1029,6 +1077,7 @@ def fetch_form4(
                         "raw_text": body,
                     }
                 )
+                _absent_since[day] = monotonic()
                 day += timedelta(days=1)
                 continue
             raise FeedError(
@@ -1039,6 +1088,9 @@ def fetch_form4(
                 status_code=status,
                 raw_text=body,
             )
+        # It published. Stop remembering it as absent, so a later pass
+        # over the same window is never told to skip a real index.
+        _absent_since.pop(day, None)
         index_text = _response_text(response)
         rows = parse_daily_index(index_text, forms=forms)
         result.index_rows_seen += len(rows)
