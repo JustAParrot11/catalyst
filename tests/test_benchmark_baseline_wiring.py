@@ -90,8 +90,12 @@ def _no_real_refresh(monkeypatch):
     it; the list it appends to is what the test asserts on."""
     calls: list[dict] = []
 
-    def fake(state, *, force=False):
-        calls.append({"force": force, "state": state})
+    def fake(state, *, force=False, **kw):
+        # **kw so the stub keeps working when the real function grows a
+        # keyword: this fixture asserts the WIRING (was it called, with
+        # force), and a stub that has to be edited for every added
+        # keyword turns an unrelated change into a red suite.
+        calls.append({"force": force, "state": state, **kw})
 
     monkeypatch.setattr(scheduler, "_maybe_refresh_benchmark", fake)
     return calls

@@ -376,7 +376,45 @@ def _maybe_reconcile_yesterday(db_file: str) -> None:
         conn.close()
 
 
-def _maybe_refresh_benchmark(state: dict | None, *, force: bool = False) -> None:
+def record_benchmark_refresh(conn, result, *, now=None) -> bool:
+    """Keep what the SPY refresh actually did, where the chart can read it.
+
+    OWNER-REPORTED 2026-08-24: "its stopped tracking SPY", against a
+    performance chart whose SPY line ended before the bot's own.
+
+    A weekend and a dead feed make exactly the same shape on that chart.
+    The refresh has always known which it was - `routine` is decided
+    beside the reasons themselves - and had nowhere to say it except the
+    log, which the dashboard cannot reach. Now it says it in the
+    database, with the raw upstream body beside a failure (house rule 3).
+
+    Never raises: a database that cannot take the note must not cost the
+    refresh itself, which is the part that keeps the comparison alive.
+    """
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
+
+    now = now or _dt.now(_tz.utc)
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO benchmark_refreshes "
+            "(checked_at, outcome, routine, bars_written, last_bar_day, "
+            " feed, raw_response) VALUES (?,?,?,?,?,?,?)",
+            (now.isoformat(),
+             result.skipped_reason or "updated",
+             1 if result.routine else 0,
+             int(result.written or 0),
+             result.last_day.isoformat() if result.last_day else None,
+             result.feed or None,
+             (result.raw_response or None)))
+        conn.commit()
+        return True
+    except Exception:  # noqa: BLE001 - the note is not worth the refresh
+        return False
+
+
+def _maybe_refresh_benchmark(state: dict | None, *, force: bool = False,
+                             db_file: str | None = None, conn=None) -> None:
     """Keep the SPY comparison series current, once a day.
 
     The dashboard's headline is performance against the S&P net of
@@ -424,10 +462,32 @@ def _maybe_refresh_benchmark(state: dict | None, *, force: bool = False) -> None
         creds = load_credentials()
         result = benchmark.refresh_benchmark(
             bars_path(), creds.alpaca_key, creds.alpaca_secret)
+        if conn is not None:
+            record_benchmark_refresh(conn, result)
+        elif db_file:
+            import sqlite3 as _sq
+
+            own = _sq.connect(db_file)
+            try:
+                record_benchmark_refresh(own, result)
+            finally:
+                own.close()
         if result.skipped_reason in (None, "already_current"):
             state["benchmark_day"] = today          # only now is it done
             _log.info("Benchmark series: %s bar(s) added, %s.",
                       result.written, result.skipped_reason or "up to date")
+        elif result.routine:
+            # NOT A WARNING, AND THE DAY IS DONE. A weekend or a market
+            # holiday has no bar to fetch, and re-asking every fifteen
+            # minutes produced a warning every fifteen minutes for the
+            # whole weekend - routine attrition reading as damage,
+            # exactly the failure CLAUDE.md names. The next weekday
+            # moves the window and the guard lets it through again.
+            state["benchmark_day"] = today
+            _log.info(
+                "Benchmark series: nothing to fetch (%s) - the window held "
+                "no trading day, so there is no bar to be missing.",
+                result.skipped_reason)
         else:
             _log.warning(
                 "Benchmark series not updated (%s). The performance page "
@@ -681,7 +741,7 @@ def _sync_benchmark_baseline(conn, broker, daily_state: dict | None = None,
     # Bring the SPY bars up to date NOW rather than tomorrow: the new
     # baseline indexes from today, and a cache that last updated four
     # days ago has nothing in that window to index against.
-    _maybe_refresh_benchmark(daily_state, force=True)
+    _maybe_refresh_benchmark(daily_state, force=True, conn=conn)
     return True
 
 
@@ -773,6 +833,14 @@ def _record_origin(conn, candidates, origin: str, rationales, as_of) -> None:
     """
     if not candidates:
         return
+    # SECOND INSTANCE OF THE SAME DEFECT AS THE HUNT'S `Decimal`, found
+    # by the name check written for that one: `sqlite3` was never
+    # imported at module level, so the `except sqlite3.Error` clause
+    # below raised NameError while HANDLING an error - turning a
+    # function whose docstring promises it never raises into one that
+    # takes discovery down the first time a write fails.
+    import sqlite3
+
     try:
         conn.executemany(
             "INSERT OR IGNORE INTO candidate_origin "
@@ -1008,6 +1076,16 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
             from catalyst.discovery.hunt import hunt
 
             if _hunt_due(daily_state, owner_cap, as_of):
+                # Decimal is imported HERE because this module has no
+                # top-level import of it - and this line raised
+                # NameError on every hunt that came due, so Claude's
+                # half of discovery had never once run. Found in the
+                # owner's 2026-08-24 bundle: the single ERROR in a day
+                # of 91,330 log lines, wrapped in a guard that said the
+                # screened candidates were unaffected and did not say
+                # that the hunt itself never happened.
+                from decimal import Decimal
+
                 from catalyst.research.boundary import CostContext
                 from catalyst.risk.adaptive_params import current_values
 
@@ -1240,7 +1318,8 @@ def main(argv: list[str] | None = None) -> int:
         try:
             for _name, _job in (
                     ("nightly bill check", lambda: _maybe_reconcile_yesterday(path)),
-                    ("benchmark refresh", lambda: _maybe_refresh_benchmark(_daily_state)),
+                    ("benchmark refresh",
+                     lambda: _maybe_refresh_benchmark(_daily_state, db_file=path)),
                     # Learn from yesterday BEFORE trading today, so any
                     # parameter that moved is the one this cycle uses.
                     ("parameter adaptation", lambda: _maybe_adapt(path, _daily_state)),

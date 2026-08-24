@@ -77,7 +77,13 @@ def _spy_rebuild_offer(perf, p: str) -> str:
     feed itself was refused. A generic outage gets no button, because
     for that one waiting IS the answer.
     """
-    reason = str(perf.spy_error or "")
+    # BOTH PLACES THE REFUSAL CAN BE RECORDED. spy_error is only ever set
+    # when the window holds NO SPY data; the owner's 2026-08-24 bundle
+    # had a full SPY line AND sixteen SIP refusals, so the button that
+    # fixes it was never offered. The recorded refresh outcome carries
+    # the same marker and is the one that survives a weekend.
+    reason = " ".join(str(x or "") for x in
+                      (perf.spy_error, getattr(perf, "spy_failure_outcome", "")))
     if not any(marker in reason for marker in _FEED_REFUSED):
         return ""
     return (
@@ -98,6 +104,90 @@ def _spy_rebuild_offer(perf, p: str) -> str:
         'placeholder="REBUILD" required>'
         '<button type="submit">Rebuild the SPY series</button>'
         "</form>")
+
+
+#: A SPY line this far behind the bot's is a weekend. Friday's close is
+#: the newest bar there is until Monday closes, and the refresher asks
+#: only up to yesterday - so on a Monday the gap is three days with
+#: nothing whatever wrong. Beyond this, the reason is worth reading.
+SPY_LAG_ROUTINE_DAYS = 3
+
+
+def _spy_lag_note(perf, p: str) -> str:
+    """Why the SPY line stops before the bot's line does.
+
+    OWNER-REPORTED 2026-08-24: "its stopped tracking SPY", against a
+    chart whose blue line ran to the 24th and whose red one ended on the
+    21st. Both a normal weekend and a feed that has stopped answering
+    draw exactly that, and the page said nothing either way - the
+    existing alarms only fire when the window holds NO SPY data at all,
+    which is a different situation with a different picture.
+
+    CLAUDE.md: routine attrition must not look like damage. So this is a
+    quiet note when the gap is a closed market, and an alarm only when
+    the bot's own recorded refresh says something actually failed -
+    which is a fact read from `benchmark_refreshes`, not a guess made
+    from the shape of the gap.
+    """
+    if not perf.spy_points or perf.spy_lag_days <= 0:
+        return ""
+    last_spy = perf.spy_points[-1][0]
+    outcome = perf.spy_refresh_outcome
+    # A REAL FAILURE ANYWHERE IN THE WINDOW, not merely the last attempt.
+    # The owner's 2026-08-24 bundle is the reason: sixteen "subscription
+    # does not permit querying recent SIP data" refusals overnight, then
+    # fifty routine weekend no-ops on top of them. Reading only the
+    # newest attempt would have reported that nothing was wrong, while
+    # the feed had in fact stopped answering - the weekend was the only
+    # thing hiding it, and Monday's bar would have exposed it as a series
+    # frozen for good.
+    #
+    # `routine` is decided in data/benchmark.py beside the reasons
+    # themselves, so a reason added later cannot be misread by a list of
+    # strings kept here (house rule 7).
+    if perf.spy_failure_outcome:
+        body = (
+            f'<b id="{p}-spy-lag">The SPY line stops on {esc(str(last_spy))}, '
+            "and the daily refresh has been failing.</b> "
+            f"{perf.spy_failure_count} failed attempt(s) in the last few "
+            f"days, the most recent at {esc(perf.spy_failure_at)}: "
+            f"<code>{esc(perf.spy_failure_outcome)}</code>. Trading is "
+            "unaffected - the benchmark is reporting only - but the "
+            "comparison will keep falling behind until this succeeds")
+        if outcome and perf.spy_refresh_routine:
+            # SAY WHY IT LOOKS FINE RIGHT NOW, or the two readings on
+            # this page contradict each other with no explanation.
+            body += (", and a closed market is currently hiding it: the "
+                     f"latest attempt was <code>{esc(outcome)}</code>, which "
+                     "is a weekend having no bar to fetch rather than the "
+                     "feed having recovered")
+        body += "."
+        if perf.spy_failure_raw:
+            # House rule 3: the raw upstream answer beside the failure.
+            body += ("<br>Raw upstream: <code>"
+                     + esc(perf.spy_failure_raw[:400]) + "</code>")
+        return alarm(body) + _spy_rebuild_offer(perf, p)
+    if perf.spy_lag_days <= SPY_LAG_ROUTINE_DAYS:
+        return note(
+            f'<b id="{p}-spy-lag">The SPY line ends on '
+            f"{esc(str(last_spy))} and nothing is wrong.</b> There is no "
+            "daily close on a weekend or a market holiday, and the current "
+            "session's bar is not final until it closes - so the benchmark "
+            "always ends on the last completed trading day while the bot's "
+            "own line runs to today."
+            + (f" Last refresh: <code>{esc(outcome)}</code> at "
+               f"{esc(perf.spy_refresh_at)}." if outcome else ""))
+    return alarm(
+        f'<b id="{p}-spy-lag">The SPY line stops on {esc(str(last_spy))}, '
+        f"{perf.spy_lag_days} days behind the bot's line.</b> That is longer "
+        "than a weekend, so the once-a-day refresh from Alpaca has probably "
+        "stopped working. Trading is unaffected - the benchmark is "
+        "reporting only. "
+        + (f"Last recorded refresh: <code>{esc(outcome)}</code> at "
+           f"{esc(perf.spy_refresh_at)}."
+           if outcome else
+           "The bot has not recorded a refresh attempt yet; the Maintenance "
+           "page shows whether Alpaca is reachable."))
 
 
 def _baseline_words(base) -> str:
@@ -440,6 +530,7 @@ def performance_panel(db: Db, p: str = "perf") -> str:
             "basis, and the comparison is only as good as that."))
     if perf.spy_points:
         out.append(_exposure_warning(perf, p))
+        out.append(_spy_lag_note(perf, p))
         out.append(prov(
             f"Benchmark: SPY, {len(perf.spy_points)} daily closes from "
             f"{perf.spy_source}, indexed to 100 on the same day as the bot "

@@ -102,6 +102,30 @@ class Performance:
     #: benchmark for an instrument as liquid as SPY, but the page has to
     #: say so rather than let a reader assume the tape.
     spy_feed: str = ""
+    #: THE SPY LINE ENDING BEFORE THE BOT'S. Owner-reported 2026-08-24:
+    #: "its stopped tracking SPY". A weekend and a dead feed draw the
+    #: identical picture, and until these fields existed the page had
+    #: nothing to tell them apart with - the alarms above only fire when
+    #: the window holds NO SPY data at all, which is not this case.
+    spy_lag_days: int = 0
+    #: What the bot's own last refresh did, read from benchmark_refreshes.
+    #: None = it has never recorded one (an older database, or a bot that
+    #: has not run since the upgrade).
+    spy_refresh_outcome: str | None = None
+    spy_refresh_routine: bool | None = None
+    spy_refresh_at: str = ""
+    spy_refresh_raw: str = ""
+    #: THE NEWEST FAILURE, which is not the same as the newest attempt.
+    #: The owner's 2026-08-24 bundle had sixteen "subscription does not
+    #: permit querying recent SIP data" refusals overnight and then fifty
+    #: routine weekend no-ops on top of them - so the LAST attempt said
+    #: nothing was wrong while the feed had in fact stopped working. Only
+    #: the weekend was hiding it: once Monday's bar existed to fetch, the
+    #: same refusal would have frozen the series for good.
+    spy_failure_outcome: str | None = None
+    spy_failure_at: str = ""
+    spy_failure_raw: str = ""
+    spy_failure_count: int = 0
     start_day: date | None = None
     end_day: date | None = None
     #: The baseline these figures are measured against - how much money,
@@ -161,6 +185,13 @@ class Performance:
 #: the once-a-day refresh has been failing. Four days clears an ordinary
 #: long weekend without hiding a refresh that stopped working.
 SPY_STALE_AFTER_DAYS = 4
+
+#: How far back to look for a refresh that actually FAILED. Long enough
+#: to see through a weekend of routine no-ops, which is exactly what hid
+#: the owner's SIP refusals on 2026-08-24: the failures were overnight,
+#: fifty harmless weekend attempts landed on top of them, and the newest
+#: attempt therefore reported that all was well.
+SPY_FAILURE_WINDOW_DAYS = 4
 
 
 def _load_spy(start: date, end: date, capital_cents=None):
@@ -368,6 +399,33 @@ def performance(db: Db) -> Performance:
     perf.spy_window_too_short = bool(
         not spy_points and rows > 0 and error
         and "not yet a full session" in error)
+    # HOW FAR THE SPY LINE FALLS SHORT OF THE BOT'S, and what the bot
+    # itself said about why. Only meaningful when there IS a SPY line:
+    # the no-data cases above already have their own explanations.
+    if spy_points and perf.end_day:
+        perf.spy_lag_days = max((perf.end_day - spy_points[-1][0]).days, 0)
+    last = db.q(
+        "SELECT checked_at, outcome, routine, raw_response FROM "
+        "benchmark_refreshes ORDER BY checked_at DESC LIMIT 1")
+    if last.rows:
+        r = last.rows[0]
+        perf.spy_refresh_at = str(r["checked_at"] or "")
+        perf.spy_refresh_outcome = str(r["outcome"] or "")
+        perf.spy_refresh_routine = bool(r["routine"])
+        perf.spy_refresh_raw = str(r["raw_response"] or "")
+    # AND THE NEWEST REAL FAILURE, separately - see spy_failure_outcome.
+    since = (perf.end_day - timedelta(days=SPY_FAILURE_WINDOW_DAYS)
+             ).isoformat() if perf.end_day else ""
+    bad = db.q(
+        "SELECT checked_at, outcome, raw_response, COUNT(*) OVER () n FROM "
+        "benchmark_refreshes WHERE routine = 0 AND checked_at >= ? "
+        "ORDER BY checked_at DESC LIMIT 1", (since,))
+    if bad.rows:
+        r = bad.rows[0]
+        perf.spy_failure_at = str(r["checked_at"] or "")
+        perf.spy_failure_outcome = str(r["outcome"] or "")
+        perf.spy_failure_raw = str(r["raw_response"] or "")
+        perf.spy_failure_count = int(r["n"] or 1)
     return perf
 
 
@@ -1894,14 +1952,46 @@ class Alerts:
     adaptive_q: QueryResult
 
 
+#: A kill-switch trip is LIVE only while no cycle has since got past the
+#: check. Nothing ever writes `cleared_at` - there is no code path that
+#: sets it - so "cleared_at IS NULL" means "has ever tripped", and both
+#: the alerts strip and the maintenance page read a trip from days ago as
+#: a live one. Owner's bundle, 2026-08-24: "Kill switches: 2 active",
+#: FAIL, on a day the bot researched 115 candidates, placed an order and
+#: logged no trip at all.
+#:
+#: THE SIGNAL, from how the cycle is actually written: a `broker_read`
+#: equity snapshot is taken immediately AFTER the kill check, and the
+#: tripped branch returns before reaching it. So a broker read newer than
+#: the trip is proof that a later cycle ran the same check and passed.
+#:
+#: Same class as the resolved-unprotected alarm below and the
+#: reconciliation prompt: a historical fact rendered as a live one. The
+#: row is not deleted - it is real and it belongs in the history - it
+#: just stops being an ALARM once a later cycle has cleared the check.
+KILL_SWITCH_LIVE_SQL = """
+    SELECT k.triggered_at, k.switch_name, k.cleared_at,
+           k.portfolio_state_snapshot,
+           (SELECT MAX(e.taken_at) FROM equity_snapshots e
+             WHERE e.source = 'broker_read' AND e.taken_at > k.triggered_at)
+               AS passed_since
+      FROM kill_switch_events k
+     ORDER BY k.triggered_at DESC LIMIT 10
+"""
+
+
+def kill_switch_is_live(row) -> bool:
+    """True when this trip still blocks new entries."""
+    if row["cleared_at"]:
+        return False
+    return not row["passed_since"]
+
+
 def alerts(db: Db) -> Alerts:
     items = []
-    kill_q = db.q(
-        "SELECT triggered_at, switch_name, cleared_at, portfolio_state_snapshot "
-        "FROM kill_switch_events ORDER BY triggered_at DESC LIMIT 10"
-    )
+    kill_q = db.q(KILL_SWITCH_LIVE_SQL)
     for row in kill_q.rows:
-        if not row["cleared_at"]:
+        if kill_switch_is_live(row):
             items.append(("alarm",
                           f"kill switch ACTIVE: {row['switch_name']} since "
                           f"{row['triggered_at']}",

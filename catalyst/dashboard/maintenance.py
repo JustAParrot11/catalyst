@@ -414,15 +414,35 @@ def passive_checks(db, now=None) -> list[Check]:
         raw=err or ""))
 
     # 7. Kill switch.
-    row, err = one("SELECT MAX(triggered_at) t, COUNT(*) n FROM "
-                   "kill_switch_events WHERE cleared_at IS NULL")
-    n = (row["n"] if row else 0) or 0
+    #
+    # LIVE, NOT EVER-TRIPPED. Nothing writes `cleared_at`, so the old
+    # "cleared_at IS NULL" count was "has ever tripped" and this check
+    # read FAIL forever after the first trip. Owner's bundle 2026-08-24:
+    # "Kill switches: 2 active" on a day the bot researched 115
+    # candidates, placed an order, and logged no trip at all.
+    #
+    # The rule lives in queries.py so this page and the alerts strip
+    # cannot disagree about whether the bot is stopped.
+    from catalyst.dashboard.queries import (
+        KILL_SWITCH_LIVE_SQL, kill_switch_is_live,
+    )
+
+    kill_rows, err = many(KILL_SWITCH_LIVE_SQL)
+    live = [r for r in kill_rows if kill_switch_is_live(r)]
+    stale = len(kill_rows) - len(live)
     out.append(Check(
         "Kill switches", "The bot itself",
-        OK if not n else FAIL,
-        "none tripped" if not n else f"{n} active",
+        OK if not live else FAIL,
+        ("none tripped" if not live
+         else f"{len(live)} active: "
+              + ", ".join(str(r["switch_name"]) for r in live))
+        + (f" ({stale} earlier trip(s), since cleared by a later cycle)"
+           if stale else ""),
         "A tripped kill switch blocks new positions while still "
-        "protecting the ones already open.", raw=err or ""))
+        "protecting the ones already open. A trip counts as live only "
+        "until a later cycle gets past the same check - the broker "
+        "equity mark taken straight after it is the proof.",
+        raw=err or ""))
 
     # 8. Benchmark freshness - the comparison rots silently otherwise.
     try:

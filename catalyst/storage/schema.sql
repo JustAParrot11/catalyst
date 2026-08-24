@@ -572,3 +572,31 @@ CREATE TABLE IF NOT EXISTS usage_by_key (
 
 CREATE INDEX IF NOT EXISTS idx_usage_by_key_day
     ON usage_by_key (target_date DESC);
+
+-- What the once-a-day SPY refresh actually did, kept so the dashboard
+-- can tell a weekend from a broken feed.
+--
+-- OWNER-REPORTED 2026-08-24: "its stopped tracking SPY" - the SPY line
+-- on the performance chart ending days before the bot's own line.
+--
+-- Both explanations look identical on the chart. Alpaca publishes no
+-- daily bar on a weekend or a market holiday, so a line that stops on
+-- Friday is correct and needs nothing; a refresh being refused by the
+-- credentials also stops the line, forever, and needs the owner. The
+-- refresh already knew which had happened and only ever said so in the
+-- log, where the chart cannot reach it.
+--
+-- A SIDE TABLE, not a column on anything hot (CLAUDE.md). One row per
+-- attempt, with the raw upstream body beside a failure (house rule 3).
+CREATE TABLE IF NOT EXISTS benchmark_refreshes (
+    checked_at   TEXT PRIMARY KEY,   -- UTC ISO8601
+    outcome      TEXT NOT NULL,      -- 'updated', or refresh's own reason
+    routine      INTEGER NOT NULL,   -- 1 = nothing wrong; 0 = needs a look
+    bars_written INTEGER NOT NULL,
+    last_bar_day TEXT,               -- newest SPY close after the pass
+    feed         TEXT,
+    raw_response TEXT                -- verbatim upstream, on a failure
+);
+
+CREATE INDEX IF NOT EXISTS idx_benchmark_refreshes_recent
+    ON benchmark_refreshes (checked_at DESC);

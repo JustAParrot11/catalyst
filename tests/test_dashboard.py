@@ -711,6 +711,19 @@ def test_trace_of_an_unknown_candidate_explains_itself(seeded):
 
 
 def test_evidence_chain_is_feature_detected_when_absent(seeded):
+    """An older database, from before init_db created the graph tables.
+
+    It used to be EVERY database: schema_graph.sql was written and
+    nothing ever ran it, so the live bot logged "no such table:
+    graph_entities" at every research call (owner's bundle 2026-08-24).
+    Now init_db creates them, and the absent case is the one this test
+    has to build for itself.
+    """
+    conn = sqlite3.connect(seeded)
+    conn.execute("DROP TABLE IF EXISTS graph_assertions")
+    conn.execute("DROP TABLE IF EXISTS graph_entities")
+    conn.commit()
+    conn.close()
     ev = queries.evidence_chain(Db(seeded), "c1")
     assert ev.available is False
     assert "not in this database" in ev.reason
@@ -719,6 +732,10 @@ def test_evidence_chain_is_feature_detected_when_absent(seeded):
 
 def test_evidence_chain_renders_generically_when_present(seeded):
     conn = sqlite3.connect(seeded)
+    # The panel reads whatever columns the table has, on purpose. Drop
+    # the real one first so this keeps testing that, rather than testing
+    # the schema it happens to ship with.
+    conn.execute("DROP TABLE IF EXISTS graph_assertions")
     conn.execute("CREATE TABLE graph_assertions (candidate_id TEXT, claim TEXT, "
                  "source_class TEXT, reliability TEXT)")
     conn.execute("INSERT INTO graph_assertions VALUES (?,?,?,?)",
@@ -868,7 +885,9 @@ def test_diagnostic_bundle_lists_env_names_but_never_env_values(seeded, monkeypa
 def test_health_reports_what_is_present(seeded):
     h = server.health(Db(seeded))
     assert h["logs_table_present"] is True
-    assert h["graph_assertions_present"] is False
+    # Present since init_db started running schema_graph.sql. It read
+    # False on every machine ever, because nothing created the table.
+    assert h["graph_assertions_present"] is True
     assert h["cache_policy"] == "no-store"
 
 
