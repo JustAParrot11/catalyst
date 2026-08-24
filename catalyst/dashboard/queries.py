@@ -271,6 +271,23 @@ def _load_spy(start: date, end: date, capital_cents=None):
     # flat over the same days for the same reason.
     if window[0].day > start:
         points.insert(0, (start, 100.0, int(capital)))
+    # AND BOTH LINES MUST REACH THE SAME RIGHT-HAND EDGE.
+    #
+    # OWNER-REPORTED 2026-08-24, twice: the SPY line stopping partway
+    # across a chart the bot's line crosses in full. The bot's line is
+    # explicitly carried flat to today - "the comparison is against SPY
+    # NOW rather than against SPY on the last day something happened" -
+    # and SPY was not, so the two series spanned different ranges and
+    # the shorter one read as broken.
+    #
+    # HOLDING THE LAST CLOSE IS NOT AN ASSERTION THAT NOTHING MOVED, it
+    # is the same mark-to-last-known every other figure on this page
+    # uses: the account's own equity is the last broker read, the bot's
+    # line is its last banked value. A weekend has no close to draw and
+    # today's is not final until the bell.
+    if points[-1][0] < end:
+        last_index, last_money = points[-1][1], points[-1][2]
+        points.append((end, last_index, last_money))
     # Read the basis from the cache metadata rather than asserting it.
     # The label used to hardcode "feed=sip, adjustment=all"; if a refresh
     # ever wrote a different basis, the page would have gone on claiming

@@ -494,8 +494,129 @@ def _maybe_refresh_benchmark(state: dict | None, *, force: bool = False,
                 "compares against SPY, so that comparison will stay stale "
                 "until this succeeds. Raw upstream: %s",
                 result.skipped_reason, (result.raw_response or "")[:500])
+            _maybe_rebuild_refused_feed(
+                conn, db_file, result, creds, state, today)
     except Exception:  # noqa: BLE001 - reporting must never stop trading
         _log.exception("The benchmark refresh failed; trading is unaffected.")
+
+
+#: A pinned feed refused on every attempt across this many distinct days,
+#: with no success in between, is not an outage - it is an entitlement
+#: the credentials no longer have, and every future refresh will ask the
+#: same refused feed forever. Two days rather than one so a single bad
+#: afternoon cannot discard a series.
+FEED_REFUSED_DAYS_BEFORE_REBUILD = 2
+
+#: The markers refresh_benchmark uses for "the feed itself said no",
+#: as opposed to a flaky upstream. Kept in one place, matched rather
+#: than enumerated, so a new reason of the same kind is still caught.
+_REFUSAL_MARKERS = ("feed_no_longer_available", "feeds_refused_http")
+
+
+def _maybe_rebuild_refused_feed(conn, db_file, result, creds, state, today):
+    """Move the SPY series onto a feed these credentials can read.
+
+    OWNER-ASKED 2026-08-24: "can we sort it so its got it historical and
+    ready for the future."
+
+    refresh_benchmark pins the feed on purpose - a series half
+    consolidated tape and half one exchange's prints makes every
+    comparison against it quietly wrong. But the pin has a trap the
+    owner has now hit: a cache built on `sip` keeps asking for `sip`,
+    and a key without that subscription is refused every time, forever.
+    Waiting cannot fix it, so a page that says "wait" is wrong.
+
+    THE PIN IS ABOUT MIXING, AND A REBUILD DOES NOT MIX. It discards the
+    series and refetches the whole thing on one basis. So the only thing
+    the manual gate was really protecting was the decision to throw away
+    history - and against a benchmark that can never update again, that
+    trade is worth making by itself.
+
+    EVIDENCE, NOT A GUESS. It fires only when the refusals span
+    FEED_REFUSED_DAYS_BEFORE_REBUILD distinct days with no successful
+    refresh in between, and at most once a day, so a bad afternoon and a
+    rebuild that also fails both cost one attempt rather than a loop.
+    """
+    reason = str(result.skipped_reason or "")
+    if not any(m in reason for m in _REFUSAL_MARKERS):
+        return
+    if state.get("benchmark_rebuild_day") == today:
+        return          # one attempt a day, whatever happens
+
+    own = None
+    try:
+        if conn is None:
+            if not db_file:
+                return
+            import sqlite3 as _sq
+
+            own = conn = _sq.connect(db_file)
+        rows = conn.execute(
+            "SELECT outcome, routine FROM benchmark_refreshes "
+            "WHERE date(checked_at) >= date(?, '-14 day') "
+            "ORDER BY checked_at DESC LIMIT 400", (today.isoformat(),)
+        ).fetchall()
+        days = conn.execute(
+            "SELECT COUNT(DISTINCT date(checked_at)) FROM benchmark_refreshes "
+            "WHERE date(checked_at) >= date(?, '-14 day') AND routine = 0",
+            (today.isoformat(),)).fetchone()[0] or 0
+    except Exception:  # noqa: BLE001 - no history means no evidence
+        return
+    finally:
+        if own is not None:
+            own.close()
+
+    # A SUCCESS ANYWHERE IN THE WINDOW means the feed still works and
+    # this was an outage, not an entitlement that has gone.
+    if any(str(o or "") == "updated" for o, _r in rows):
+        return
+    if days < FEED_REFUSED_DAYS_BEFORE_REBUILD:
+        return
+
+    state["benchmark_rebuild_day"] = today
+    _log.warning(
+        "The SPY series has been refused by its own feed on %d separate "
+        "days (%s) with no successful refresh in between, so it can never "
+        "update again as it stands. Rebuilding it on a feed these "
+        "credentials can actually read. The stored series is discarded "
+        "rather than spliced - a benchmark on two bases would make every "
+        "comparison against it quietly wrong.", days, reason)
+    try:
+        from catalyst.data import benchmark
+        from catalyst.dashboard.db import bars_path
+
+        rebuilt = benchmark.rebuild_benchmark(
+            bars_path(), creds.alpaca_key, creds.alpaca_secret)
+    except Exception:  # noqa: BLE001 - reporting must never stop trading
+        _log.exception("The SPY rebuild failed; the old series is unchanged.")
+        return
+    if conn is not None or db_file:
+        own2 = None
+        try:
+            target = conn
+            if target is None:
+                import sqlite3 as _sq
+
+                own2 = target = _sq.connect(db_file)
+            record_benchmark_refresh(target, rebuilt)
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            if own2 is not None:
+                own2.close()
+    if rebuilt.skipped_reason in (None, "already_current"):
+        state["benchmark_day"] = today
+        _log.warning(
+            "SPY series rebuilt on the %s feed: %d bar(s), through %s. The "
+            "comparison is live again, and the page names the feed it is "
+            "now on - IEX is one exchange's prints rather than the "
+            "consolidated tape.",
+            rebuilt.feed, rebuilt.written, rebuilt.last_day)
+    else:
+        _log.error(
+            "The SPY rebuild did not recover the series either (%s). Raw "
+            "upstream: %s", rebuilt.skipped_reason,
+            (rebuilt.raw_response or "")[:500])
 
 
 def _maybe_prune_logs(db_file: str, daily_state: dict) -> None:
