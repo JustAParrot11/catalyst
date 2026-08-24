@@ -194,6 +194,23 @@ SPY_STALE_AFTER_DAYS = 4
 SPY_FAILURE_WINDOW_DAYS = 4
 
 
+def last_real_close_day(points):
+    """The newest point that is a MEASURED close, not a drawn one.
+
+    `_load_spy` adds up to two synthetic points so the benchmark line
+    spans the same range as the bot's: an origin on the day the
+    comparison starts (money committed on a closed day buys at the next
+    open) and a hold at the far end (the last close, marked forward the
+    way every other figure on the page marks forward). Both are honest
+    to draw and neither is a price anybody paid, so anything asking
+    "when did we last really see SPY" has to skip them.
+    """
+    for point in reversed(points or ()):
+        if len(point) < 4 or not point[3]:
+            return point[0]
+    return None
+
+
 def _load_spy(start: date, end: date, capital_cents=None):
     """SPY closes from the local bar cache. Returns (points, source, error,
     row_count). Never touches the network — the dashboard reads what
@@ -249,9 +266,14 @@ def _load_spy(start: date, end: date, capital_cents=None):
                 f"or two has closed. Cache holds {len(bars)} bars ({span}).")
         return ([], f"local bar cache {root}/SPY.csv", why, len(bars), "")
     base = window[0].close
+    # THE FOURTH ELEMENT SAYS WHETHER THIS POINT IS A REAL CLOSE.
+    # Two synthetic points are added below so the two lines on the chart
+    # span the same range, and everything that means "the newest price
+    # we actually have" must be able to tell them apart - otherwise
+    # holding the last close forward silently reports itself as today's.
     points = [
         (b.day, float(b.close / base * 100),
-         int(Decimal(str(b.close)) / Decimal(str(base)) * capital))
+         int(Decimal(str(b.close)) / Decimal(str(base)) * capital), False)
         for b in window
     ]
     # BOTH LINES MUST LEAVE THE SAME POINT, or the chart shows two
@@ -270,7 +292,7 @@ def _load_spy(start: date, end: date, capital_cents=None):
     # next open, so the position is flat at 100 until then. The bot is
     # flat over the same days for the same reason.
     if window[0].day > start:
-        points.insert(0, (start, 100.0, int(capital)))
+        points.insert(0, (start, 100.0, int(capital), True))
     # AND BOTH LINES MUST REACH THE SAME RIGHT-HAND EDGE.
     #
     # OWNER-REPORTED 2026-08-24, twice: the SPY line stopping partway
@@ -287,7 +309,7 @@ def _load_spy(start: date, end: date, capital_cents=None):
     # today's is not final until the bell.
     if points[-1][0] < end:
         last_index, last_money = points[-1][1], points[-1][2]
-        points.append((end, last_index, last_money))
+        points.append((end, last_index, last_money, True))
     # Read the basis from the cache metadata rather than asserting it.
     # The label used to hardcode "feed=sip, adjustment=all"; if a refresh
     # ever wrote a different basis, the page would have gone on claiming
@@ -437,7 +459,14 @@ def performance(db: Db) -> Performance:
     # itself said about why. Only meaningful when there IS a SPY line:
     # the no-data cases above already have their own explanations.
     if spy_points and perf.end_day:
-        perf.spy_lag_days = max((perf.end_day - spy_points[-1][0]).days, 0)
+        # AGAINST THE LAST REAL CLOSE, never against the held point.
+        # Measuring to spy_points[-1] made this zero on every render the
+        # moment the hold was added, which silently switched off the
+        # whole lag diagnostic - the weekend note, the failing-refresh
+        # alarm and the rebuild offer with it.
+        real = last_real_close_day(spy_points)
+        if real is not None:
+            perf.spy_lag_days = max((perf.end_day - real).days, 0)
     last = db.q(
         "SELECT checked_at, outcome, routine, raw_response FROM "
         "benchmark_refreshes ORDER BY checked_at DESC LIMIT 1")
@@ -503,7 +532,10 @@ class BenchmarkView:
 
     @property
     def spy_last_day(self) -> date | None:
-        return self.spy_points[-1][0] if self.spy_points else None
+        # The last day SPY actually closed, not the day its last close
+        # is drawn out to. "last close 2026-08-24" on a Monday whose bar
+        # does not exist yet would be a straight untruth.
+        return last_real_close_day(self.spy_points)
 
     @property
     def difference_cents(self) -> Decimal | None:

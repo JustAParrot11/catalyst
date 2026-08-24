@@ -507,6 +507,20 @@ def _maybe_refresh_benchmark(state: dict | None, *, force: bool = False,
 #: afternoon cannot discard a series.
 FEED_REFUSED_DAYS_BEFORE_REBUILD = 2
 
+#: THE SAME EVIDENCE, REACHED SOONER, when the refusal is an ANSWER
+#: rather than an outage. `feed_no_longer_available_<feed>` is only ever
+#: produced when the PINNED feed returned 401 or 403 - the credentials do
+#: not permit it, which is a fact about the account and not a service
+#: having a bad afternoon. Alpaca does not 403 at random; the owner's log
+#: has sixteen consecutive.
+#:
+#: Two days is the right bar for "every feed refused", which can be a
+#: credentials outage that fixes itself. It is the wrong bar for this:
+#: it leaves the comparison dead for two more days to re-learn something
+#: the first three answers already said. At a fifteen-minute cycle three
+#: attempts is about forty-five minutes, which no single blip survives.
+FEED_UNAVAILABLE_ATTEMPTS_BEFORE_REBUILD = 3
+
 #: The markers refresh_benchmark uses for "the feed itself said no",
 #: as opposed to a flaky upstream. Kept in one place, matched rather
 #: than enumerated, so a new reason of the same kind is still caught.
@@ -570,7 +584,16 @@ def _maybe_rebuild_refused_feed(conn, db_file, result, creds, state, today):
     # this was an outage, not an entitlement that has gone.
     if any(str(o or "") == "updated" for o, _r in rows):
         return
-    if days < FEED_REFUSED_DAYS_BEFORE_REBUILD:
+    # TWO BARS, BECAUSE THE TWO REFUSALS MEAN DIFFERENT THINGS. A pinned
+    # feed answering 401/403 has told us the credentials do not permit
+    # it, and repeating the question for two days learns nothing; every
+    # feed refusing at once can still be an outage that passes.
+    unavailable = sum(
+        1 for o, _r in rows if "feed_no_longer_available" in str(o or ""))
+    enough = (
+        unavailable >= FEED_UNAVAILABLE_ATTEMPTS_BEFORE_REBUILD
+        or days >= FEED_REFUSED_DAYS_BEFORE_REBUILD)
+    if not enough:
         return
 
     state["benchmark_rebuild_day"] = today

@@ -36,7 +36,9 @@ import pytest
 from catalyst.data.benchmark import RefreshResult
 from catalyst.orchestrator import scheduler
 from catalyst.orchestrator.scheduler import (
-    FEED_REFUSED_DAYS_BEFORE_REBUILD, _maybe_rebuild_refused_feed,
+    FEED_REFUSED_DAYS_BEFORE_REBUILD,
+    FEED_UNAVAILABLE_ATTEMPTS_BEFORE_REBUILD,
+    _maybe_rebuild_refused_feed,
 )
 
 SCHEMA = Path(__file__).resolve().parents[1] / "catalyst" / "storage" / "schema.sql"
@@ -65,15 +67,17 @@ def conn(tmp_path):
     c.close()
 
 
-def refusals_on(conn, days, outcome="feed_no_longer_available_sip"):
-    """One recorded refusal per named day."""
+def refusals_on(conn, days, outcome="feed_no_longer_available_sip",
+                per_day=1):
+    """`per_day` recorded refusals on each named day."""
     for d in days:
+      for n in range(per_day):
         conn.execute(
             "INSERT OR REPLACE INTO benchmark_refreshes "
             "(checked_at, outcome, routine, bars_written, last_bar_day, "
             " feed, raw_response) VALUES (?,?,?,?,?,?,?)",
-            (datetime.combine(d, datetime.min.time(),
-                              timezone.utc).isoformat(),
+            ((datetime.combine(d, datetime.min.time(), timezone.utc)
+              + timedelta(minutes=15 * n)).isoformat(),
              outcome, 0, 0, "2026-08-21", "sip", "refused"))
     conn.commit()
 
@@ -120,11 +124,33 @@ class TestItRebuildsOnlyOnRealEvidence:
             "a feed that has refused every attempt for two days can never "
             "update again; waiting is not a plan")
 
-    def test_one_day_is_not_enough(self, conn, rebuilds):
-        refusals_on(conn, [TODAY])
-        _maybe_rebuild_refused_feed(conn, None, REFUSED, Creds(), {}, TODAY)
+    def test_one_day_of_an_OUTAGE_kind_is_not_enough(self, conn, rebuilds):
+        """"every feed refused" can be a credentials outage that passes,
+        so that one still waits for a second day."""
+        refusals_on(conn, [TODAY], outcome="feeds_refused_http_403")
+        result = RefreshResult(skipped_reason="feeds_refused_http_403",
+                               routine=False)
+        _maybe_rebuild_refused_feed(conn, None, result, Creds(), {}, TODAY)
         assert rebuilds == [], (
             "one bad afternoon must not discard a real series")
+
+    def test_a_single_pinned_feed_refusal_is_not_enough_either(self, conn,
+                                                               rebuilds):
+        refusals_on(conn, [TODAY], per_day=1)
+        _maybe_rebuild_refused_feed(conn, None, REFUSED, Creds(), {}, TODAY)
+        assert rebuilds == [], "one 403 could still be a blip"
+
+    def test_three_pinned_feed_refusals_are_enough_on_one_day(self, conn,
+                                                              rebuilds):
+        """THE OWNER'S CASE. `feed_no_longer_available_<feed>` is only
+        produced when the PINNED feed returned 401/403 - the credentials
+        do not permit it. That is an answer about the account, not a
+        service having a bad afternoon, and waiting two days to re-learn
+        it leaves the comparison dead for two more days."""
+        refusals_on(conn, [TODAY],
+                    per_day=FEED_UNAVAILABLE_ATTEMPTS_BEFORE_REBUILD)
+        _maybe_rebuild_refused_feed(conn, None, REFUSED, Creds(), {}, TODAY)
+        assert len(rebuilds) == 1
 
     def test_a_success_in_the_window_means_it_was_an_outage(self, conn,
                                                             rebuilds):
