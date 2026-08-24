@@ -254,6 +254,23 @@ def _load_spy(start: date, end: date, capital_cents=None):
          int(Decimal(str(b.close)) / Decimal(str(base)) * capital))
         for b in window
     ]
+    # BOTH LINES MUST LEAVE THE SAME POINT, or the chart shows two
+    # series starting at different heights while the caption says they
+    # are indexed to 100 on the same day.
+    #
+    # OWNER-REPORTED 2026-08-24: "spy graph still feels wrong."
+    # Reproduced: a baseline struck on a Saturday puts the bot's 100 on
+    # the Saturday and SPY's 100 on the Monday, because SPY's base is
+    # its first BAR in the window and there is no weekend bar. Every
+    # first run at a weekend does this, and this account's baseline has
+    # been struck six times.
+    #
+    # Prepending is not a cosmetic nudge, it is what actually happened:
+    # money committed to SPY on a day the market is shut buys at the
+    # next open, so the position is flat at 100 until then. The bot is
+    # flat over the same days for the same reason.
+    if window[0].day > start:
+        points.insert(0, (start, 100.0, int(capital)))
     # Read the basis from the cache metadata rather than asserting it.
     # The label used to hardcode "feed=sip, adjustment=all"; if a refresh
     # ever wrote a different basis, the page would have gone on claiming

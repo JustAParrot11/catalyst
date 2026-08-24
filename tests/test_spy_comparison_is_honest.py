@@ -194,8 +194,27 @@ class TestTheBenchmarkBasisIsStated:
         assert "total return (adjustment=all)" in src
 
     def test_both_series_are_indexed_to_the_same_day(self):
+        """THIS TEST USED TO ASSERT THE SENTENCE, NOT THE FACT.
+
+        It searched panels.py for the words "indexed to 100 on the same
+        day as the bot" - so it passed for as long as the claim was
+        WRITTEN, whether or not it was true. It was not: a baseline
+        struck on a day the market is shut indexed the bot from that day
+        and SPY from the next session, and the owner saw two lines
+        leaving different points under a caption promising otherwise
+        ("spy graph still feels wrong", 2026-08-24).
+
+        The behaviour is now asserted directly, across every kind of
+        start day, in tests/test_spy_chart_origin.py. What is left here
+        is the half this file owns: that the page STATES the day it
+        indexes from rather than asserting an alignment the reader
+        cannot check.
+        """
         src = open(panels.__file__).read()
-        assert "indexed to 100 on the same day as the bot" in src
+        assert "indexed to 100 on" in src
+        assert "indexed to 100 on the same day as the bot line" not in src, (
+            "the page is back to claiming an alignment instead of naming "
+            "the day it actually used")
 
 
 class TestTheWarningIsActuallyWIRED:
