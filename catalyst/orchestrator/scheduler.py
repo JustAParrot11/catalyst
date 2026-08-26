@@ -320,7 +320,26 @@ def _maybe_reconcile_yesterday(db_file: str) -> None:
                         fetch=partial(fetch_usage_day,
                                       admin_key=creds.anthropic_admin_key))
                     if fixed.applied:
-                        _log.warning(
+                        # PROPORTIONATE TO THE CORRECTION. Owner's
+                        # bundle, 2026-08-26: "Ledger corrected for
+                        # 2026-08-25 ... a -1.5104c adjustment" at
+                        # WARNING - four tenths of one percent of a
+                        # 354c day, which is rounding.
+                        #
+                        # Correcting is what this job is FOR, so a
+                        # correction is not by itself a fault; a
+                        # warning every night for a penny and a half is
+                        # how a person learns to scroll past warnings.
+                        # The bar is the one the reconciliation already
+                        # uses for "large enough to act on", so there is
+                        # no second number to keep in step.
+                        from catalyst.cost.tracker import (
+                            RECONCILE_PAUSE_FLOOR_CENTS,
+                        )
+
+                        big = (abs(fixed.adjustment_cents)
+                               > RECONCILE_PAUSE_FLOOR_CENTS)
+                        (_log.warning if big else _log.info)(
                             "Ledger corrected for %s: %s", day, fixed.reason)
                 except Exception:  # noqa: BLE001 - reporting, never trading
                     _log.exception(

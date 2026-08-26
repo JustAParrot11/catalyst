@@ -271,9 +271,22 @@ def fetch_events(
             # exchange-prefixed foreign tickers ("TSX:CJT"), and this is
             # a US-equities cash account - carrying them would put
             # candidates in the funnel that can never become an order.
-            tickers = [str(s).strip().upper()
+            # A SYMBOL HAS TO BE A STRING BEFORE IT IS A SYMBOL.
+            #
+            # OWNER'S BUNDLE, 2026-08-26: 24 requests a day to
+            # /v2/stocks/NONE/quotes/latest, all 404. A null inside a
+            # story's `symbols` array survived the guard below, because
+            # str(None) is "None" - truthy, no colon - and .upper() made
+            # it the ticker NONE. It then flowed into a candidate, and
+            # the quote gate spent a request a cycle proving it does not
+            # exist.
+            #
+            # Stringifying BEFORE validating is what did it: the check
+            # has to be about what the value is, not about what it looks
+            # like once str() has had a go at it.
+            tickers = [s.strip().upper()
                        for s in (item.get("symbols") or [])
-                       if str(s).strip() and ":" not in str(s)]
+                       if isinstance(s, str) and s.strip() and ":" not in s]
             if not tickers or len(tickers) > MAX_SYMBOLS_PER_STORY:
                 continue
             headline = str(item.get("headline") or "")
