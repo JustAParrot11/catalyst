@@ -6902,6 +6902,91 @@ def capital_panel(db: Db, p: str = "cap") -> str:
 CONVICTION_WINDOW_DAYS = 7
 
 
+def _conviction_by_direction(q, floor, p: str) -> str:
+    """What conviction looks like when the model DECLINES, beside what
+    it looks like when it commits.
+
+    OWNER-ASKED 2026-08-26: "is it still trading and making decisions as
+    its meant to? The logic isnt broken? Its not traded in a while."
+
+    Measured over all 154 views on their machine, the two populations
+    are not the same distribution and it is not close:
+
+        no_trade   n=137   median 0.68   max 0.85   101 at or above 0.60
+        long       n=17    median 0.54   max 0.60     1 at or above 0.60
+
+    THAT CONTRAST IS THE WHOLE DIAGNOSIS, and the panel above cannot
+    show it because it drops no_trade views on the reasonable ground
+    that they carry no directional call. The consequence is that "the
+    model is consistently below the bar" reads as a timid model, when
+    the same model scores 0.85 the moment it is declining something.
+
+    CLAUDE.md defines conviction as how often this call would be right
+    across many similar setups. A model applying that honestly SHOULD
+    score a decline high - "this is not worth trading" is an easy call
+    to be right about - and a directional equity view over days to weeks
+    near 0.55, because that is what such calls actually resolve at. So a
+    0.60 floor asks a calibrated model for something the scale rarely
+    produces on the only views that can become trades.
+
+    THIS PANEL DOES NOT MOVE THE FLOOR AND MUST NOT. That is an adaptive
+    parameter, and CLAUDE.md is explicit that it moves on closed, scored
+    outcomes and never on the model's own confidence - which is exactly
+    what this is. The refusal tracker is the evidence, and it needs its
+    12-day horizon before it has any. What this fixes is the silence:
+    "the system refuses good trades forever and never signals that it is
+    doing so. That silence is the defect, not the numbers."
+    """
+    import statistics
+
+    by_dir = {}
+    for r in q.rows:
+        try:
+            c = float(r["conviction"])
+        except (TypeError, ValueError):
+            continue
+        by_dir.setdefault("declined" if r["direction"] == "no_trade"
+                          else "committed", []).append(c)
+    if len(by_dir) < 2 or not all(by_dir.values()):
+        return ""       # nothing to contrast
+
+    f = float(floor)
+    rows = []
+    for label, name in (("committed", "gave a direction (can become a trade)"),
+                        ("declined", "said no_trade (cannot)")):
+        vals = sorted(by_dir.get(label) or [])
+        if not vals:
+            continue
+        above = sum(1 for v in vals if v >= f)
+        rows.append([
+            esc(name), str(len(vals)),
+            f"{statistics.median(vals):.2f}", f"{max(vals):.2f}",
+            f"{above} ({above / len(vals) * 100:.0f}%)"])
+    out = [f'<h4 id="{p}-bydir">Conviction when it commits, against '
+           "conviction when it declines</h4>",
+           table(f"{p}-bydir-t",
+                 ["the model...", "n", "median", "best",
+                  f"at or above {f:.2f}"],
+                 rows, numeric_cols={1, 2, 3, 4})]
+
+    com = sorted(by_dir.get("committed") or [])
+    dec = sorted(by_dir.get("declined") or [])
+    if com and dec and statistics.median(dec) > statistics.median(com):
+        out.append(note(
+            f'<b id="{p}-bydir-verdict">The model scores its DECLINES '
+            "higher than its directional calls.</b> That is what a "
+            "calibrated model does, not a broken one: conviction here "
+            "means how often this call would be right, and \"not worth "
+            "trading\" is an easier thing to be right about than the "
+            "direction of a stock over days to weeks. It does mean the "
+            f"floor of {f:.2f} is being asked of the one population that "
+            "rarely reaches it. Whether that floor is too high is a "
+            "question for the refusal tracker's scored outcomes, not for "
+            "this table - the floor moves on what refused candidates "
+            "went on to do, never on the model's own confidence."))
+    return "".join(out)
+
+
 def conviction_panel(db: Db, p: str = "conv",
                      days: int = CONVICTION_WINDOW_DAYS) -> str:
     """Why it did not trade, as one number instead of a scroll.
@@ -7024,6 +7109,7 @@ def conviction_panel(db: Db, p: str = "conv",
                    "these candidates, and moving the floor would buy trades "
                    "the model does not believe in.")
     out.append(note(f'<span id="{p}-verdict">{verdict}</span>'))
+    out.append(_conviction_by_direction(q, floor, p))
 
     out.append(prov(
         f"Conviction from research_views, joined to risk_decisions for the "
