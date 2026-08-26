@@ -18,6 +18,7 @@ import sqlite3
 from typing import Any
 
 from catalyst.graph.store import (
+    ENTITY_KINDS,
     Assertion,
     assert_link,
     chain_to_catalyst,
@@ -99,14 +100,48 @@ def research_findings_to_graph(
     return recorded
 
 
+#: WHERE A KIND NOBODY ANTICIPATED LANDS.
+#:
+#: OWNER'S BUNDLE, 2026-08-26: three research calls in a day lost every
+#: finding they made, to "unknown entity kind 'ticker'", "'metric'" and
+#: "'equity'". The schema's kinds are the right eight, and the model
+#: reaches for a synonym or for a category that is not one - which is
+#: what a model will always eventually do, whatever list it is given.
+#:
+#: Rejecting the batch made the strictness cost the evidence it was
+#: protecting: one unfamiliar word and NOTHING from that call is kept.
+#: `other` exists precisely for "this does not fit a category", so an
+#: unrecognised kind belongs there - with the word the model actually
+#: used preserved in the display name, so nothing is silently renamed.
+#:
+#: Classified by the rule, not by a synonym table (house rule 7): the
+#: rule is "a kind we do not model is `other`", which is true of the
+#: next unfamiliar word as well as of these three.
+UNKNOWN_KIND_FALLBACK = "other"
+
+
+def _coerce_kind(kind: Any) -> tuple[str, str | None]:
+    """(kind to store, the original if it was not one we model)."""
+    text = str(kind or "").strip().lower()
+    if text in ENTITY_KINDS:
+        return text, None
+    return UNKNOWN_KIND_FALLBACK, (text or "(missing)")
+
+
 def _entity_from_spec(conn: sqlite3.Connection, spec: Any) -> Any:
     if not isinstance(spec, dict):
         raise ValueError(f"entity spec must be a dict, got {type(spec).__name__}")
+    kind, original = _coerce_kind(spec.get("kind"))
+    display = spec.get("display_name")
+    if original is not None:
+        # NOT SILENTLY RENAMED. The word the model chose is kept where a
+        # reader will see it, so "other" never hides what it really was.
+        display = f"{display} [kind: {original}]" if display else f"[kind: {original}]"
     return upsert_entity(
         conn,
-        kind=spec.get("kind"),
+        kind=kind,
         canonical_key=spec.get("canonical_key"),
-        display_name=spec.get("display_name"),
+        display_name=display,
         first_seen_at=spec.get("first_seen_at"),
     )
 
