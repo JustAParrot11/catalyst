@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import gzip
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -54,9 +54,32 @@ from pathlib import Path
 #: which is what makes the point-in-time discipline possible at all.
 FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 
-#: Companies report quarterly. A week is far inside that and still
-#: catches a filing within days of it appearing.
-FACTS_REFRESH_DAYS = 7
+#: THE DRIFT WINDOW IS THE WHOLE TRADE, so an old filing is not a
+#: cheaper version of a fresh one - it is nothing at all.
+#:
+#: OWNER'S BUNDLE, 2026-08-30: the arm's first day live produced 6,293
+#: candidates, dated from 2019 onwards - `A-2019-02-22-AMH-51`,
+#: `A-2020-02-14-AAT-65`. build_events replays every earnings event a
+#: company has ever filed, which is exactly right for grading ten years
+#: of history and exactly wrong for deciding what to buy this morning.
+#: 810 of them were queued every cycle, and on the next trading day six
+#: a cycle would have gone into PAID research on earnings reports filed
+#: up to seven years ago - roughly $30 of a $10 daily ceiling, spent
+#: before lunch on trades that cannot exist.
+#:
+#: Candidate A enters on the filing and holds 12 trading days. Five
+#: calendar days covers a Friday filing first seen the following
+#: Wednesday and still leaves most of the window; past that the graded
+#: trade has already happened without us.
+MAX_EVENT_AGE_DAYS = 5
+
+#: Companies report quarterly, so most re-fetches find nothing new -
+#: but the cadence is NOT free to choose. A filing is invisible until
+#: the cache is refreshed, so a refresh slower than MAX_EVENT_AGE_DAYS
+#: means a filing can go stale before it is ever seen, and the arm
+#: silently produces nothing at all. The two numbers are one rule:
+#: refresh strictly faster than the window, and a test holds it.
+FACTS_REFRESH_DAYS = 2
 
 #: Per cycle. The bot runs 96 cycles a day, so this is a ceiling on the
 #: burst, not on the throughput: a few hundred companies still reach
@@ -232,13 +255,48 @@ def refresh_facts(pairs, facts_dir, conn, *, http_get=None, now=None,
     return result
 
 
+@dataclass
+class DriftLiveness:
+    """Why the live arm emitted what it emitted, in the shape a log line
+    can read. A drift arm producing nothing is the normal case on most
+    days - the point of these counts is to say WHICH nothing it is
+    (house rule 3: a zero never stands alone)."""
+
+    built: int = 0
+    live: int = 0
+    too_old: int = 0
+    in_the_future: int = 0
+    newest_filed: object = None
+    max_age_days: int = 0
+
+    def why_empty(self) -> str:
+        if self.live:
+            return ""
+        if self.built == 0:
+            return ("the companyfacts cache produced no surprise events at "
+                    "all - either nothing is cached yet or no company in it "
+                    "cleared the surprise threshold")
+        newest = (f"newest filing in the cache is {self.newest_filed}"
+                  if self.newest_filed else "no filing dates were readable")
+        return (f"{self.built} graded event(s), none filed within the last "
+                f"{self.max_age_days} days, so the drift window has closed "
+                f"on all of them; {newest}")
+
+
 def drift_candidates(facts_dir, tickers, *, sue_min=None):
-    """Earnings-drift candidates from whatever the cache holds.
+    """EVERY earnings-drift candidate the cache can support, back to the
+    start of the company's XBRL history.
 
     A thin pass-through to the GRADED code: build_events and
     build_candidates are the versions the bake-off measured and are not
     reimplemented here. Never raises - a drift arm that cannot build is
     a quiet arm, not a dead cycle.
+
+    NOT FOR THE LIVE PIPELINE. This is the ten-years-of-history shape
+    the backtest needs. Wiring it into a cycle queues earnings reports
+    from 2019 for paid research; use live_drift_candidates(), and
+    test_drift_arm_is_live_not_historical.py holds that the orchestrator
+    does.
     """
     try:
         from catalyst.strategies.earnings_drift import (
@@ -254,3 +312,46 @@ def drift_candidates(facts_dir, tickers, *, sue_min=None):
                                 else sue_min)
     except Exception:  # noqa: BLE001 - reporting, never trading
         return [], {}
+
+
+def live_drift_candidates(facts_dir, tickers, as_of, *, sue_min=None,
+                          max_age_days: int = MAX_EVENT_AGE_DAYS):
+    """The drift candidates that are tradeable NOW -> (cands, table, stats).
+
+    Same graded signal, filtered to the events whose drift window is
+    still open, and stamped with the real discovery time.
+
+    THE TIMESTAMP MATTERS TOO. build_candidates sets
+    discovered_at=2016-01-01 - a backtest sentinel, since a replay has
+    no "now". Live, that date is a lie the dashboard believes: every
+    window on the candidates table is keyed on discovered_at, so 6,293
+    candidates created on 2026-08-30 did not appear in a single one of
+    them. The owner would have read "no candidates today" while the
+    research queue filled up.
+    """
+    cands, table = drift_candidates(facts_dir, tickers, sue_min=sue_min)
+    stats = DriftLiveness(built=len(cands), max_age_days=max_age_days)
+    if not cands:
+        return [], {}, stats
+    try:
+        today = as_of.date()
+    except AttributeError:
+        today = as_of
+    oldest = today - timedelta(days=max_age_days)
+    stats.newest_filed = max(c.catalyst_date for c in cands)
+
+    live = []
+    for c in cands:
+        if c.catalyst_date > today:
+            # A `filed` date after today means the cache or the clock is
+            # wrong. Refusing is the safe direction and it is counted,
+            # never dropped in silence.
+            stats.in_the_future += 1
+            continue
+        if c.catalyst_date < oldest:
+            stats.too_old += 1
+            continue
+        live.append(replace(c, discovered_at=as_of))
+    stats.live = len(live)
+    # The id is unchanged by replace(), so the signal table still keys.
+    return live, {c.id: table[c.id] for c in live if c.id in table}, stats
