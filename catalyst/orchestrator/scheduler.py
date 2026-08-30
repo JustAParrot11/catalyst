@@ -546,6 +546,35 @@ FEED_UNAVAILABLE_ATTEMPTS_BEFORE_REBUILD = 3
 _REFUSAL_MARKERS = ("feed_no_longer_available", "feeds_refused_http")
 
 
+def _issuer_pairs(raw_events) -> list:
+    """(ticker, issuer_cik) for every company in this pass's filings.
+
+    THE UNIVERSE COMES FROM WHAT THE BOT ALREADY SEES. The drift arm
+    needs to know which companies to fetch XBRL for, and inventing a
+    separate universe would be a second thing to keep current. The Form
+    4 feed already names companies with recent insider activity and
+    carries both the ticker and the issuer CIK on every flattened row -
+    so the drift arm follows the screen's own footprint, and a company
+    nobody has filed about costs nothing.
+
+    Deduplicated, and a row missing either half is skipped rather than
+    guessed at.
+    """
+    seen: dict = {}
+    for ev in raw_events or ():
+        raw = getattr(ev, "payload_raw", None)
+        if not isinstance(raw, dict):
+            continue
+        ticker = raw.get("symbol")
+        cik = raw.get("issuer_cik")
+        if not isinstance(ticker, str) or not ticker.strip():
+            continue
+        if not isinstance(cik, str) or not cik.strip():
+            continue
+        seen.setdefault(ticker.strip().upper(), cik.strip())
+    return sorted(seen.items())
+
+
 def _maybe_rebuild_refused_feed(conn, db_file, result, creds, state, today):
     """Move the SPY series onto a feed these credentials can read.
 
@@ -1218,6 +1247,60 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
             _log.exception(
                 "Conjunction discovery failed; the Form 4 candidates from "
                 "this pass are unaffected.")
+
+        # THE SECOND GRADED ARM: post-earnings drift.
+        #
+        # OWNER-ASKED 2026-08-30: "feels like its idling too much".
+        # Measured over the four days to then: 363 cycles, 28 research
+        # calls, 0 trades - because the bot ran ONE arm, and on the
+        # bake-off it is the worse-graded of the two that were built:
+        #
+        #   arm                     n    hit   mean/trade  maxDD  worst
+        #   A XBRL earnings drift  84  57.1%    +1.59%      8.8% -18.5%
+        #   C insider clusters    203  49.3%    +0.87%     41.2% -57.4%
+        #
+        # A's hit rate is identical in and out of sample; C's fell from
+        # 53.1% to 49.3% - under a coin flip - with five times the
+        # drawdown. strategies/earnings_drift.py was written,
+        # pre-registered and graded, and nothing fetched the XBRL it
+        # needs, so in production it produced nothing at all.
+        #
+        # NEITHER ARM IS PROVEN. Neither beat SPY over the full range
+        # once costs were applied and A's out-of-sample n is 84. This
+        # adds a better-GRADED source, not a profitable one, and it goes
+        # through the identical research, pricing, risk and execution
+        # path as everything else - nothing downstream knows which arm
+        # found a candidate, only the origin stamp records it.
+        #
+        # Same containment as the conjunction builder above: it runs
+        # after the Form 4 screen, merges rather than replaces, and a
+        # failure leaves `out` exactly as the screen built it.
+        try:
+            from catalyst.data.sources.edgar_xbrl import (
+                drift_candidates, refresh_facts,
+            )
+            from pathlib import Path
+
+            from catalyst.dashboard.db import bars_path
+
+            pairs = _issuer_pairs(raw_events)
+            facts_dir = str(Path(bars_path()).parent / "xbrl_facts")
+            got = refresh_facts(pairs, facts_dir, conn)
+            drift, _table = drift_candidates(
+                facts_dir, [t for t, _ in pairs])
+            known = {c.ticker for c in out}
+            fresh = [c for c in drift if c.ticker not in known]
+            out.extend(fresh)
+            _record_origin(conn, fresh, "earnings_drift", None, as_of)
+            _log.info(
+                "Earnings drift: %d company facts fetched, %d already "
+                "current, %d candidate(s), %d new after de-duplication.%s",
+                got.fetched, got.already_current, len(drift), len(fresh),
+                (" " + got.why_empty()) if got.why_empty() else "")
+        except Exception:  # noqa: BLE001 - never lose the graded arm
+            _log.exception(
+                "The earnings-drift arm failed; the Form 4 candidates "
+                "from this pass are unaffected.")
 
         # CLAUDE'S OWN HUNT over the raw feed, once the mechanical
         # builders have had their say.

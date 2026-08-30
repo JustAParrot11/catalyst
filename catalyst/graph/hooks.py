@@ -19,6 +19,8 @@ from typing import Any
 
 from catalyst.graph.store import (
     ENTITY_KINDS,
+    RELIABILITY_CLASSES,
+    SOURCE_CLASSES,
     Assertion,
     assert_link,
     chain_to_catalyst,
@@ -86,8 +88,10 @@ def research_findings_to_graph(
                     finding["predicate"],
                     object_entity_id=obj.id if obj else None,
                     object_date=finding.get("object_date"),
-                    source_class=finding.get("source_class"),
-                    reliability=finding.get("reliability"),
+                    source_class=_coerce_provenance(
+                        finding.get("source_class"), SOURCE_CLASSES)[0],
+                    reliability=_coerce_provenance(
+                        finding.get("reliability"), RELIABILITY_CLASSES)[0],
                     source_ref=(finding.get("source_ref")
                                 or f"research_call:{call_log_id}"),
                     asserted_at=finding.get("asserted_at"),
@@ -126,6 +130,35 @@ def _coerce_kind(kind: Any) -> tuple[str, str | None]:
     if text in ENTITY_KINDS:
         return text, None
     return UNKNOWN_KIND_FALLBACK, (text or "(missing)")
+
+
+#: THE SAME PROBLEM, ONE FIELD OVER.
+#:
+#: Coercing `kind` stopped the "unknown entity kind" losses, and the
+#: owner's next log showed the model failing on the NEIGHBOURS instead:
+#:
+#:   reliability 0.9 is not one of (...)          <- a number, not a class
+#:   source_class 'company_filing' is not one of (...)
+#:
+#: Fixing one field and leaving its siblings was the mistake; a model
+#: will reach for an unlisted word in any enum it is given.
+#:
+#: BUT THE DIRECTION IS OPPOSITE TO `other`. These two fields say how
+#: much a claim should be TRUSTED, so an unrecognised value must fall to
+#: the LEAST trusted class, never a middling one. `model_inference` is
+#: exactly that: "this came from the model's own reasoning". Guessing
+#: 'edgar_filing' for an unreadable source_class would promote a guess
+#: to a primary document, which is the one direction that could make the
+#: graph lie about its own evidence.
+UNKNOWN_PROVENANCE_FALLBACK = "model_inference"
+
+
+def _coerce_provenance(value: Any, allowed) -> tuple[str, str | None]:
+    """(value to store, the original if it was not one we model)."""
+    text = str(value or "").strip().lower()
+    if text in allowed:
+        return text, None
+    return UNKNOWN_PROVENANCE_FALLBACK, (text or "(missing)")
 
 
 def _entity_from_spec(conn: sqlite3.Connection, spec: Any) -> Any:
