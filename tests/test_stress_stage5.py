@@ -1528,8 +1528,18 @@ class TestModelTransportFailure:
 
 class TestUnknownCatalystType:
     def test_unknown_catalyst_type_is_a_skip_not_a_crash(self, db):
+        """The example used to be "earnings_drift", which stopped being
+        unknown the day that arm was wired in and given a risk-table
+        row. A test of the UNKNOWN path has to name something the table
+        genuinely does not carry, or it silently starts testing the
+        known path instead - which is how it began passing for the
+        wrong reason."""
+        from catalyst.risk.adaptive_params import DEFAULT_PARAMS
+
+        assert "a_type_no_strategy_emits" not in DEFAULT_PARAMS[
+            "adverse_gap_assumption"], "this example is no longer unknown"
         unknown = Candidate(
-            id="x", ticker="TEST", catalyst_type="earnings_drift",
+            id="x", ticker="TEST", catalyst_type="a_type_no_strategy_emits",
             catalyst_date=date(2026, 8, 20),
             catalyst_date_confidence="estimated", source_event_ids=(),
             discovered_at=NOW, sector="tech", correlation_tags=())

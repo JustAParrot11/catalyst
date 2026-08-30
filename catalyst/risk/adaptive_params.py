@@ -43,9 +43,9 @@ _PER_CATALYST = {
 }
 
 # Starting values. Every number here is an ESTIMATE pending refusal-
-# tracker evidence, except holding_period_estimate.insider_cluster which
-# is the bake-off winner's measured hold (HOLD_DAYS=12 in
-# strategies/insider_cluster.py, graded over 2016-2026). The previous
+# tracker evidence, except holding_period_estimate for the two graded
+# arms - insider_cluster and earnings_drift - whose HOLD_DAYS=12 was
+# fixed before grading and measured over 2016-2026. The previous
 # build's lesson (BUILD-BRIEF): these being wrong is survivable; them
 # being wrong SILENTLY is not - which is what the refusal tracker and
 # this module exist to fix.
@@ -59,9 +59,11 @@ _PER_CATALYST = {
 # and it is why the bot has "a broad range of investment areas" in
 # discovery and one of them in practice.
 #
-# EVERY NUMBER BELOW IS AN ESTIMATE AND NONE IS BACKTESTED. Only
-# insider_cluster has been graded (bake-off winner, 2016-2026,
-# HOLD_DAYS=12). The rest are reasoned from the SHAPE of the event -
+# ALMOST EVERY NUMBER BELOW IS AN ESTIMATE. TWO rows rest on the
+# bake-off: insider_cluster (Candidate C) and earnings_drift
+# (Candidate A), and in both it is the HOLD that was measured -
+# HOLD_DAYS=12, fixed before grading. Their gaps and stops are still
+# reasoned. The rest are reasoned from the SHAPE of the event -
 # how far a name can gap when the news lands - and they exist to be
 # moved by the refusal tracker, not to be believed. The brief's rule
 # holds: being wrong is survivable, being wrong SILENTLY is not, which
@@ -106,8 +108,35 @@ _CATALYST_SHAPES = {
     # Scheduled, binary-ish, and the whole move lands in one print.
     "earnings":          ("0.14", "0.16", "5", "0.06",
                           "a scheduled binary; the gap IS the event"),
-    "earnings_result":   ("0.12", "0.14", "5", "0.05",
+    "earnings_result":   ("0.12", "0.14", "5", "0.02",
                           "the print has landed - drift, not the gap"),
+    # THE SECOND GRADED ARM, and the row it could not trade without.
+    #
+    # strategies/earnings_drift.py sets catalyst_type="earnings_drift"
+    # and this table had no such key, so every candidate it produced
+    # would have died on `unknown_catalyst_type` in evaluate.py - AFTER
+    # its research was paid for. That is the exact failure the note at
+    # the top of this table records costing 64% of one live day's
+    # candidates, repeated for a brand-new arm.
+    #
+    # Gap and stop copy `earnings_result` because the mechanism is the
+    # same one: the print has landed and what is left is drift, so the
+    # gap risk is the NEXT surprise rather than this one. Those two are
+    # still estimates.
+    #
+    # The HOLD is not an estimate. HOLD_DAYS=12 was fixed before grading
+    # and is what the bake-off measured (n=84 out of sample, hit 57.1%,
+    # maxDD 8.8%), so it belongs beside insider_cluster's 12 as a
+    # measured row rather than a reasoned one.
+    #
+    # Its search share comes from `earnings_result` (0.05 -> 0.02, the
+    # same mechanism ungraded) and `strategic_review` (0.06 -> 0.03, an
+    # estimate with the widest tails in the table). The shares still sum
+    # to exactly 1.0 - a joint invariant enforces it.
+    "earnings_drift":    ("0.12", "0.14", "12", "0.06",
+                          "graded 2016-2026 as bake-off Candidate A; the "
+                          "hold is measured, the gap and stop copy "
+                          "earnings_result's same mechanism"),
     "guidance":          ("0.12", "0.14", "8", "0.06",
                           "re-rates the forward multiple, often violently"),
     # Deal situations: outcome is known-ish, so the gap is smaller.
@@ -130,7 +159,7 @@ _CATALYST_SHAPES = {
     # Slower re-ratings: the market takes days to agree.
     "restructuring":     ("0.12", "0.14", "15", "0.05",
                           "a slow re-rating, not a single print"),
-    "strategic_review":  ("0.14", "0.16", "15", "0.06",
+    "strategic_review":  ("0.14", "0.16", "15", "0.03",
                           "optionality on a sale; fat tails both ways"),
     "buyback":           ("0.07", "0.10", "15", "0.03",
                           "a floor under the price rather than a jump"),
@@ -154,7 +183,7 @@ DEFAULT_PARAMS: dict = {
 #: The dashboard reads this so an estimate is never presented as
 #: evidence - the previous build's defect was not wrong numbers, it was
 #: wrong numbers that looked measured.
-GRADED_CATALYST_TYPES = frozenset({"insider_cluster"})
+GRADED_CATALYST_TYPES = frozenset({"insider_cluster", "earnings_drift"})
 
 
 def catalyst_shape_reason(catalyst_type: str) -> str:
