@@ -1,4 +1,4 @@
-"""Order construction and stop management. HUMAN REVIEW REQUIRED.
+"""Order construction and stop management. MONEY-CRITICAL.
 
 replace_stop() is cancel-then-confirm-then-place: the new stop is never
 placed unless the old one's cancellation is confirmed - two live stops

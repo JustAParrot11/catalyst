@@ -1,7 +1,7 @@
 """Question design and tool definitions offered to Claude.
 
 Owner: strategy-analyst. What Claude is asked — not how its answer is
-enforced (that is boundary.py, under human review).
+enforced (that is boundary.py, money-critical).
 
 Design rules, enforced by tests/test_discovery.py:
 - The prompt asks for judgements only: direction, conviction, thesis,

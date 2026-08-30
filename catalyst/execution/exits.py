@@ -1,4 +1,4 @@
-"""Time-based and stop-triggered exits. HUMAN REVIEW REQUIRED.
+"""Time-based and stop-triggered exits. MONEY-CRITICAL.
 
 Every position carries a hard exit date set when it is opened; if the
 thesis has not played out by then, the position closes regardless

@@ -1,6 +1,6 @@
 """The ResearchView contract - the model/code boundary object.
 
-HUMAN REVIEW REQUIRED on any change to this file (ARCHITECTURE.md
+MONEY-CRITICAL on any change to this file (ARCHITECTURE.md
 section 8; CLAUDE.md house rule 5).
 
 ResearchView deliberately has NO field that can hold a position size, a

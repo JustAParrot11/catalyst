@@ -1,4 +1,4 @@
-"""Thin Alpaca adapter. HUMAN REVIEW REQUIRED.
+"""Thin Alpaca adapter. MONEY-CRITICAL.
 
 Credentials come from the runtime credential store written by the setup
 UI (stage 7) - never from the repository, never logged. In the build

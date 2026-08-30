@@ -186,6 +186,9 @@ docstrings already promise not to have but nothing previously checked.
 | `test_usage_components_captures_cache_tokens_explicitly` | TRAPS.md: dropping `cache_creation_input_tokens`/`cache_read_input_tokens` understates the bill ~50% | removed `cache_creation_input_tokens` from `UsageComponents` | `UsageComponents is missing 'cache_creation_input_tokens'` |
 | `test_cost_ledger_exposes_no_annualizing_function` | `cost/ledger.py`'s own contract: never annualize a partial-month figure | added an `annualized_run_rate_cents()` function to the module | `cost.ledger exposes an annualizing function: ['annualized_run_rate_cents']` |
 | `test_human_review_required_files_carry_the_marker` | CLAUDE.md house rule 5: risk/execution/broker changes need human review — this marker is what makes that greppable | removed `HUMAN REVIEW REQUIRED` from `risk/sizing.py`'s docstring | `ownership marker missing from: ['risk/sizing.py']` |
+| `test_money_critical_files_carry_the_marker` | CLAUDE.md house rule 5 as rewritten 2026-08-31 — the marker renamed to `MONEY-CRITICAL` when the owner removed the sign-off; the greppable list is what survived | removed `MONEY-CRITICAL` from `risk/sizing.py`'s docstring | `ownership marker missing from: ['risk/sizing.py']` |
+| `test_the_old_review_marker_is_gone_everywhere` | a file still saying `HUMAN REVIEW REQUIRED` sends the next session asking for a sign-off that no longer exists | put the old marker back into `execution/exits.py` | `the retired marker is still in: ['execution/exits.py']` |
+| `test_the_hard_bounds_still_say_a_human_decides` | the ONE gate house rule 5 kept — hard bounds prevent ruin and the owner still decides them | removed "human decides" from `risk/hard_bounds.py` | `hard_bounds.py no longer says the owner decides these` |
 
 Every one of these was sabotaged, run, confirmed to fail with the
 message shown, restored via `cp` from the pre-sabotage backup, and

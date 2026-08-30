@@ -299,12 +299,24 @@ def test_cost_ledger_exposes_no_annualizing_function():
     assert not offenders, f"cost.ledger exposes an annualizing function: {offenders}"
 
 
-def test_human_review_required_files_carry_the_marker():
-    """Files on the risk/execution/broker ownership row (CLAUDE.md house
-    rule 5: 'Changes to risk, execution or broker code need human
-    review') carry a literal, greppable marker. This is what lets a
-    human find every file that needs their sign-off without having to
-    remember the list from memory."""
+def test_money_critical_files_carry_the_marker():
+    """Every file that sizes, stops, orders, reconciles or crosses the
+    model/code boundary carries a literal, greppable marker (CLAUDE.md
+    house rule 5).
+
+    THE MARKER CHANGED NAME ON 2026-08-31, and the reason is worth
+    keeping. It used to read HUMAN REVIEW REQUIRED, because changing one
+    of these files meant waiting on the owner. The owner removed that
+    gate - "merge all, change rules so you dont want me everytime" - so
+    the marker now names the PROPERTY rather than the process: this code
+    decides or moves real money.
+
+    What it demands is unchanged in substance and is stated in house
+    rule 5: risk-reviewer's read, a test that fails against the old
+    behaviour, the full suite green. What is gone is the wait.
+
+    The marker exists so that list is greppable rather than remembered -
+    by a person or by the next session."""
     root = Path(__file__).resolve().parents[1] / "catalyst"
     must_carry_marker = [
         "risk/sizing.py", "risk/evaluate.py", "risk/kill_switches.py",
@@ -312,9 +324,35 @@ def test_human_review_required_files_carry_the_marker():
         "execution/broker.py", "execution/orders.py", "execution/exits.py",
         "execution/reconcile.py", "execution/__init__.py",
         "research/boundary.py", "research/schema.py",
+        # Can close a position, so it belongs on the list; it carried the
+        # old marker without ever being checked for it.
+        "research/position_review.py",
     ]
     missing = [
         rel for rel in must_carry_marker
-        if "HUMAN REVIEW REQUIRED" not in (root / rel).read_text()
+        if "MONEY-CRITICAL" not in (root / rel).read_text()
     ]
     assert not missing, f"ownership marker missing from: {missing}"
+
+
+def test_the_old_review_marker_is_gone_everywhere():
+    """A file still saying HUMAN REVIEW REQUIRED would send the next
+    session to ask the owner for a sign-off they abolished - which is
+    exactly the stale instruction that costs an evening."""
+    root = Path(__file__).resolve().parents[1] / "catalyst"
+    stale = sorted(
+        str(p.relative_to(root)) for p in root.rglob("*.py")
+        if "HUMAN REVIEW REQUIRED" in p.read_text())
+    assert not stale, f"the retired marker is still in: {stale}"
+
+
+def test_the_hard_bounds_still_say_a_human_decides():
+    """The one exception house rule 5 keeps. Hard bounds prevent ruin;
+    the system may propose a change and must never make one. If this
+    ever goes quiet, the only remaining owner decision has gone quiet
+    with it."""
+    root = Path(__file__).resolve().parents[1] / "catalyst"
+    text = (root / "risk" / "hard_bounds.py").read_text().lower()
+    assert "human decides" in text, (
+        "hard_bounds.py no longer says the owner decides these; that is "
+        "the single gate house rule 5 did not remove")

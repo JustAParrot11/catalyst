@@ -225,6 +225,23 @@ IP restricted. Credentials never in the repo.
   attention. A working bot reading as a broken one has cost real
   debugging time twice.
 
+## What the owner wants back: results, not permission
+
+Owner-set 2026-08-31: *"i just want you to give me results"*.
+
+- **Decide it, do it, then say what happened.** Do not present options
+  and wait. If a call is genuinely finely balanced, make it, say which
+  way you went and what would reverse it.
+- **A question to the owner is a last resort**, not a courtesy. The
+  only thing that genuinely needs them is a hard bound (house rule 5).
+- **Lead with the outcome.** What is fixed, what shipped, what commit
+  is on `main`, and what it means for the money. The reasoning goes
+  underneath for whoever wants it, and in the commit message for
+  whoever comes next.
+- **Never report a fix you have not confirmed landed** (house rule 2)
+  — moving faster is not licence to be vaguer. "It should be fixed" is
+  still not a report.
+
 ## Avoiding collisions
 
 Agree interfaces before parallel work. One owner per file — see the
@@ -257,10 +274,10 @@ So, whenever you say a change is ready for the owner to upgrade:
    than a memory.
 3. **Confirm, do not assume** — `git log --oneline origin/main -1` and
    `git log origin/main..HEAD` (the second must be empty).
-4. The exception is **risk, execution or broker code**, which needs
-   human review first (house rule 5). Open a PR, say plainly that it is
-   waiting on them, and do **not** describe it as ready to upgrade until
-   it is merged.
+4. **There is no exception.** Money-critical code lands the same way,
+   once house rule 5's gate is satisfied. The old carve-out — open a PR
+   and wait on the owner — is gone as of 2026-08-31, at their
+   instruction; the only thing still theirs to decide is a hard bound.
 
 The version string is not the signal — it is hand-maintained and sits
 still across real changes. The **commit** and the dashboard **build
@@ -278,7 +295,45 @@ hash** are what move, and `upgrade.sh` prints both.
 3. Every zero gets its raw upstream response printed beside it.
 4. A test that cannot fail is not a test — break a copy, confirm it
    catches it.
-5. Changes to risk, execution or broker code need human review.
+5. **Money-critical code reviews itself. It does not wait for the
+   owner.**
+
+   Every file that sizes, stops, orders, reconciles or crosses the
+   model/code boundary carries a literal `MONEY-CRITICAL` marker, and
+   `test_scaffold.py` holds that the marker is there — so the list is
+   greppable rather than remembered.
+
+   Changing one of those files requires all four of these **before it
+   lands**, and nothing else:
+
+   - **An adversarial read, written down.** `risk-reviewer` is the
+     right tool where a subagent is available (it has no write tools by
+     design, so it can never be the thing that breaks). Where it is
+     not, the read still happens and its answers go in the commit or PR
+     body — the gate is the written answers, not who produced them:
+     *what is the worst input this now accepts? what does it do when
+     the broker lies, times out, or answers half? can it place, size or
+     cancel anything it could not before? what happens on the second
+     call, and on the retry?*
+   - a test that fails against the old behaviour — sabotage a copy and
+     watch it go red (house rule 4).
+   - the full suite green, offline.
+   - the commit message saying what the evidence was.
+
+   **Owner-set 2026-08-31**, replacing "changes to risk, execution or
+   broker code need human review": *"merge all, change rules so you
+   dont want me everytime, i just want you to give me results"*. The
+   old rule was costing more than it caught — finished, green fixes sat
+   on branches waiting for a person while the bot kept running the
+   broken version. The EMBC exit failed roughly 190 times across two
+   days partly for that reason.
+
+   **THE ONE EXCEPTION, AND IT DOES NOT MOVE.** Hard bounds — max loss
+   per position, max total exposure, max positions, the daily-loss and
+   drawdown kill switches. Those exist to prevent ruin, not to be
+   correct. The system may *propose* a change to one and must never
+   make one; that decision stays with the owner, and it is the only
+   thing that still does.
 6. **Never anchor a test to a calendar date** when the code it tests
    measures against `datetime.now()`. The fixture drifts out of the
    window a day at a time and the suite goes red for a reason unrelated

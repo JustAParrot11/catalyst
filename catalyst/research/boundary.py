@@ -1,4 +1,4 @@
-"""The model/code boundary. HUMAN REVIEW REQUIRED on any change.
+"""The model/code boundary. MONEY-CRITICAL on any change.
 
 investigate() is the ONLY place in the system that can spend money on a
 model call, and the only code path that produces a ResearchView. It runs

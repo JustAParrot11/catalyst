@@ -1,4 +1,4 @@
-"""Execution: orders, stops, reconciliation, exits. HUMAN REVIEW REQUIRED.
+"""Execution: orders, stops, reconciliation, exits. MONEY-CRITICAL.
 
 Talks to Alpaca. Never sizes - that is risk/'s job alone.
 """

@@ -898,7 +898,7 @@ def _sync_benchmark_baseline(conn, broker, daily_state: dict | None = None,
 
     WHY THE READ IS HERE AND NOT IN THE CYCLE. `cycle.build_portfolio_
     state` already has a confirmed account read, and reusing it would
-    save the request - but that is risk code under human review, and a
+    save the request - but that is money-critical risk code, and a
     reporting feature is not a reason to touch it. The scheduler owns
     the broker object it built, so it can ask for itself.
 
