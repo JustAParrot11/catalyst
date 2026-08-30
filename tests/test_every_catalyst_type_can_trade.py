@@ -158,10 +158,34 @@ class TestTheTableIsInternallyValid:
 
 
 class TestAnEstimateIsNeverPresentedAsEvidence:
-    def test_only_the_graded_type_is_marked_graded(self):
-        """One row rests on a backtest. Seventeen rest on reasoning about
-        the shape of the event, and the page must say which is which."""
-        assert ap.GRADED_CATALYST_TYPES == frozenset({"insider_cluster"})
+    def test_only_graded_types_are_marked_graded(self):
+        """A minority of rows rest on a backtest; the rest rest on
+        reasoning about the shape of the event, and the page must say
+        which is which.
+
+        DERIVED, NOT LISTED. This asserted the literal
+        {"insider_cluster"} and so failed the moment a second graded arm
+        was connected - which is a true change, not a regression. The
+        claim worth holding is that a row is marked graded only if a
+        strategy module actually graded it, so it is checked against the
+        bake-off's own arms instead of a name typed here.
+        """
+        from catalyst.strategies import earnings_drift, insider_cluster
+
+        graded_arms = {
+            "insider_cluster": insider_cluster,
+            "earnings_drift": earnings_drift,
+        }
+        assert ap.GRADED_CATALYST_TYPES <= set(graded_arms), (
+            "a catalyst type is marked graded that no strategy module "
+            "grades - that is an estimate presented as evidence")
+        for name in ap.GRADED_CATALYST_TYPES:
+            assert hasattr(graded_arms[name], "HOLD_DAYS"), (
+                f"{name} claims to be graded but its module has no "
+                "measured HOLD_DAYS behind that claim")
+        assert len(ap.GRADED_CATALYST_TYPES) < len(
+            ap.DEFAULT_PARAMS["adverse_gap_assumption"]), (
+            "every row cannot be graded; most are reasoned estimates")
 
     def test_every_type_carries_its_reasoning(self):
         for kind in ap.DEFAULT_PARAMS["adverse_gap_assumption"]:
