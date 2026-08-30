@@ -326,7 +326,18 @@ def _protective_duties(conn, broker: Broker, report: "CycleReport",
             # know. Surfacing it costs nothing and is the difference
             # between a bug found in a day and one found in a month.
             for res in exit_results or ():
-                if res.status in ("rejected", "submit_unconfirmed"):
+                if res.status == "exit_already_working":
+                    # NOT a problem and NOT silence. A market sell for
+                    # this position is resting at the broker waiting for
+                    # a session - cancelling and re-submitting it every
+                    # fifteen minutes would mean it never reaches an
+                    # opening auction. Said once a pass so a stuck one
+                    # is still visible in the log.
+                    _log.info(
+                        "Exit for %s is already resting at the broker "
+                        "(order %s); waiting for it rather than replacing "
+                        "it.", res.decision_id, res.broker_order_id)
+                elif res.status in ("rejected", "submit_unconfirmed"):
                     report.errors.append(
                         f"exit for {res.decision_id} was {res.status} by "
                         f"the broker and the position is still open. Raw "

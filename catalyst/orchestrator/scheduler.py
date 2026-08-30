@@ -1277,7 +1277,7 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
         # failure leaves `out` exactly as the screen built it.
         try:
             from catalyst.data.sources.edgar_xbrl import (
-                drift_candidates, refresh_facts,
+                live_drift_candidates, refresh_facts,
             )
             from pathlib import Path
 
@@ -1286,17 +1286,26 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
             pairs = _issuer_pairs(raw_events)
             facts_dir = str(Path(bars_path()).parent / "xbrl_facts")
             got = refresh_facts(pairs, facts_dir, conn)
-            drift, _table = drift_candidates(
-                facts_dir, [t for t, _ in pairs])
+            # live_ AND NOT drift_candidates: the plain one replays a
+            # company's whole XBRL history, which is what the backtest
+            # wants and would put earnings filed in 2019 into paid
+            # research here. See MAX_EVENT_AGE_DAYS.
+            drift, _table, live_stats = live_drift_candidates(
+                facts_dir, [t for t, _ in pairs], as_of)
             known = {c.ticker for c in out}
             fresh = [c for c in drift if c.ticker not in known]
             out.extend(fresh)
             _record_origin(conn, fresh, "earnings_drift", None, as_of)
             _log.info(
                 "Earnings drift: %d company facts fetched, %d already "
-                "current, %d candidate(s), %d new after de-duplication.%s",
-                got.fetched, got.already_current, len(drift), len(fresh),
-                (" " + got.why_empty()) if got.why_empty() else "")
+                "current, %d graded event(s) -> %d inside the %d-day drift "
+                "window (%d too old) -> %d new after de-duplication.%s%s",
+                got.fetched, got.already_current, live_stats.built,
+                live_stats.live, live_stats.max_age_days, live_stats.too_old,
+                len(fresh),
+                (" " + got.why_empty()) if got.why_empty() else "",
+                (" " + live_stats.why_empty()) if live_stats.why_empty()
+                else "")
         except Exception:  # noqa: BLE001 - never lose the graded arm
             _log.exception(
                 "The earnings-drift arm failed; the Form 4 candidates "

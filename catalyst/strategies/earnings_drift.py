@@ -191,10 +191,28 @@ def build_candidates(events: list[EarningsEvent], *,
     side-table keyed by candidate id for the signal function)."""
     cands: list[Candidate] = []
     table: dict[str, EarningsEvent] = {}
-    for k, ev in enumerate(events):
+    for ev in events:
         if ev.sue < sue_min:
             continue
-        cid = f"A-{ev.filed.isoformat()}-{ev.ticker}-{k}"
+        # THE ID MUST NOT DEPEND ON WHAT ELSE IS IN THE LIST.
+        #
+        # It used to be the loop index, which is stable in a backtest
+        # (one fixed universe, built once) and is not stable live: the
+        # companyfacts cache grows a few companies every cycle, every
+        # new company shifts the index of every event filed after it,
+        # and the SAME earnings event comes back under a new id.
+        #
+        # Candidate ids are how cycle.py knows a candidate has already
+        # been researched. A re-indexed candidate looks brand new, so it
+        # is researched and PAID FOR again - the owner's 2026-08-30
+        # bundle carries 6,293 distinct drift candidate ids from an arm
+        # that only ever produces ~810 at once, which is that churn.
+        #
+        # (ticker, filed, period_end) identifies the event by what it
+        # IS, so it is the same id in a backtest, in the next cycle, and
+        # after the universe doubles.
+        cid = (f"A-{ev.filed.isoformat()}-{ev.ticker}"
+               f"-{ev.period_end.isoformat()}")
         cands.append(Candidate(
             id=cid, ticker=ev.ticker, catalyst_type="earnings_drift",
             catalyst_date=ev.filed, catalyst_date_confidence="confirmed",
