@@ -67,18 +67,67 @@ def manage_exits(due_positions: list[dict], as_of: datetime, broker: Broker,
     positions are due; this function only executes, it never decides.
     Positions whose stop cannot be confirmed cancelled are SKIPPED this
     pass and reported by the returned results being absent - never sold
-    into a possibly-live stop."""
+    into a possibly-live stop. The caller is expected to notice that
+    absence and say so: it went unreported for 25 hours on 2026-08-29.
+
+    EVERY stop resting against the symbol is neutralized, not only the
+    one the position row remembers - see the note in the body."""
+    # THE BROKER'S OPEN ORDERS ARE THE TRUTH; THE RECORDED ID IS A CACHE.
+    #
+    # OWNER'S LOG, 2026-08-29/30: 99 exit attempts for EMBC, every sell
+    # answered HTTP 403 "insufficient qty available (requested 79.1295,
+    # available 0)" - the shares were reserved by a resting stop this
+    # function never cancelled.
+    #
+    # It cancelled the one id on the position row. Fractional stops are
+    # DAY-only and expire nightly (TRAPS.md), so reopen_stops re-places
+    # them each session under a NEW broker id - and the loop in cycle.py
+    # that writes that id back begins `if p["due"] ... continue`, so a
+    # DUE position is skipped by it. On the single day the id matters
+    # most, it is the stale one. _neutralize_stop then 404s and
+    # correctly answers 'gone' (risk review B1: a purged id must not
+    # brick the exit forever), the sell goes out, and the live stop is
+    # still holding every share.
+    #
+    # Asking the broker costs one request a pass and removes the class
+    # rather than this instance of it: any stop resting against this
+    # symbol blocks the sell, whatever placed it and whatever the row
+    # remembers.
+    try:
+        open_orders = broker.get_open_orders()
+    except BrokerError:
+        # Fail CLOSED, the same way an unconfirmable cancel does.
+        # Without the list there is no way to know what is resting, and
+        # selling into a possibly-live stop is the double-sell this
+        # module exists to prevent.
+        return []
+
     results: list[OrderResult] = []
     for pos in due_positions:
-        stop_id = pos.get("stop_order_id")
-        if stop_id is not None:
+        symbol = str(pos.get("ticker") or "").upper()
+        stop_ids = [str(o.get("id")) for o in open_orders
+                    if str(o.get("symbol") or "").upper() == symbol
+                    and str(o.get("side") or "").lower() == "sell"
+                    and "stop" in str(o.get("type") or "").lower()
+                    and o.get("id")]
+        # The recorded id too: it may be live and simply absent from a
+        # truncated or stale listing, and cancelling a dead id is free.
+        recorded = pos.get("stop_order_id")
+        if recorded is not None and str(recorded) not in stop_ids:
+            stop_ids.append(str(recorded))
+
+        blocked = False
+        for stop_id in stop_ids:
             outcome = _neutralize_stop(broker, stop_id,
                                        poll_attempts=poll_attempts,
                                        poll_interval_s=poll_interval_s)
             if outcome != "gone":
                 # 'live': unsafe to sell. 'filled': the stop already did
                 # the exit; reconcile will close the position. Skip.
-                continue
+                blocked = True
+                break
+        if blocked:
+            continue
         results.append(_submit(
             broker, conn, decision_id=pos["decision_id"],
             symbol=pos["ticker"], qty=str(pos["qty"]), side="sell",
