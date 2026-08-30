@@ -22,6 +22,22 @@ from catalyst.execution.reconcile import reconcile
 from catalyst.risk import RiskDecision
 
 
+#: manage_exits now asks the broker which stops are actually resting
+#: against the symbol, because the id on the position row is a cache the
+#: design guarantees goes stale nightly (DAY stops expire; TRAPS.md).
+#: For every fixture below the truthful answer is "none resting" - each
+#: was written with no live stop, or with one the test intends to be
+#: already gone - so answering the new route with an empty list keeps
+#: each test asserting exactly what it asserted before.
+_NO_RESTING_STOPS = httpx.Response(200, json=[])
+
+
+def _is_open_orders_list(request) -> bool:
+    """The LIST route (/v2/orders), not a single order (/v2/orders/{id})."""
+    return (request.method == "GET"
+            and request.url.path.rstrip("/").endswith("/v2/orders"))
+
+
 def make_broker(handler) -> Broker:
     return Broker("test-key", "test-secret",
                   transport=httpx.MockTransport(handler), backoff_s=0)
@@ -345,6 +361,8 @@ class TestExits:
         order_log = []
 
         def handler(request):
+            if _is_open_orders_list(request):
+                return _NO_RESTING_STOPS
             if request.method == "DELETE":
                 order_log.append("cancel")
                 return httpx.Response(204)
@@ -380,6 +398,8 @@ class TestExits:
 
     def test_position_without_stop_sells_directly(self, db):
         def handler(request):
+            if _is_open_orders_list(request):
+                return _NO_RESTING_STOPS
             assert request.method == "POST"
             return httpx.Response(200, json={"id": "exit-1",
                                              "status": "accepted"})
@@ -483,6 +503,8 @@ class TestExitsStaleStop:
         order_log = []
 
         def handler(request):
+            if _is_open_orders_list(request):
+                return _NO_RESTING_STOPS
             if request.method == "DELETE":
                 return httpx.Response(422, json={"message": "order is not cancelable"})
             if request.method == "POST":
@@ -499,6 +521,8 @@ class TestExitsStaleStop:
 
     def test_broker_unknown_stop_404_still_exits(self, db):
         def handler(request):
+            if _is_open_orders_list(request):
+                return _NO_RESTING_STOPS
             if request.method == "DELETE":
                 return httpx.Response(404, json={"message": "order not found"})
             if request.method == "POST":

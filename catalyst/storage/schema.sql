@@ -600,3 +600,29 @@ CREATE TABLE IF NOT EXISTS benchmark_refreshes (
 
 CREATE INDEX IF NOT EXISTS idx_benchmark_refreshes_recent
     ON benchmark_refreshes (checked_at DESC);
+
+-- When each company's XBRL companyfacts were last fetched.
+--
+-- Candidate A (post-earnings drift) is fully built, pre-registered and
+-- graded - and had no live feed, so it produced no candidates at all.
+-- On the bake-off it was the best-behaved arm out of sample: hit rate
+-- 57.1% in AND out of sample, max drawdown 8.8% against the live arm's
+-- 41.2%, worst trade -18.5% against -57.4%.
+--
+-- companyfacts is one large JSON per company and a company files
+-- quarterly, so re-fetching daily would spend the SEC rate limit
+-- (shared across every SEC feed in this process, TRAPS.md) on bytes
+-- that cannot have changed. This table is what makes the refresh
+-- incremental: a ticker is re-asked only when its cache is stale.
+--
+-- A SIDE TABLE, keyed by ticker, holding no candidate or order data.
+CREATE TABLE IF NOT EXISTS xbrl_facts_fetched (
+    ticker     TEXT PRIMARY KEY,
+    cik        TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    status     TEXT NOT NULL,   -- 'ok' | 'absent' | 'failed'
+    note       TEXT             -- the raw upstream reason, when not ok
+);
+
+CREATE INDEX IF NOT EXISTS idx_xbrl_facts_fetched_at
+    ON xbrl_facts_fetched (fetched_at);

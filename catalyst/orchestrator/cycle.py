@@ -308,9 +308,38 @@ def _protective_duties(conn, broker: Broker, report: "CycleReport",
                   ", ".join(f"{p['ticker']} (position {p['id']})"
                             for p in due))
         try:
-            manage_exits(due, now, broker, conn)
+            exit_results = manage_exits(due, now, broker, conn)
         except BrokerError as exc:
             report.errors.append(f"manage_exits: {exc}")
+        else:
+            # A REJECTED EXIT IS NOT A QUIET EXIT.
+            #
+            # OWNER'S LOG, 2026-08-29/30: EMBC's hard exit ran 99 times
+            # in 25 hours, every sell answered HTTP 403, and every pass
+            # logged "No problems recorded". _submit catches
+            # OrderRejected and records status='rejected' with the raw
+            # body - which is right, the row is the evidence - but it
+            # does not raise, so `except BrokerError` never fired and
+            # report.errors stayed empty.
+            #
+            # The position is still open and the owner had no way to
+            # know. Surfacing it costs nothing and is the difference
+            # between a bug found in a day and one found in a month.
+            for res in exit_results or ():
+                if res.status in ("rejected", "submit_unconfirmed"):
+                    report.errors.append(
+                        f"exit for {res.decision_id} was {res.status} by "
+                        f"the broker and the position is still open. Raw "
+                        f"upstream: {str(res.raw_response)[:300]}")
+            # SILENTLY SELLING NOTHING IS ALSO A PROBLEM. manage_exits
+            # returns fewer results than positions when a stop could not
+            # be confirmed gone - correct, and invisible without this.
+            missing = len(due) - len(exit_results or ())
+            if missing > 0:
+                report.errors.append(
+                    f"{missing} of {len(due)} due position(s) were not sold "
+                    "this pass: a resting stop could not be confirmed "
+                    "cancelled, so selling would risk a double exit")
 
     if not open_rows:
         return (_broker_positions_agree(broker, conn, report, broker_held),

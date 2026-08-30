@@ -137,6 +137,52 @@ class TestAnUnknownEntityKindDoesNotLoseTheBatch:
             "SELECT kind, display_name FROM graph_entities").fetchone()
         assert row == ("company", "Example Inc")
 
+    def test_the_owners_next_two_failures_are_also_kept(self, conn):
+        """OWNER'S LOG, 2026-08-28: fixing `kind` and leaving its
+        siblings meant the model failed on those instead -
+        "reliability 0.9" (a number) and "source_class
+        'company_filing'". Same class, one field over."""
+        from catalyst.graph.hooks import research_findings_to_graph
+
+        got = research_findings_to_graph("call-1", [{
+            "subject": {"kind": "company", "canonical_key": "k",
+                        "display_name": "Example Inc"},
+            "predicate": "mentions", "object_date": "2026-09-01",
+            "source_class": "company_filing", "reliability": 0.9,
+        }], conn)
+        assert len(got) == 1
+
+    def test_unknown_provenance_falls_to_the_LEAST_trusted_class(self, conn):
+        """The opposite direction to `other`. These fields say how much
+        a claim should be trusted, so a guess must never be promoted to
+        a primary document."""
+        from catalyst.graph.hooks import research_findings_to_graph
+
+        research_findings_to_graph("call-1", [{
+            "subject": {"kind": "company", "canonical_key": "k",
+                        "display_name": "Example Inc"},
+            "predicate": "mentions", "object_date": "2026-09-01",
+            "source_class": "company_filing", "reliability": 0.9,
+        }], conn)
+        row = conn.execute(
+            "SELECT source_class, reliability FROM graph_assertions"
+        ).fetchone()
+        assert row == ("model_inference", "model_inference")
+
+    def test_a_real_provenance_is_untouched(self, conn):
+        from catalyst.graph.hooks import research_findings_to_graph
+
+        research_findings_to_graph("call-1", [{
+            "subject": {"kind": "company", "canonical_key": "k",
+                        "display_name": "Example Inc"},
+            "predicate": "mentions", "object_date": "2026-09-01",
+            "source_class": "edgar_filing", "reliability": "primary_document",
+        }], conn)
+        row = conn.execute(
+            "SELECT source_class, reliability FROM graph_assertions"
+        ).fetchone()
+        assert row == ("edgar_filing", "primary_document")
+
     def test_a_genuinely_malformed_finding_still_fails_loudly(self, conn):
         """The batch guard is not weakened - a finding with no subject
         at all is still a caller bug, and a half-written chain that
