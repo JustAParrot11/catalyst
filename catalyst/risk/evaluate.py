@@ -1,4 +1,4 @@
-"""The single gate every candidate passes through. HUMAN REVIEW REQUIRED.
+"""The single gate every candidate passes through. MONEY-CRITICAL.
 
 Reads exactly one field of the ResearchView for anything that reaches
 sizing: conviction, compared against the adaptive conviction floor to

@@ -1,5 +1,5 @@
 """Position sizing - the ONLY function permitted to construct a
-notional_usd or qty value. HUMAN REVIEW REQUIRED.
+notional_usd or qty value. MONEY-CRITICAL.
 
 The signature is the enforcement (ARCHITECTURE.md section 4.1 third
 layer): the sole trace of the model's output that can reach this

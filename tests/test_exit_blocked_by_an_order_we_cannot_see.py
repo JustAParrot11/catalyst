@@ -42,7 +42,10 @@ working exit is recognised by its client_order_id and left alone - but
 a protective STOP is also a sell on the same decision_id, so the
 carve-out is bounded to market orders.
 
-HUMAN REVIEW REQUIRED (house rule 5): execution code.
+MONEY-CRITICAL (house rule 5): execution code. Landing it needs
+risk-reviewer's read, a sabotaged copy going red, and the full
+suite green - not the owner's sign-off, which they removed on
+2026-08-31.
 
 Fully offline: the broker is a stub.
 """

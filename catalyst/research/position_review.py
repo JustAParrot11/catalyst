@@ -1,6 +1,6 @@
 """Ask Claude whether an open position's thesis still holds.
 
-HUMAN REVIEW REQUIRED - this can close a position.
+MONEY-CRITICAL - this can close a position.
 
 The owner asked for it in these words: "a periodic checkin with current
 open trades with claude to get an opinion on if it should continue to

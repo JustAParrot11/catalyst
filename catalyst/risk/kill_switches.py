@@ -1,5 +1,5 @@
 """Kill switches - checked once per cycle BEFORE any candidate is
-evaluated. HUMAN REVIEW REQUIRED.
+evaluated. MONEY-CRITICAL.
 
 FAILS CLOSED (ARCHITECTURE sections 3.2 / 9.14): if portfolio state
 cannot be trusted - broker read failed, or the snapshot is stale -

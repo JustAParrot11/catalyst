@@ -1,4 +1,4 @@
-"""Risk engine - deterministic only. HUMAN REVIEW REQUIRED on all files.
+"""Risk engine - deterministic only. MONEY-CRITICAL, every file.
 
 The only module where a number becomes a position size, a stop, or a
 kill decision (ARCHITECTURE.md section 2.1).

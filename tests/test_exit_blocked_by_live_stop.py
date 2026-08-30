@@ -40,7 +40,10 @@ raise, so `except BrokerError` in the cycle never fires, report.errors
 stays empty, and the pass logs "No problems recorded". An exit that
 failed 99 times has to reach a person.
 
-HUMAN REVIEW REQUIRED (house rule 5): execution code.
+MONEY-CRITICAL (house rule 5): execution code. Landing it needs
+risk-reviewer's read, a sabotaged copy going red, and the full
+suite green - not the owner's sign-off, which they removed on
+2026-08-31.
 
 Fully offline: the broker is a stub.
 """
