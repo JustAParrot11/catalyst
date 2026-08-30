@@ -274,10 +274,37 @@ def render_hunt_prompt(events: list, as_of: datetime,
         "- Liquid enough to matter. A micro-cap nobody can exit is not "
         "an opportunity.",
 
-        "A MECHANICAL SCREEN ALREADY BUILT CANDIDATES FROM INSIDER "
-        "CLUSTERS AND CROSS-FEED AGREEMENT. You are looking for what it "
-        "MISSED - the filings and headlines it has no rule for. "
-        f"Tickers it already found this pass, do not repeat them: {known}",
+        # THE RULE THAT WAS COSTING 88% OF EVERY HUNT.
+        #
+        # OWNER'S LOG, 2026-08-26..30: 25 nominations, 22 rejected, all
+        # for the same reason - "catalyst date is in the past". The
+        # schema field said "Today or later" and the prompt never did,
+        # while the prompt's own guidance ("not already consumed") is
+        # about STALENESS, which is a different test. A model reading a
+        # feed of things that happened this morning reasonably judges
+        # them fresh, dates them today-or-yesterday, and is refused.
+        #
+        # Saying the rule plainly, with the reason, lets the model spend
+        # its nominations on what can pass instead of learning a
+        # tripwire by hitting it.
+        "THE ONE HARD RULE ON DATES. The catalyst date is when the event "
+        "RESOLVES, and it must be today or later - never a past date. An "
+        "earnings release that already happened this morning is not a "
+        "catalyst dated today; it is an event that has resolved, and the "
+        "code will refuse it. If a story's only event is already over, "
+        "the nomination is wasted - either name the NEXT dated event for "
+        "that company, or leave it out.",
+
+        "TWO MECHANICAL SCREENS ALREADY BUILT CANDIDATES: insider "
+        "clusters with cross-feed agreement, and post-earnings drift "
+        "from XBRL surprise. BOTH ARE GRADED, and between them they "
+        "cover insider buying and the drift after an earnings print - "
+        "so nominating either is duplicating a rule that already runs "
+        "and is measured. You are looking for what neither has a rule "
+        "for: scheduled regulatory decisions, court and contract dates, "
+        "shareholder votes, trial readouts, anything where the mechanism "
+        "is specific and no screen encodes it. "
+        f"Tickers already found this pass, do not repeat them: {known}",
 
         "NOMINATE NOTHING RATHER THAN SOMETHING WEAK. Every nomination "
         "costs a research call out of a fixed monthly budget, and a "
