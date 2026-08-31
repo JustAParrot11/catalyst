@@ -529,10 +529,28 @@ class TestTheCapShownIsTheCapBEINGSPENTAGAINST:
         """With the cap read as $8 against $19.77 spent, forecast()
         returned already_exhausted and took the early return - so burn
         rate and projected month both rendered as a dash. Two more
-        figures lost to the same wrong field."""
+        figures lost to the same wrong field.
+
+        HOUSE RULE 6: THE FIGURES ARE DERIVED, NOT WRITTEN DOWN. This
+        asserted "$0.94" and "$29.18" - the values on the 21st of a
+        31-day month, which is the day it was written. It went red at
+        midnight and rolled back the owner's upgrade the next morning.
+        Burn rate is spend / days elapsed; both numbers move every day,
+        so the test computes them the same way the panel does.
+        """
+        import calendar
+
         html, _ = self._owner_cap(seeded)
-        assert "$0.94" in html, "burn rate did not compute"
-        assert "$29.18" in html, "projected month did not compute"
+        day = NOW.day
+        days_in_month = calendar.monthrange(NOW.year, NOW.month)[1]
+        rate = Decimal("1977") / day
+        assert f"${rate / 100:,.2f}" in html, (
+            f"burn rate did not compute (expected "
+            f"${rate / 100:,.2f} on day {day})")
+        projected = rate * days_in_month
+        assert f"${projected / 100:,.2f}" in html, (
+            f"projected month did not compute (expected "
+            f"${projected / 100:,.2f} over {days_in_month} days)")
 
     def test_a_cap_already_spent_never_prints_the_word_None(self, seeded):
         """will_stop_early is true when the cap is ALREADY gone as well
@@ -541,3 +559,66 @@ class TestTheCapShownIsTheCapBEINGSPENTAGAINST:
         html, _ = self._owner_cap(seeded, usd=5, cents="1977")
         assert "None" not in html
         assert "already spent" in html
+
+
+class TestAWeekendIsNotADataOutage:
+    """OWNER-REPORTED, expensively and indirectly: an upgrade run on a
+    Saturday failed its own tests and rolled back.
+
+    Chasing it found staleness counted in CALENDAR days, so on a Sunday
+    the newest close that exists anywhere - Friday's - read as two days
+    stale and was painted amber, and on a Monday morning as three.
+
+    Nothing was wrong. The market was shut. "Routine attrition must not
+    look like damage" again: a dashboard that cries stale every weekend
+    teaches its reader to ignore the one time it means something.
+
+    HOUSE RULE 6 IS THE DEEPER LESSON HERE. Three tests in this suite
+    were anchored to the calendar, and the whole suite is what
+    upgrade.sh runs before it will install anything - so the bot could
+    not be upgraded at a weekend AT ALL, and nobody knew until the owner
+    tried it on a Saturday.
+    """
+
+    def test_fridays_close_is_fresh_all_weekend(self):
+        from catalyst.dashboard.queries import _sessions_stale
+
+        friday = date(2026, 8, 21)
+        for day, name in ((21, "Friday"), (22, "Saturday"), (23, "Sunday")):
+            got = _sessions_stale(friday, date(2026, 8, day))
+            assert got == 0, (
+                f"on {name} Friday's close reads {got} session(s) stale - "
+                "it is the newest close that exists")
+
+    def test_it_goes_stale_once_a_session_is_actually_missed(self):
+        """Not stale on a weekend is not the same as never stale. A
+        close that survives a trading day is genuinely behind."""
+        from catalyst.dashboard.queries import _sessions_stale
+
+        friday = date(2026, 8, 21)
+        assert _sessions_stale(friday, date(2026, 8, 24)) == 1   # Monday
+        assert _sessions_stale(friday, date(2026, 8, 25)) == 2   # Tuesday
+        assert _sessions_stale(friday, date(2026, 8, 28)) == 5   # Friday
+
+    def test_calendar_days_would_have_got_every_one_of_these_wrong(self):
+        """The old rule, stated so the difference is on the record."""
+        from catalyst.dashboard.queries import _sessions_stale
+
+        friday = date(2026, 8, 21)
+        for day in (22, 23, 24):
+            today = date(2026, 8, day)
+            calendar_days = (today - friday).days
+            sessions = _sessions_stale(friday, today)
+            assert sessions < calendar_days, (
+                f"on {today} the two rules agree ({sessions}); the whole "
+                "point is that calendar days over-count a shut market")
+
+    def test_a_future_or_unreadable_day_never_raises(self):
+        """This runs while rendering a page. A clock skew on the VPS
+        must not take the Overview down."""
+        from catalyst.dashboard.queries import _sessions_stale
+
+        assert _sessions_stale(date(2026, 9, 1), date(2026, 8, 21)) == 0
+        assert _sessions_stale(None, date(2026, 8, 21)) == 0
+        assert _sessions_stale("not a date", date(2026, 8, 21)) is None
+        assert _sessions_stale(date(2026, 8, 21), None) == 0

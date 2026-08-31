@@ -3604,10 +3604,7 @@ def live_book(db: Db, bars_dir=None, now=None, quotes=None) -> LiveBook:
                 mp.last = _metric_dec(bars[-1].close)
                 mp.source = "close"
                 mp.as_of = str(bars[-1].day)
-                try:
-                    mp.stale_days = (now.date() - bars[-1].day).days
-                except (TypeError, ValueError):
-                    mp.stale_days = None
+                mp.stale_days = _sessions_stale(bars[-1].day, now.date())
         if mp.last is not None and mp.qty:
             mp.market_value = mp.qty * mp.last
             deployed += mp.market_value
@@ -3650,6 +3647,38 @@ def live_book(db: Db, bars_dir=None, now=None, quotes=None) -> LiveBook:
     if stamps:
         book.freshest, book.stalest = stamps[-1], stamps[0]
     return book
+
+
+def _sessions_stale(bar_day, today) -> int | None:
+    """How many TRADING days old a cached close is.
+
+    OWNER-REPORTED, indirectly and expensively: an upgrade run on a
+    Saturday failed its own tests and rolled back. Chasing it found this
+    - staleness was counted in CALENDAR days, so on a Sunday the newest
+    close that exists anywhere (Friday's) read as two days stale and was
+    painted amber, and on a Monday morning it read as three.
+
+    Nothing was wrong. The market was shut. That is the "routine
+    attrition must not look like damage" rule again: a weekend is not a
+    data outage, and a dashboard that cries stale every Saturday teaches
+    the owner to ignore the one time it means something.
+
+    Counted in sessions, so Friday's close is 0 days old all weekend and
+    1 old on Monday. Market holidays are not modelled - a holiday shows
+    as one session stale, which is honest and harmless, and a hand-kept
+    holiday calendar is exactly the enumeration house rule 7 warns
+    against.
+    """
+    try:
+        if bar_day is None or today is None or bar_day >= today:
+            return 0
+        # Whole weekdays strictly AFTER the bar, up to and including
+        # today: the sessions that should have produced a newer close.
+        days = (today - bar_day).days
+        return sum(1 for i in range(1, days + 1)
+                   if (bar_day + timedelta(days=i)).weekday() < 5)
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 def _as_day(text):

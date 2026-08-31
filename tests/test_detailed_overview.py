@@ -28,6 +28,18 @@ from catalyst.dashboard.db import Db
 from tests.test_trades_page import _seed
 
 
+def newest_bar_day(last_day=None):
+    """The day the newest bar in the fixture falls on.
+
+    Its own function because two things need the same answer and a
+    second copy of "today, unless it is a weekend" is how they drift.
+    """
+    d = last_day or date.today()
+    while d.weekday() >= 5:          # Saturday, Sunday
+        d -= timedelta(days=1)
+    return d
+
+
 def bars_for(tmp_path, ticker="EMBC", close="5.20", sessions=90,
              last_day=None):
     last_day = last_day or date.today()
@@ -75,9 +87,24 @@ class TestItNeverCallsACACHEDCLOSEALIVEPRICE:
         assert "cached daily close" in html
 
     def test_every_mark_carries_the_day_it_came_from(self, marked):
+        """HOUSE RULE 6, AND IT COST AN UPGRADE. This asserted
+        str(date.today()) was on the page - but the mark shows the day
+        the CACHED CLOSE came from, and bars_for() only writes weekdays.
+        Run on a Saturday, the newest bar is Friday's and today's date
+        appears nowhere, so this failed every weekend.
+
+        Nobody noticed until the owner upgraded on a Saturday:
+        upgrade.sh runs the full suite and rolls back on any failure, so
+        the bot could not be upgraded at a weekend AT ALL.
+
+        The mark must carry the day its price came from. That day is the
+        newest bar, whatever the calendar says today is.
+        """
         html = page(marked)
         assert "marked" in html.lower()
-        assert str(date.today()) in html
+        newest = newest_bar_day()
+        assert str(newest) in html, (
+            f"the mark does not name the day it came from ({newest})")
 
     def test_a_stale_mark_is_flagged_not_shown_plainly(self, tmp_path,
                                                        monkeypatch):
