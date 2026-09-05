@@ -370,13 +370,16 @@ class TestTheOwnerDoesNotHaveToValidatePricingEveryDay:
         assert result.action_taken == "none"
 
     def test_but_a_REAL_fault_still_stops_it(self, tmp_db):
-        """The direction that matters. A rule that never pauses is worse
-        than one that pauses too often: the whole point of the check is
-        to catch a ledger that has stopped describing the bill."""
+        """A REAL fault is still SEEN - recorded with its reason - but it
+        no longer stops the bot (owner-set 2026-09-05: the budget stop is
+        the only stop). A ledger that has stopped describing the bill is
+        corrected by measured_rates on the same pass; a pause would only
+        leave it wrong for longer."""
         self.seed_local(tmp_db, "364")
         result = reconcile_day(YESTERDAY, tmp_db,
                                lambda d: clean_page([{"amount": "50"}]))
-        assert result.action_taken == "scheduled_paused"
+        assert result.action_taken == "discrepancy_noted"
+        assert not has_unacknowledged_discrepancy(tmp_db)
 
     def test_a_still_material_old_pause_is_NOT_auto_cleared(self, tmp_db):
         """Clearing is a re-judgement, not an amnesty."""
@@ -494,7 +497,7 @@ class TestReconciliation:
         mathematically never could."""
         self.seed_local(tmp_db, "17")
         result = reconcile_day(YESTERDAY, tmp_db, lambda d: clean_page([]))
-        assert result.action_taken == "scheduled_paused"
+        assert result.action_taken == "discrepancy_noted"   # seen, not a halt
 
     def test_THE_OWNER_S_OWN_NUMBERS_DO_NOT_HALT_THE_BOT(self, tmp_db):
         """OWNER-REPORTED 2026-08-20: "on 17th we spent $2.95 yet
@@ -526,7 +529,7 @@ class TestReconciliation:
         self.seed_local(tmp_db, "336")
         result = reconcile_day(YESTERDAY, tmp_db,
                                lambda d: clean_page([{"amount": "202"}]))
-        assert result.action_taken == "scheduled_paused"
+        assert result.action_taken == "discrepancy_noted"   # seen, not a halt
 
     def test_both_bars_must_be_cleared_not_either(self):
         """A big absolute difference that is a small proportion is a big
@@ -579,7 +582,7 @@ class TestReconciliation:
         self.seed_local(tmp_db, "1000")
         result = reconcile_day(YESTERDAY, tmp_db,
                                lambda d: clean_page([{"amount": "1"}]))
-        assert result.action_taken == "scheduled_paused"
+        assert result.action_taken == "discrepancy_noted"
         reason = tmp_db.execute(
             "SELECT pause_reason FROM cost_reconciliation_events"
         ).fetchone()[0]
@@ -614,12 +617,12 @@ class TestReconciliation:
         """Audit F1/F6: 'the adapter returned nothing' is not agreement."""
         self.seed_local(tmp_db, "3")  # even below the 5c floor
         result = reconcile_day(YESTERDAY, tmp_db, lambda d: clean_page([]))
-        assert result.action_taken == "scheduled_paused"
+        assert result.action_taken == "discrepancy_noted"
         row = tmp_db.execute(
             "SELECT acknowledged_by, api_record_count, api_raw_response "
             "FROM cost_reconciliation_events"
         ).fetchone()
-        assert row[0] is None            # no self-sign-off
+        assert row[0] == "auto"          # noted, never a gate (2026-09-05)
         assert row[1] == 0
         assert row[2] is not None        # raw payload beside the zero
 
@@ -657,14 +660,18 @@ class TestReconciliation:
         self.seed_local(tmp_db, "200")
         reconcile_day(YESTERDAY, tmp_db,
                       lambda d: clean_page([{"amount": "100"}]))
+        # OWNER-SET 2026-09-05: it no longer pauses EITHER kind. The
+        # discrepancy is on the record with its reason, the rate is
+        # corrected from the bill, and spending continues.
         for kind in ("scheduled", "manual"):
             d = authorize(
                 CostEstimate(estimated_cents=Decimal("1"), basis="t",
                              kind=kind, component="research"),
                 tmp_db, SHARE, as_of=TODAY,
             )
-            assert not d.authorized
-            assert d.reason == "reconciliation_discrepancy_unacknowledged"
+            assert d.authorized, d.reason
+        assert "arithmetic is wrong" in tmp_db.execute(
+            "SELECT pause_reason FROM cost_reconciliation_events").fetchone()[0]
 
     def test_whole_day_totals_with_local_breakdown_recorded(self, tmp_db):
         """Audit N3: the Cost API cannot see our scheduled/manual split,
@@ -710,8 +717,10 @@ class TestReconciliation:
             # local 2000c vs api 1600c: a 20% miss, day after day
             results.append(reconcile_day(day, tmp_db,
                                          lambda d: clean_page([{"amount": "1600"}])))
-        assert any(r.action_taken == "scheduled_paused" for r in results), (
-            "a sustained 20% divergence on a real bill must still pause")
+        assert any(r.action_taken == "discrepancy_noted" for r in results), (
+            "a sustained 20% divergence on a real bill must still be SEEN - "
+            "recorded with its reason - even though it no longer pauses "
+            "(owner-set 2026-09-05)")
 
     def test_a_few_cents_of_drift_does_NOT_pause(self, tmp_db):
         """The half that changed, pinned so it cannot creep back."""
@@ -737,12 +746,27 @@ class TestReconciliation:
                            raw_response={"has_more": True})
         with pytest.raises(TruncatedCostPageError):
             reconcile_day(YESTERDAY, tmp_db, lambda d: page)
-        assert has_unacknowledged_discrepancy(tmp_db)
+        row = tmp_db.execute(
+            "SELECT action_taken, pause_reason FROM cost_reconciliation_events"
+        ).fetchone()
+        assert row[0] == "discrepancy_noted" and "more pages" in row[1]
+        assert not has_unacknowledged_discrepancy(tmp_db)
 
     def test_acknowledge_requires_human_and_clears_pause(self, tmp_db):
-        """Audit F11 residual: a human path out of the pause exists."""
-        self.seed_local(tmp_db, "3")
-        reconcile_day(YESTERDAY, tmp_db, lambda d: clean_page([]))
+        """Audit F11 residual: a human path out of a pause exists. Nothing
+        WRITES a pause since 2026-09-05, so the row is seeded the way a
+        database upgraded from before that date still carries one."""
+        import uuid
+
+        tmp_db.execute(
+            "INSERT INTO cost_reconciliation_events "
+            "(id,target_date,kind,component,local_total_cents,"
+            " cost_api_total_cents,discrepancy_cents,threshold_cents,"
+            " api_raw_response,api_record_count,action_taken,reconciled_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (str(uuid.uuid4()), YESTERDAY.isoformat(), "all", "{}", "3", "0",
+             "3", "50", "{}", 0, "scheduled_paused", TODAY.isoformat()))
+        tmp_db.commit()
         assert has_unacknowledged_discrepancy(tmp_db)
         event_id = tmp_db.execute(
             "SELECT id FROM cost_reconciliation_events WHERE acknowledged_at IS NULL"

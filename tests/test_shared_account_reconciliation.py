@@ -98,33 +98,40 @@ class TestTheOwnersOwnApiUseDoesNotPauseTheBot:
 
 class TestTheDirECTIONThatStillMatters:
     """The check is narrowed, not removed. The bot claiming to have
-    outspent the entire organisation is impossible and still halts it."""
+    outspent the entire organisation is impossible and is still NOTED
+    with its reason - it just no longer halts anything (owner-set
+    2026-09-05: the budget stop is the only stop; the rate is corrected
+    from the bill on the same pass)."""
 
-    def test_the_bot_outspending_the_whole_account_still_pauses(self, db):
+    def test_the_bot_outspending_the_whole_account_is_noted_not_paused(self, db):
+        from catalyst.cost.tracker import has_unacknowledged_discrepancy
+
         seed_local(db, "1000")
         result = reconcile_day(YESTERDAY, db, lambda d: page("1"))
-        assert result.action_taken == "scheduled_paused"
+        assert result.action_taken == "discrepancy_noted"
+        assert not has_unacknowledged_discrepancy(db)
 
     def test_and_the_reason_names_the_impossibility(self, db):
         seed_local(db, "1000")
         reconcile_day(YESTERDAY, db, lambda d: page("1"))
         reason = db.execute(
             "SELECT pause_reason FROM cost_reconciliation_events "
-            "WHERE action_taken = 'scheduled_paused'").fetchone()[0]
+            "WHERE action_taken = 'discrepancy_noted'").fetchone()[0]
         assert "cannot have outspent" in reason
         assert "1000" in reason and "1" in reason
 
-    def test_accumulated_OVERSTATEMENT_still_pauses(self, db):
-        """Small daily overstatements that each pass the floor must
-        still add up to a halt - that check is why drift exists."""
+    def test_accumulated_OVERSTATEMENT_is_still_noted(self, db):
+        """Small daily overstatements that each pass the floor still add
+        up to a NOTED drift with its reason - the record is kept even
+        though nothing halts on it any more."""
         for n in range(2, 31):
             prior_day(db, YESTERDAY - timedelta(days=n), local=40, api=10)
         seed_local(db, "40")
         result = reconcile_day(YESTERDAY, db, lambda d: page("40"))
-        assert result.action_taken == "scheduled_paused"
+        assert result.action_taken == "discrepancy_noted"
         reason = db.execute(
             "SELECT pause_reason FROM cost_reconciliation_events "
-            "WHERE action_taken='scheduled_paused' ORDER BY reconciled_at DESC"
+            "WHERE action_taken='discrepancy_noted' ORDER BY reconciled_at DESC"
         ).fetchone()[0]
         assert "drift" in reason
 
@@ -139,13 +146,16 @@ class TestTheRecordStillShowsTheTruth:
         assert result.cost_api_total_cents == Decimal("5000")
         assert result.local_total_cents == Decimal("8")
 
-    def test_an_empty_api_answer_with_local_spend_still_pauses(self, db):
-        """Unchanged: an empty answer is not agreement."""
+    def test_an_empty_api_answer_with_local_spend_is_still_noted(self, db):
+        """An empty answer is not agreement: it is recorded as such, with
+        the raw response beside it. It just does not stop the bot."""
         seed_local(db, "3")
         result = reconcile_day(YESTERDAY, db,
                                lambda d: CostApiPage(records=[], has_more=False,
                                                      raw_response={"data": []}))
-        assert result.action_taken == "scheduled_paused"
+        assert result.action_taken == "discrepancy_noted"
+        assert "no records at all" in db.execute(
+            "SELECT pause_reason FROM cost_reconciliation_events").fetchone()[0]
 
 
 class TestTheAutoClearNoLongerLoops:
@@ -161,7 +171,7 @@ class TestTheAutoClearNoLongerLoops:
         reconcile_day(db and YESTERDAY, db, lambda d: page("40"))
         drift = db.execute(
             "SELECT drift_cents FROM cost_reconciliation_events "
-            "WHERE action_taken='scheduled_paused'").fetchone()[0]
+            "WHERE action_taken='discrepancy_noted'").fetchone()[0]
         assert drift is not None and Decimal(str(drift)) > 0, (
             "the drift that caused the pause was not stored, so nothing "
             "can re-judge it correctly later")
