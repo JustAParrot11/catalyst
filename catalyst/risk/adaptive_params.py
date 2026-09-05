@@ -170,8 +170,36 @@ _CATALYST_SHAPES = {
                           "price by the time it is public"),
 }
 
+#: THE FLOOR IS THE DEFINITION'S OWN FLOOR NOW, NOT A GUESS ABOVE IT.
+#:
+#: OWNER-SET 2026-09-05: "The bot isnt aggressive ... optimize heavily
+#: to ensure ... claude can make profitable trades and multiple times a
+#: month". The evidence, from the owner's own bundles:
+#:
+#:     long views ever        21     median 0.54    max 0.60
+#:     cleared a 0.60 floor    1
+#:     no_trade views        200+    median 0.68    (a calibrated model
+#:                                                    scores its refusals
+#:                                                    high - see prompts)
+#:
+#: 0.60 was invented (the brief's own word for its predecessor, 0.65)
+#: and the loop meant to test it could not run: the floor's evidence is
+#: scored refusals that were refused FOR the floor, 15 in a month
+#: against a 30-sample minimum. A gate that passes one call in twenty
+#: one and cannot be measured is not a threshold, it is a wall, and the
+#: brief names that shape as the defect: "the system refuses good
+#: trades forever and never signals that it is doing so."
+#:
+#: 0.50 is where the conviction definition already puts the line -
+#: "below 0.50 on a direction is a contradiction" - so a call the model
+#: stands behind at all is now sized by code within the hard bounds,
+#: and the refusal tracker gets a sample it can actually score. It can
+#: raise this again on evidence, three times faster than it can lower
+#: it, exactly as before. What bounds a wrong call meanwhile is
+#: unchanged: 2% of the account per position, five positions, the
+#: daily-loss and drawdown kill switches.
 DEFAULT_PARAMS: dict = {
-    "conviction_floor": Decimal("0.60"),
+    "conviction_floor": Decimal("0.50"),
     _GAP: {k: Decimal(v[0]) for k, v in _CATALYST_SHAPES.items()},
     _STOP: {k: Decimal(v[1]) for k, v in _CATALYST_SHAPES.items()},
     _HOLD: {k: Decimal(v[2]) for k, v in _CATALYST_SHAPES.items()},

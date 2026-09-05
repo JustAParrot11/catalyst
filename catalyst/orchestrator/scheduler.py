@@ -27,7 +27,7 @@ import signal
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 DEFAULT_DB = "/var/lib/catalyst/catalyst.db"
 DEFAULT_CYCLE_SECONDS = 900       # 15 minutes
@@ -1276,15 +1276,33 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
         # after the Form 4 screen, merges rather than replaces, and a
         # failure leaves `out` exactly as the screen built it.
         try:
+            from catalyst.data.sources.edgar_form4 import daily_filers
             from catalyst.data.sources.edgar_xbrl import (
-                live_drift_candidates, refresh_facts,
+                EARNINGS_FORMS, FILER_LOOKBACK_DAYS, cik_ticker_map,
+                earnings_filer_pairs, live_drift_candidates, refresh_facts,
             )
             from pathlib import Path
 
             from catalyst.dashboard.db import bars_path
 
-            pairs = _issuer_pairs(raw_events)
             facts_dir = str(Path(bars_path()).parent / "xbrl_facts")
+            # THE FILERS FIRST, THEN THE FORM 4 FOOTPRINT. Owner's 7-day
+            # bundle 2026-09-05: the arm produced nothing all week
+            # because its universe was the 141 companies insiders had
+            # traded in, and none of them filed a 10-Q. The event this
+            # arm trades is the filing, so the filing index leads - and
+            # leads the fetch queue too, since refresh_facts takes pairs
+            # in order and a company that filed this morning is the only
+            # kind that can become a live candidate today.
+            filer_rows = []
+            for back in range(FILER_LOOKBACK_DAYS):
+                filer_rows.extend(daily_filers(
+                    (as_of - timedelta(days=back)).date(), EARNINGS_FORMS))
+            tmap, tmap_note = cik_ticker_map(facts_dir)
+            filer_pairs = earnings_filer_pairs(filer_rows, tmap)
+            named = {t for t, _ in filer_pairs}
+            pairs = filer_pairs + [p for p in _issuer_pairs(raw_events)
+                                   if p[0] not in named]
             got = refresh_facts(pairs, facts_dir, conn)
             # live_ AND NOT drift_candidates: the plain one replays a
             # company's whole XBRL history, which is what the backtest
@@ -1297,12 +1315,17 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
             out.extend(fresh)
             _record_origin(conn, fresh, "earnings_drift", None, as_of)
             _log.info(
-                "Earnings drift: %d company facts fetched, %d already "
-                "current, %d graded event(s) -> %d inside the %d-day drift "
-                "window (%d too old) -> %d new after de-duplication.%s%s",
+                "Earnings drift: %d 10-Q/10-K filer(s) in the last %d "
+                "index day(s), %d of them with a ticker in the SEC map of "
+                "%d; %d company facts fetched, %d already current, %d "
+                "graded event(s) -> %d inside the %d-day drift window (%d "
+                "too old) -> %d new after de-duplication.%s%s%s",
+                len({r.cik for r in filer_rows}), FILER_LOOKBACK_DAYS,
+                len(filer_pairs), len(tmap),
                 got.fetched, got.already_current, live_stats.built,
                 live_stats.live, live_stats.max_age_days, live_stats.too_old,
                 len(fresh),
+                (" " + tmap_note) if tmap_note else "",
                 (" " + got.why_empty()) if got.why_empty() else "",
                 (" " + live_stats.why_empty()) if live_stats.why_empty()
                 else "")

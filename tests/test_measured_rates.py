@@ -393,13 +393,13 @@ class TestItIsActuallyWiredIntoTheReconciliation:
         account and no longer pauses."""
         seed_day(db, "400")
         result = self._reconcile(db, "100")
-        assert result.action_taken == "scheduled_paused"
+        assert result.action_taken == "discrepancy_noted"
         obs = latest_observation(db)
-        assert obs is not None, "a paused day skipped the learner"
-        # An OBSERVATION is what proves the learner ran. Whether it
-        # APPLIED depends on direction: the pausing direction is the bot
-        # pricing above the bill, which is a downward correction and
-        # needs three agreeing readings before it moves anything.
+        assert obs is not None, "a noted discrepancy skipped the learner"
+        # An OBSERVATION proves the learner ran, and since 2026-09-05 a
+        # 4x factor is refused as not-a-price (SANITY_MULTIPLE) - so it
+        # is on the record and NOT applied, which is the right answer
+        # for a bill a quarter of what was priced.
         assert obs["target_date"] == YESTERDAY.isoformat()
         assert Decimal(str(obs["ratio"])) < 1
 
@@ -408,7 +408,7 @@ class TestItIsActuallyWiredIntoTheReconciliation:
         a rate rides alongside it and must not soften it."""
         seed_day(db, "400")
         result = self._reconcile(db, "100")
-        assert result.action_taken == "scheduled_paused"
+        assert result.action_taken == "discrepancy_noted"
         assert result.local_total_cents == Decimal("400")
         assert result.cost_api_total_cents == Decimal("100")
         assert result.discrepancy_cents == Decimal("300")

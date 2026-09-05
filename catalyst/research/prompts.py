@@ -193,10 +193,63 @@ def render_market_section(market) -> str:
     return "\n".join(lines)
 
 
+def _drift_facts(candidate: Candidate) -> dict:
+    """The `fact:` tags live_drift_candidates puts on a drift candidate."""
+    out: dict = {}
+    for tag in candidate.correlation_tags or ():
+        if isinstance(tag, str) and tag.startswith("fact:") and "=" in tag:
+            key, _, value = tag[5:].partition("=")
+            out[key] = value
+    return out
+
+
+def _drift_brief(candidate: Candidate) -> str:
+    """The CANDIDATE section for the post-earnings-drift arm.
+
+    Bake-off Candidate A: surprise is this quarter's net income against
+    the same quarter a year ago, standardised by the company's own past
+    seasonal differences (a SUE with no analysts), from the first-filed
+    XBRL value. Graded 2016-2026 out of sample: n=84, 57.1% hit,
+    +1.59% a trade, 8.8% max drawdown - the better of the two arms.
+    """
+    f = _drift_facts(candidate)
+    sue = f.get("sue", "?")
+    return (
+        "CANDIDATE\n"
+        f"Ticker: {candidate.ticker}\n"
+        f"Sector: {candidate.sector}\n"
+        "Catalyst type: earnings_drift — a POST-EARNINGS DRIFT screen. "
+        f"{candidate.ticker} filed a {f.get('form', '10-Q/10-K')} on "
+        f"{f.get('filed', candidate.catalyst_date.isoformat())} for the "
+        f"quarter ending {f.get('period_end', '?')}, and the reported "
+        f"quarterly net income was a {sue} standard-deviation surprise "
+        "against its own year-ago quarter (standardised by the company's "
+        "own past seasonal swings; first-filed XBRL, no analyst estimates "
+        "involved). The screen passes surprises of +1.0 sd or more.\n"
+        f"Source: {', '.join(candidate.source_event_ids)}\n\n"
+        "WHAT THIS ARM TRADES. The graded finding is that after a large "
+        "positive surprise the price keeps adjusting for roughly twelve "
+        "trading days rather than all at once - the market under-reacts. "
+        "The arm holds long for that window. On the 2016-2026 bake-off "
+        "it was right 57% of the time out of sample with an 8.8% maximum "
+        "drawdown, which makes it the better-graded of the two arms this "
+        "system runs; it is not a proven edge, and your job is to say "
+        "whether THIS instance is a clean example of it or a statistical "
+        "artefact - a one-off gain, a restatement, an acquisition, a "
+        "denominator effect, a quarter the market was already braced for.\n\n"
+        "READ THE TAPE WITH THE NUMBER. The graded arm only took the "
+        "trade when the price reaction since filing AGREED with the "
+        "surprise. A stock that fell on a beat is the refusal case."
+    )
+
+
 def render_research_prompt(candidate: Candidate,
                            graph_context: str | None = None,
                            signals: list | None = None,
-                           market=None) -> str:
+                           market=None,
+                           record: str | None = None) -> str:
+    """`record` is the bot's own recent outcomes, rendered by
+    research/record.py, or None when there is nothing to say yet."""
     searches = searches_for(candidate, signals)
     sections: list[str] = []
     sections.append(
@@ -236,6 +289,14 @@ def render_research_prompt(candidate: Candidate,
             "a resolution date. Nothing here has read the body of the "
             "filings, so if the timing matters to your thesis, check it."
         )
+    elif candidate.catalyst_type == "earnings_drift":
+        # A DIFFERENT ARM, A DIFFERENT QUESTION. Without this branch a
+        # drift candidate fell into the insider text below and was
+        # described to the model as a cluster of insider purchases that
+        # never happened - and then asked whether "these filings" were
+        # priced in, which for a strategy that BUYS AFTER THE MOVE is
+        # the wrong question with the wrong answer built in.
+        sections.append(_drift_brief(candidate))
     else:
         sections.append(
             "CANDIDATE\n"
@@ -260,6 +321,9 @@ def render_research_prompt(candidate: Candidate,
             f"{graph_context}"
         )
     sections.append(render_market_section(market))
+    if record:
+        sections.append(record)
+    drift = candidate.catalyst_type == "earnings_drift"
     sections.append(
         "ANSWER THESE\n"
         "1. direction — \"long\", \"short\" or \"no_trade\".\n"
@@ -281,12 +345,21 @@ def render_research_prompt(candidate: Candidate,
         "honest figure: inflating it to force a trade and shading it "
         "down to look careful both break the only feedback loop this "
         "system has.\n"
-        "3. thesis — the MECHANISM, in two to four sentences: what "
-        "would move this price from here, why it has not moved already, "
-        "and what these insiders plausibly knew that the market does "
-        "not. Name your figures — who bought, how much, at what price "
-        "against what recent range. A thesis that would read the same "
-        "for any cluster in any company is not a thesis.\n"
+        + ("3. thesis — the MECHANISM, in two to four sentences: how big "
+           "the surprise was against the company's own history, how the "
+           "price has reacted since the filing, and why the rest of the "
+           "adjustment is still ahead rather than done. Name your "
+           "figures — the reported number, the year-ago number, the move "
+           "since filing. A thesis that would read the same for any beat "
+           "at any company is not a thesis.\n"
+           if drift else
+           "3. thesis — the MECHANISM, in two to four sentences: what "
+           "would move this price from here, why it has not moved already, "
+           "and what these insiders plausibly knew that the market does "
+           "not. Name your figures — who bought, how much, at what price "
+           "against what recent range. A thesis that would read the same "
+           "for any cluster in any company is not a thesis.\n")
+        +
         "4. invalidation — the ONE observable fact that would prove the "
         "thesis wrong, checkable by someone who cannot ask you: a price "
         "level, a filing, a date, a number in a report. This text is "
@@ -294,13 +367,23 @@ def render_research_prompt(candidate: Candidate,
         "early, so \"the thesis does not play out\" is useless there.\n"
         "5. expected_holding_days — whole days; this strategy holds days "
         f"to weeks (the graded arm held {HOLD_DAYS} trading days).\n"
-        "6. priced_in — has the market already consumed these filings? "
-        "Use the MARKET DATA above and anything you find by searching: "
-        "what price and volume have done since each filing became "
-        "public, and whether the cluster has been widely reported. "
-        "SAY WHICH EVIDENCE YOU USED. \"Probably priced in\" with no "
-        "figure behind it is not an answer to this question, and a "
-        "priced_in call you cannot support should be false."
+        + ("6. priced_in — for THIS arm the question is narrower than it "
+           "sounds. Post-earnings drift is the finding that the market "
+           "under-reacts to a large surprise and keeps adjusting for "
+           "weeks, so a stock that has already moved in the direction of "
+           "the surprise is CONFIRMING the setup, not exhausting it. Say "
+           "priced_in only if the move since filing is already larger "
+           "than the surprise plausibly justifies, or the reaction went "
+           "the OTHER way (the tape disagrees with the number - the "
+           "graded arm refuses those). SAY WHICH FIGURES YOU USED.\n"
+           if drift else
+           "6. priced_in — has the market already consumed these filings? "
+           "Use the MARKET DATA above and anything you find by searching: "
+           "what price and volume have done since each filing became "
+           "public, and whether the cluster has been widely reported. "
+           "SAY WHICH EVIDENCE YOU USED. \"Probably priced in\" with no "
+           "figure behind it is not an answer to this question, and a "
+           "priced_in call you cannot support should be false.")
     )
     sections.append(
         "GROUND RULES\n"

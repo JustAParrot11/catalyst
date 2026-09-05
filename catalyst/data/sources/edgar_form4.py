@@ -769,6 +769,69 @@ def parse_daily_index(text: str, *, forms: Sequence[str] = ("4",)) -> list[Index
     return rows
 
 
+def daily_filers(
+    day: date,
+    forms: Sequence[str],
+    http_get: HttpGet | None = None,
+    *,
+    contact_email: str | None = None,
+    now: Callable[[], datetime] | None = None,
+) -> list[IndexRow]:
+    """Every filing of the given form types in one day's daily index.
+
+    THE OTHER HALF OF A FILE THIS MODULE ALREADY DOWNLOADS. fetch_form4
+    reads ``form.YYYYMMDD.idx`` for Form 4 rows and throws the rest
+    away - and the rest includes every 10-Q and 10-K filed that day,
+    which is exactly the universe the earnings-drift arm needs.
+
+    OWNER'S 7-DAY BUNDLE, 2026-09-05: the drift arm produced NOTHING,
+    because its universe was the companies with recent Form 4 activity
+    (141 tickers) and none of them happened to file a 10-Q that week. A
+    post-earnings strategy that only looks at companies insiders traded
+    in is looking in the wrong place: the event it trades is the
+    filing, so the filing index is where the universe comes from.
+
+    Same cache, same pacer, same absent-file memory as fetch_form4, so
+    asking for a day both arms need costs one request between them.
+    Today's index is never cached (it is still being written to); a
+    past day's is final.
+
+    Raises RateLimitBlocked like every other SEC call here - a block
+    must stop the whole pass, not one feed. Any other failure returns
+    an empty list: the arm has nothing to say that day, and says so.
+    """
+    forms_key = tuple(f.strip().upper() for f in forms)
+    cached = _index_cache.get((day, forms_key))
+    if cached is not None:
+        return list(cached)
+    last_absent = _absent_since.get(day)
+    if last_absent is not None and \
+            time.monotonic() - last_absent < ABSENT_RECHECK_SECONDS:
+        return []
+    clock = now or (lambda: datetime.now(timezone.utc))
+    headers = {"User-Agent": user_agent(contact_email),
+               "Accept-Encoding": "gzip, deflate"}
+    try:
+        response = _request(
+            _daily_index_url(day), http_get=http_get or _default_http_get,
+            limiter=sec_pacer(), sleep=time.sleep, headers=headers,
+            tolerate=(403, 404))
+    except RateLimitBlocked:
+        raise
+    except FeedError:
+        return []
+    status = int(response.status_code)
+    if status != 200:
+        if _looks_absent(status, _response_text(response)):
+            _absent_since[day] = time.monotonic()
+        return []
+    _absent_since.pop(day, None)
+    rows = parse_daily_index(_response_text(response), forms=forms_key)
+    if day < clock().date():
+        _remember_index(day, forms_key, rows)
+    return rows
+
+
 def _extract_ownership_xml(submission_text: str) -> str:
     start = submission_text.find("<ownershipDocument")
     if start == -1:

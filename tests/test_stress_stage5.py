@@ -1645,9 +1645,10 @@ class TestGovernorUnderTheBoundary:
             "SELECT reason FROM cost_governor_events WHERE decision='deny'"
         ).fetchone()[0].startswith(expect)
 
-    def test_unacknowledged_reconciliation_pause_blocks_spend(self, db):
-        """SURVIVED: a paused reconciliation stops all model spend until
-        a human acknowledges it."""
+    def test_a_legacy_reconciliation_pause_no_longer_blocks_spend(self, db):
+        """RETIRED 2026-09-05 (owner: the budget stop is the only stop).
+        A `scheduled_paused` row from a database upgraded from before
+        that date is history and must not hold research."""
         db.execute(
             # Columns NAMED, never positional (CLAUDE.md).
             "INSERT INTO cost_reconciliation_events "
@@ -1658,8 +1659,7 @@ class TestGovernorUnderTheBoundary:
         db.commit()
         broker, state = broker_for()
         report = run(db, broker, model_transport(), [candidate()])
-        assert report.funnel["researched"] == 0
-        assert state["posts"] == []
+        assert report.funnel["researched"] == 1, report.drop_reasons
 
     def test_usage_with_unserializable_values_is_still_recorded(self, db):
         """record() json.dumps the raw usage: a value it cannot encode

@@ -64,6 +64,17 @@ def _investigate(conn):
         lambda payload: pytest.fail("a denied call must never reach the API"))
 
 
+def _unpriced_row(conn):
+    """A cost row that could not be priced - the one integrity gate the
+    governor keeps (it is a hole in the count the budget stop needs)."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "INSERT INTO cost_events (id, raw_usage_json, model, kind, "
+        "component, priced_cents, priced_at, api_call_id) VALUES "
+        "('u','{}','who-knows','scheduled','research',NULL,?,'a')", (now,))
+    conn.commit()
+
+
 def _burn_the_cap(conn):
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
@@ -94,32 +105,42 @@ class TestTheDenialNamesItsGate:
         assert log.skipped_reason is not None
         assert "cap_exceeded" in log.skipped_reason, log.skipped_reason
 
-    def test_an_unacknowledged_discrepancy_says_so(self, conn):
-        """THE ONE THAT CAUSED THE QUESTION. This is not "out of money" -
-        it is the daily reconciliation holding spending until a human
-        acknowledges it, and the fix is one click, not a bigger budget."""
-        _unacknowledged_discrepancy(conn)
-        log = _investigate(conn)
-        assert log.skipped_reason is not None
-        assert "reconciliation" in log.skipped_reason, log.skipped_reason
+    def test_an_unacknowledged_discrepancy_no_longer_denies(self, conn):
+        """THE ONE THAT CAUSED THE QUESTION, retired. This gate held the
+        bot for 3.5 trading days on 2026-09-02/05 over a pricing
+        forecast that was simply wrong. Owner-set 2026-09-05: the budget
+        stop is the only stop. A paused row left over from before that
+        date is history, not a gate."""
+        from catalyst.cost import CostEstimate
+        from catalyst.cost.governor import authorize
 
-    def test_the_two_are_DISTINGUISHABLE(self, conn, tmp_path):
+        _unacknowledged_discrepancy(conn)
+        d = authorize(CostEstimate(estimated_cents=Decimal("1"), basis="t",
+                                   kind="scheduled", component="research"),
+                      conn, Decimal("0.10"))
+        assert d.authorized, d.reason
+        assert "reconciliation" not in (d.reason or "")
+
+    def test_the_budget_denial_and_an_unpriced_row_are_DISTINGUISHABLE(
+            self, conn, tmp_path):
         """The whole defect: both used to read `budget_denied`, so a
         funnel full of denials could not tell the owner which of two
-        unrelated problems they had."""
+        unrelated problems they had. The reconciliation gate is gone;
+        the two that remain must still read differently."""
         _burn_the_cap(conn)
         capped = _investigate(conn).skipped_reason
 
         other = sqlite3.connect(str(tmp_path / "d2.db"))
         other.executescript(open("catalyst/storage/schema.sql").read())
         other.commit()
-        _unacknowledged_discrepancy(other)
+        _unpriced_row(other)
         blocked = _investigate(other)
         other.close()
 
+        assert blocked.skipped_reason is not None
         assert capped != blocked.skipped_reason, (
             f"both denials read {capped!r} - the owner cannot tell a "
-            "budget that ran out from a discrepancy nobody acknowledged")
+            "budget that ran out from a ledger with a hole in it")
 
     def test_an_unpriced_row_says_so(self, conn):
         """The third gate: a cost row that could not be priced. That is a

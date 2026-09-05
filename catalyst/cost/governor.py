@@ -27,7 +27,7 @@ from catalyst.cost.ledger import (
     month_to_date_cents,
     net_realized_profit_cents_prior_month,
 )
-from catalyst.cost.tracker import has_unacknowledged_discrepancy, has_unpriced_rows
+from catalyst.cost.tracker import has_unpriced_rows
 
 BASE_CAP_CENTS = Decimal("500")                     # $5/month, hard (BUILD-BRIEF.md)
 
@@ -200,11 +200,23 @@ def authorize(
     as_of = as_of or datetime.now(timezone.utc).date()
     spent = month_to_date_cents(estimate.kind, conn, as_of)
 
-    # Ledger integrity gates apply to BOTH kinds: holes or unresolved
-    # discrepancies mean nothing new is authorized until a human acts.
+    # ONE integrity gate, not two. An unpriced row is a hole in the
+    # count the budget stop depends on, so nothing is authorised until it
+    # is priced - that IS the budget stop working.
+    #
+    # THE RECONCILIATION PAUSE IS GONE. Owner-set 2026-09-05: "i dont
+    # really need any hard limit except a hard stop to stop bot using
+    # all the budget". It used to sit in this loop and it halted the
+    # bot for 3.5 trading days (2026-09-02 00:02 to 09-05 17:52, 201
+    # research calls denied) because pricing.py had FORECAST a price
+    # rise for 1 September, the forecast was wrong, and the day's local
+    # figure came out 42% above the bill. That is not a reason to stop
+    # trading; it is a reason to correct the rate, which measured_rates
+    # now does from the bill on its own. A discrepancy is a correction,
+    # not an alarm (TRAPS.md, owner decision 2026-08-14) - this makes it
+    # so structurally instead of by threshold.
     for check, reason in (
         (has_unpriced_rows, "unpriced_cost_rows"),
-        (has_unacknowledged_discrepancy, "reconciliation_discrepancy_unacknowledged"),
     ):
         if check(conn):
             decision = GovernorDecision(

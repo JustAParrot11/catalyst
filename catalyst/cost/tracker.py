@@ -19,10 +19,14 @@ Audit-driven invariants (cost-auditor, stage 3, two rounds):
   recorded beside it. Per-kind pricing errors still cannot hide - they
   move the total.
 - Cumulative drift tracking (F1 residual): small daily divergences that
-  each pass the floor accumulate; the trailing signed drift pauses
-  spend when it exceeds the floor even if no single day did.
-- A truncated page writes its paused reconciliation row BEFORE raising
-  (F4): the refusal is on the record, not just in the traceback.
+  each pass the floor accumulate; the trailing signed drift is NOTED
+  when it exceeds the floor even if no single day did.
+- A truncated page writes its reconciliation row BEFORE raising (F4):
+  the refusal is on the record, not just in the traceback.
+- NOTHING HERE PAUSES SPENDING any more (owner-set 2026-09-05). Every
+  discrepancy is recorded with the condition that fired and why; the
+  budget cap in governor.py is the only spending stop, and the rate is
+  corrected from the bill by measured_rates.py on the same pass.
 - reprice_all is transactional (F8), continues past unknown models
   collecting them, and logs every change to cost_reprice_events (F3
   residuals).
@@ -542,7 +546,7 @@ def reconcile_day(
         # The refusal itself is on the record BEFORE the raise (audit F4):
         # a caller that logs-and-continues still leaves a paused row behind.
         _insert_row(Decimal("0"), Decimal("0"), Decimal("0"), Decimal("0"),
-                    "scheduled_paused", auto_ack=False,
+                    "discrepancy_noted", auto_ack=True,
                     reason=("the Cost API answered with more pages than were "
                             "read, so the day's bill was incomplete and "
                             "nothing could be compared against it"))
@@ -617,20 +621,33 @@ def reconcile_day(
                   f"over the trailing {DRIFT_WINDOW_DAYS} days, which is "
                   "both over the absolute floor and a real fraction of what "
                   "the window cost")
-    paused = reason is not None
-    action = "scheduled_paused" if paused else "none"
+    # NOTHING HERE PAUSES THE BOT ANY MORE. Owner-set 2026-09-05: "i dont
+    # really need any hard limit except a hard stop to stop bot using
+    # all the budget".
+    #
+    # Every condition above used to write `scheduled_paused` and halt
+    # all spending until a human clicked acknowledge. The last time it
+    # fired - 2026-09-02, on the 1 September figures - it was because
+    # pricing.py had FORECAST a rate rise that never happened, the local
+    # ledger came out 42% above the bill, and the bot sat idle for 3.5
+    # trading days with 201 research calls denied. The ledger was the
+    # thing that was wrong, and the fix was a rate correction, which is
+    # exactly what the next block does on its own.
+    #
+    # The row still says WHICH condition fired and why, in
+    # `pause_reason`, because that is the diagnosis; it is just
+    # information now, never a gate. `has_unacknowledged_discrepancy`
+    # therefore finds nothing new from here on.
+    action = "discrepancy_noted" if reason is not None else "none"
     _insert_row(api_total, discrepancy, threshold, drift, action,
-                auto_ack=not paused, reason=reason)
+                auto_ack=True, reason=reason)
 
     # THE SAME TWO NUMBERS, ASKED A SECOND QUESTION. The comparison above
     # asks "is the ledger honest?"; this asks "is the RATE TABLE right?" -
-    # and it is the only place both figures exist for a closed day.
-    #
-    # Deliberately after the row is written and never able to change it:
-    # a paused day stays paused for the human, and learning a rate can
-    # only ever tighten the table (measured_rates.py). Runs on paused
-    # days too - a large discrepancy is exactly when a rate is wrong, and
-    # correcting it is what stops the same pause recurring tomorrow.
+    # and it is the only place both figures exist for a closed day. This
+    # is what a discrepancy DOES now: it moves the rate to what the bill
+    # divides to (measured_rates.py), so the same gap does not recur
+    # tomorrow.
     learned = learn_from_closed_day(conn, target_date, local_total, api_total)
 
     # AND THE MULTIPLIERS, from the same day's ITEMISED bill. Only here:
@@ -699,8 +716,13 @@ def _trailing_signed_drift(conn: sqlite3.Connection, before: date) -> Decimal:
 
 def has_unacknowledged_discrepancy(conn: sqlite3.Connection) -> bool:
     """True while any reconciliation event that paused spend remains
-    unacknowledged. Pauses ALL new spend authorization, both kinds -
-    deliberately global (audit F11)."""
+    unacknowledged.
+
+    NO LONGER A GATE. reconcile_day stopped writing `scheduled_paused`
+    on 2026-09-05 (owner: the budget stop is the only stop), and the
+    governor stopped reading this. It is kept for the dashboard, which
+    still shows any pre-existing paused row as history, and for the
+    acknowledge endpoint that clears one."""
     return conn.execute(
         "SELECT COUNT(*) FROM cost_reconciliation_events "
         "WHERE action_taken = 'scheduled_paused' AND acknowledged_at IS NULL"
