@@ -112,10 +112,28 @@ class TestTheWindowIsDeclared:
         assert b["window_applied_to"]["logs"] == "ts"
 
     def test_a_table_it_COULD_NOT_window_is_listed(self, aged):
-        """A short file and a wrong file look identical otherwise."""
+        """A short file and a wrong file look identical otherwise.
+
+        This used to name research_call_turns, which is exactly how the
+        defect hid: that table has no clock of its own, came out ENTIRE
+        on every bundle at every window, and the honest declaration made
+        it read as deliberate. One day of it was 17.5MB. It is windowed
+        through its parent now (test_bundle_fits_in_an_upload.py), so the
+        declaration is asserted against a table that genuinely has no
+        window - the CURRENT positions, which a window would hide the
+        point of."""
         b = diagnostics_bundle(Db(aged), scope="everything", days=7)
-        assert "research_call_turns" in b["window_not_applicable"], (
+        assert b["window_not_applicable"], (
             "a table exported in full under a window must say so")
+        from catalyst.dashboard.server import _ALWAYS_WHOLE
+
+        assert set(b["window_not_applicable"]) <= set(_ALWAYS_WHOLE), (
+            "a table came out whole without a declared reason: "
+            f"{sorted(set(b['window_not_applicable']) - set(_ALWAYS_WHOLE))}")
+
+    def test_the_table_that_hid_behind_that_declaration_is_windowed_now(self, aged):
+        b = diagnostics_bundle(Db(aged), scope="everything", days=7)
+        assert "research_call_turns" not in b["window_not_applicable"]
 
     def test_no_window_declares_that_too(self, aged):
         b = diagnostics_bundle(Db(aged), scope="everything", days=None)
