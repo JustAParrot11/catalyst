@@ -511,9 +511,15 @@ def investigate(
     call_id = str(uuid.uuid4())
     conn = cost_context.conn
     started = time.monotonic()
+    # THE BOT'S OWN RECORD RIDES IN THE PROMPT (research/record.py):
+    # closed trades and scored refusals, rendered as text the model can
+    # weigh. Informational, like the market section - nothing reads it
+    # back. None when there is nothing scored yet.
+    from catalyst.research.record import recent_record
+
     prompt = prompts.render_research_prompt(
         candidate, graph_context=graph_context, signals=signals,
-        market=market)
+        market=market, record=recent_record(conn))
     # The schema tool is offered DURING exploration as well as in the
     # forced turn. If the model submits its view while it still has the
     # search results in hand, the extraction turn - which re-sends the
