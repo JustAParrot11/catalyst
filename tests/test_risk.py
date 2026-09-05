@@ -346,23 +346,29 @@ def db(tmp_path):
     conn.close()
 
 
+#: The LIVE default floor. The adaptive tests below start from it and
+#: step relative to it, so they hold whatever the owner sets it to
+#: (0.60 -> 0.50 on 2026-09-05) rather than a number frozen in a test.
+FLOOR = ap.DEFAULT_PARAMS["conviction_floor"]
+
+
 class TestAdaptiveParams:
     def test_insufficient_sample_refused(self):
-        p = ap.propose_adjustment("conviction_floor", Decimal("0.60"),
+        p = ap.propose_adjustment("conviction_floor", FLOOR,
                                   evidence(n=29))
         assert not p.applicable
         assert p.reason.startswith("insufficient_sample")
 
     def test_insufficient_significance_refused(self):
-        p = ap.propose_adjustment("conviction_floor", Decimal("0.60"),
+        p = ap.propose_adjustment("conviction_floor", FLOOR,
                                   evidence(sig="0.89"))
         assert not p.applicable
 
     def test_loosen_step_is_a_third_of_tighten(self):
         # conviction_floor: raising = tighten. Full strength both ways.
-        t = ap.propose_adjustment("conviction_floor", Decimal("0.60"),
+        t = ap.propose_adjustment("conviction_floor", FLOOR,
                                   evidence(effect="1"))
-        l = ap.propose_adjustment("conviction_floor", Decimal("0.60"),
+        l = ap.propose_adjustment("conviction_floor", FLOOR,
                                   evidence(effect="-1"))
         assert t.direction == "tighten" and l.direction == "loosen"
         t_step = t.proposed_value - t.old_value
@@ -371,21 +377,21 @@ class TestAdaptiveParams:
         assert l_step == Decimal("0.01")
 
     def test_apply_writes_log_and_current_values_reads_it(self, db):
-        p = ap.propose_adjustment("conviction_floor", Decimal("0.60"),
+        p = ap.propose_adjustment("conviction_floor", FLOOR,
                                   evidence(effect="1"))
         out = ap.apply(p, HARD_BOUNDS, ap.current_values(db), db)
         assert out.applied, out.refusal_reason
-        assert ap.current_values(db)["conviction_floor"] == Decimal("0.63")
+        assert ap.current_values(db)["conviction_floor"] == (FLOOR + Decimal("0.03"))
         row = db.execute("SELECT reverses_to, sample_ids FROM adaptive_param_log").fetchone()
-        assert row[0] == "0.60"
+        assert row[0] == str(FLOOR)
         assert len(json.loads(row[1])) == 30
 
     def test_overlapping_evidence_window_refused(self, db):
-        p1 = ap.propose_adjustment("conviction_floor", Decimal("0.60"),
+        p1 = ap.propose_adjustment("conviction_floor", FLOOR,
                                    evidence(effect="1"))
         assert ap.apply(p1, HARD_BOUNDS, ap.current_values(db), db).applied
         # second proposal's window starts inside the first's
-        p2 = ap.propose_adjustment("conviction_floor", Decimal("0.63"),
+        p2 = ap.propose_adjustment("conviction_floor", (FLOOR + Decimal("0.03")),
                                    evidence(effect="1",
                                             start=NOW - timedelta(days=30),
                                             end=NOW))
@@ -394,16 +400,16 @@ class TestAdaptiveParams:
         assert out.refusal_reason.startswith("evidence_window_overlaps_previous")
 
     def test_disjoint_second_window_accepted(self, db):
-        p1 = ap.propose_adjustment("conviction_floor", Decimal("0.60"),
+        p1 = ap.propose_adjustment("conviction_floor", FLOOR,
                                    evidence(effect="1"))
         assert ap.apply(p1, HARD_BOUNDS, ap.current_values(db), db).applied
-        p2 = ap.propose_adjustment("conviction_floor", Decimal("0.63"),
+        p2 = ap.propose_adjustment("conviction_floor", (FLOOR + Decimal("0.03")),
                                    evidence(effect="1", start=NOW,
                                             end=NOW + timedelta(days=30)))
         assert ap.apply(p2, HARD_BOUNDS, ap.current_values(db), db).applied
 
     def test_stale_proposal_refused(self, db):
-        p = ap.propose_adjustment("conviction_floor", Decimal("0.55"),
+        p = ap.propose_adjustment("conviction_floor", (FLOOR + Decimal("0.05")),
                                   evidence(effect="1"))
         out = ap.apply(p, HARD_BOUNDS, ap.current_values(db), db)
         assert not out.applied
@@ -425,7 +431,7 @@ class TestAdaptiveParams:
     def test_oversized_step_refused_even_if_proposal_lies(self, db):
         p = ap.AdjustmentProposal(
             parameter="conviction_floor", direction="tighten",
-            old_value=Decimal("0.60"), proposed_value=Decimal("0.70"),
+            old_value=FLOOR, proposed_value=(FLOOR + Decimal("0.10")),
             evidence=evidence(), applicable=True, reason=None)
         out = ap.apply(p, HARD_BOUNDS, ap.current_values(db), db)
         assert not out.applied
@@ -449,21 +455,21 @@ class TestAdaptiveParams:
                                   evidence())
 
     def test_auto_revert_on_opposing_post_sample(self, db):
-        p = ap.propose_adjustment("conviction_floor", Decimal("0.60"),
+        p = ap.propose_adjustment("conviction_floor", FLOOR,
                                   evidence(effect="-1"))  # loosen to 0.59
         assert ap.apply(p, HARD_BOUNDS, ap.current_values(db), db).applied
-        assert ap.current_values(db)["conviction_floor"] == Decimal("0.59")
+        assert ap.current_values(db)["conviction_floor"] == (FLOOR - Decimal("0.01"))
         # post-change evidence says raise it (opposes the loosening);
         # loosen reverts at a third of the minimum sample = 10.
         post = evidence(n=10, effect="1", start=NOW + timedelta(days=1),
                         end=NOW + timedelta(days=40))
         out = ap.maybe_auto_revert("conviction_floor", post, db)
         assert out.reverted
-        assert out.restored_value == Decimal("0.60")
-        assert ap.current_values(db)["conviction_floor"] == Decimal("0.60")
+        assert out.restored_value == FLOOR
+        assert ap.current_values(db)["conviction_floor"] == FLOOR
 
     def test_revert_refuses_pre_change_evidence(self, db):
-        p = ap.propose_adjustment("conviction_floor", Decimal("0.60"),
+        p = ap.propose_adjustment("conviction_floor", FLOOR,
                                   evidence(effect="-1"))
         assert ap.apply(p, HARD_BOUNDS, ap.current_values(db), db).applied
         pre = evidence(n=30, effect="1", start=NOW - timedelta(days=90),
@@ -473,7 +479,7 @@ class TestAdaptiveParams:
         assert "predates" in out.reason
 
     def test_revert_of_tighten_needs_full_sample(self, db):
-        p = ap.propose_adjustment("conviction_floor", Decimal("0.60"),
+        p = ap.propose_adjustment("conviction_floor", FLOOR,
                                   evidence(effect="1"))  # tighten
         assert ap.apply(p, HARD_BOUNDS, ap.current_values(db), db).applied
         post = evidence(n=10, effect="-1", start=NOW + timedelta(days=1),
@@ -489,7 +495,7 @@ class TestAdaptiveHardening:
     def test_hand_built_proposal_with_tiny_sample_refused(self, db):
         p = ap.AdjustmentProposal(
             parameter="conviction_floor", direction="tighten",
-            old_value=Decimal("0.60"), proposed_value=Decimal("0.61"),
+            old_value=FLOOR, proposed_value=(FLOOR + Decimal("0.01")),
             evidence=evidence(n=1), applicable=True, reason=None)
         out = ap.apply(p, HARD_BOUNDS, ap.current_values(db), db)
         assert not out.applied
@@ -498,7 +504,7 @@ class TestAdaptiveHardening:
     def test_hand_built_low_significance_refused(self, db):
         p = ap.AdjustmentProposal(
             parameter="conviction_floor", direction="tighten",
-            old_value=Decimal("0.60"), proposed_value=Decimal("0.61"),
+            old_value=FLOOR, proposed_value=(FLOOR + Decimal("0.01")),
             evidence=evidence(sig="0.50"), applicable=True, reason=None)
         out = ap.apply(p, HARD_BOUNDS, ap.current_values(db), db)
         assert not out.applied
@@ -512,7 +518,7 @@ class TestAdaptiveHardening:
             window_end=NOW - timedelta(days=1),
             effect_size=Decimal("1"), significance=Decimal("0.95"),
             evidence_strength=Decimal("1"))
-        p = ap.propose_adjustment("conviction_floor", Decimal("0.60"), ev)
+        p = ap.propose_adjustment("conviction_floor", FLOOR, ev)
         out = ap.apply(p, HARD_BOUNDS, ap.current_values(db), db)
         assert not out.applied
         assert "evidence_not_closed_scored_outcome" in out.refusal_reason
@@ -530,21 +536,21 @@ class TestAdaptiveHardening:
             window_end=NOW - timedelta(days=1),
             effect_size=Decimal("1"), significance=Decimal("0.95"),
             evidence_strength=Decimal("1"))
-        p = ap.propose_adjustment("conviction_floor", Decimal("0.60"), ev)
+        p = ap.propose_adjustment("conviction_floor", FLOOR, ev)
         out = ap.apply(p, HARD_BOUNDS, ap.current_values(db), db)
         assert not out.applied
 
     def test_reverted_adjustments_window_still_blocks_reuse(self, db):
         """F3: revert-then-reapply with the same evidence window must be
         refused - the window was spent, reverted or not."""
-        p = ap.propose_adjustment("conviction_floor", Decimal("0.60"),
+        p = ap.propose_adjustment("conviction_floor", FLOOR,
                                   evidence(effect="-1"))  # loosen
         assert ap.apply(p, HARD_BOUNDS, ap.current_values(db), db).applied
         post = evidence(n=10, effect="1", start=NOW + timedelta(days=1),
                         end=NOW + timedelta(days=40))
         assert ap.maybe_auto_revert("conviction_floor", post, db).reverted
-        # same original window again, value is back at 0.60
-        p2 = ap.propose_adjustment("conviction_floor", Decimal("0.60"),
+        # same original window again, value is back at FLOOR
+        p2 = ap.propose_adjustment("conviction_floor", FLOOR,
                                    evidence(effect="-1"))
         out = ap.apply(p2, HARD_BOUNDS, ap.current_values(db), db)
         assert not out.applied
