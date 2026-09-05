@@ -154,14 +154,20 @@ class TestTheDiscoveryTimestampIsReal:
         assert live[0].discovered_at == AS_OF
 
     def test_nothing_else_about_the_candidate_changes(self):
+        """The id, ticker, type, date and sources are untouched. The
+        tags may GAIN the surprise facts (so the research prompt can
+        state the number) but never lose what was there."""
         original = cand(TODAY)
         live, _t, _s = _run([original])
         got = live[0]
         assert (got.id, got.ticker, got.catalyst_type, got.catalyst_date,
-                got.source_event_ids, got.correlation_tags) == (
+                got.source_event_ids) == (
             original.id, original.ticker, original.catalyst_type,
-            original.catalyst_date, original.source_event_ids,
-            original.correlation_tags)
+            original.catalyst_date, original.source_event_ids)
+        assert got.correlation_tags[:len(original.correlation_tags)] == \
+            original.correlation_tags
+        for extra in got.correlation_tags[len(original.correlation_tags):]:
+            assert extra.startswith("fact:"), extra
 
 
 class TestTheIdDoesNotMoveWhenTheUniverseGrows:

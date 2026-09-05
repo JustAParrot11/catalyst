@@ -88,6 +88,110 @@ FACTS_REFRESH_DAYS = 2
 MAX_FETCHES_PER_PASS = 8
 
 
+#: THE UNIVERSE IS EVERY COMPANY THAT FILED EARNINGS, not every company
+#: an insider traded in.
+#:
+#: OWNER'S 7-DAY BUNDLE, 2026-09-05: zero drift candidates in a week.
+#: The arm's universe was `_issuer_pairs` - the companies in the Form 4
+#: feed, 141 tickers - and none of them filed a 10-Q that week. The
+#: event this arm trades IS the filing, so the daily filing index is
+#: where the universe has to come from (edgar_form4.daily_filers).
+#:
+#: The index carries a CIK and a company name, never a ticker, and the
+#: bot trades tickers. SEC publishes the mapping as one keyless JSON
+#: file, refreshed rarely: tickers change on a listing event, not on a
+#: filing, so a week-old map is the map.
+TICKER_MAP_URL = "https://www.sec.gov/files/company_tickers.json"
+TICKER_MAP_FILE = "company_tickers.json"
+TICKER_MAP_REFRESH_DAYS = 7
+
+#: Which forms carry the earnings the drift signal is built from.
+#: Amendments are excluded on purpose: the signal is the FIRST-filed
+#: value for a period (earnings_drift.py, point-in-time discipline).
+EARNINGS_FORMS = ("10-Q", "10-K")
+
+#: How many days of the filing index to read for filers. A filing
+#: accepted after the evening publish lands in the next day's index,
+#: and a weekend sits between Friday and Monday - three calendar days
+#: sees all of them and stays well inside MAX_EVENT_AGE_DAYS.
+FILER_LOOKBACK_DAYS = 3
+
+
+def cik_ticker_map(facts_dir, *, http_get=None, now=None,
+                   refresh_days: int = TICKER_MAP_REFRESH_DAYS
+                   ) -> tuple[dict, str]:
+    """({cik int: TICKER}, note). Cached beside the facts; refreshed
+    when older than `refresh_days`. Never raises: an unreadable map is
+    an empty map with the reason beside it (house rule 3), and the
+    arm simply cannot name those filers this pass."""
+    now = now or datetime.now(timezone.utc)
+    path = Path(facts_dir) / TICKER_MAP_FILE
+    stale = True
+    try:
+        age = now.timestamp() - path.stat().st_mtime
+        stale = age > refresh_days * 86400
+    except OSError:
+        stale = True
+    note = ""
+    if stale:
+        try:
+            from catalyst.data.sources.edgar_form4 import (
+                RateLimitBlocked, _default_http_get, sec_pacer, user_agent,
+            )
+            sec_pacer().acquire()
+            resp = (http_get or _default_http_get)(
+                TICKER_MAP_URL, {"User-Agent": user_agent(None),
+                                 "Accept-Encoding": "gzip, deflate"})
+            status = int(getattr(resp, "status_code", 0) or 0)
+            if status != 200:
+                raise ValueError(
+                    f"HTTP {status}: {str(getattr(resp, 'text', ''))[:200]}")
+            body = resp.json()
+            if not isinstance(body, dict) or not body:
+                raise ValueError("company_tickers.json is not a non-empty object")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(body))
+        except Exception as exc:  # noqa: BLE001 - use what is cached, say so
+            if type(exc).__name__ == "RateLimitBlocked":
+                raise
+            note = (f"ticker map not refreshed ({type(exc).__name__}: "
+                    f"{str(exc)[:160]}); using the cached copy if any")
+    try:
+        body = json.loads(path.read_text())
+    except Exception as exc:  # noqa: BLE001
+        return {}, (note or f"no ticker map on disk ({type(exc).__name__})")
+    out: dict = {}
+    for entry in (body.values() if isinstance(body, dict) else ()):
+        if not isinstance(entry, dict):
+            continue
+        try:
+            cik = int(entry.get("cik_str"))
+        except (TypeError, ValueError):
+            continue
+        ticker = str(entry.get("ticker") or "").strip().upper()
+        # The first listing wins: SEC orders the file by market cap, so a
+        # company with several classes maps to its primary line.
+        if ticker and cik > 0:
+            out.setdefault(cik, ticker)
+    return out, note
+
+
+def earnings_filer_pairs(index_rows, ticker_map: dict) -> list:
+    """(ticker, cik) for every 10-Q/10-K filer the map can name, in the
+    order filed. Filers the map cannot name are dropped - a CIK with no
+    ticker is not something the bot can buy."""
+    seen: dict = {}
+    for row in index_rows or ():
+        try:
+            cik = int(str(getattr(row, "cik", "")).strip().lstrip("0") or "0")
+        except ValueError:
+            continue
+        ticker = ticker_map.get(cik)
+        if ticker and ticker not in seen:
+            seen[ticker] = str(cik)
+    return list(seen.items())
+
+
 @dataclass
 class FactsRefreshResult:
     """What the pass did, in the shape a log line and a panel can read."""
@@ -351,7 +455,21 @@ def live_drift_candidates(facts_dir, tickers, as_of, *, sue_min=None,
         if c.catalyst_date < oldest:
             stats.too_old += 1
             continue
-        live.append(replace(c, discovered_at=as_of))
+        # THE SURPRISE GOES ON THE CANDIDATE, so the research prompt can
+        # state it. The signal table this function returns is discarded
+        # by the live wiring (the model researches, not make_signal_fn),
+        # and without these the prompt could only say "an earnings
+        # filing happened" - which is not a thesis. Same `fact:` shape
+        # the insider arm uses for its buyers.
+        ev = table.get(c.id)
+        facts = ()
+        if ev is not None and hasattr(ev, "sue"):
+            facts = (f"fact:sue={getattr(ev, 'sue', 0):+.2f}",
+                     f"fact:period_end={getattr(ev, 'period_end', '')}",
+                     f"fact:filed={getattr(ev, 'filed', '')}",
+                     f"fact:form={getattr(ev, 'form', '') or '10-Q/10-K'}")
+        live.append(replace(c, discovered_at=as_of,
+                            correlation_tags=tuple(c.correlation_tags) + facts))
     stats.live = len(live)
     # The id is unchanged by replace(), so the signal table still keys.
     return live, {c.id: table[c.id] for c in live if c.id in table}, stats
