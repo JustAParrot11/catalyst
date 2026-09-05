@@ -35,7 +35,7 @@ class TestTheThrottleTableMatchesTheCode:
 
     @pytest.mark.parametrize("monthly,daily,per_cycle,hunts", [
         (2000, "5.00", 3, 0),
-        (10000, "10.00", 6, 1),
+        (10000, "10.00", 6, 2),      # 1 -> 2 on 2026-09-05 (supply, not budget, was binding)
         (30000, "30.00", 12, 4),
     ])
     def test_each_row_is_what_the_code_returns(
@@ -50,7 +50,7 @@ class TestTheThrottleTableMatchesTheCode:
 
     def test_the_row_is_actually_printed_in_the_file(self):
         """A correct table nobody wrote down helps no one."""
-        for cell in ("$100", "$10.00", "| 6 |", "| 1 |"):
+        for cell in ("$100", "$10.00", "| 6 |", "| 2 |"):
             assert cell in DOC, f"the throttle table is missing {cell!r}"
 
 
@@ -135,14 +135,20 @@ class TestItIsHonestAboutWhatIsUnproven:
             "the model has never been backtested may have stopped being "
             "true - check it")
 
-    def test_it_admits_the_model_learns_nothing_between_calls(self):
-        assert "learns nothing between calls" in DOC.lower()
-        from catalyst.research import prompts
+    def test_it_no_longer_claims_the_model_learns_nothing(self):
+        """This test used to hold the OPPOSITE: that the doc admitted
+        no past outcome reached the prompt, and that prompts.py read no
+        outcome. On 2026-09-05 research/record.py started rendering the
+        closed trades and scored refusals into the prompt, so the doc
+        has to say so - and say what is still unmeasured."""
+        from catalyst.research import boundary, record
 
-        src = inspect_source(prompts)
-        assert "outcome_return" not in src, (
-            "past outcomes now reach the research prompt, so the doc's "
-            "'learns nothing between calls' has stopped being true")
+        assert "learns nothing between calls" not in DOC.lower()
+        assert "sees its own record" in DOC.lower()
+        assert "outcome_return" in inspect_source(record)
+        assert "recent_record(conn)" in inspect_source(boundary), (
+            "the doc says outcomes reach the prompt; nothing renders them")
+        assert "unmeasured" in DOC.lower()
 
 
 def inspect_source(module):

@@ -31,12 +31,21 @@ SCORING_HORIZON_DAYS = 12
 # but the staleness is visible in scored_at vs refused_at.
 
 
+#: Why a due refusal was NOT scored this pass, keyed by rowid. Read by
+#: the dashboard so "6 of 223 scored" can say what the other 217 are
+#: waiting on - a quote that keeps failing is a delisted or renamed
+#: ticker, which is a different fact from "not due yet" (house rule 3).
+#: In-process only; the rows themselves stay unscored and are retried.
+LAST_UNSCORED_REASONS: dict = {}
+
+
 def score_due_refusals(broker: Broker, conn,
                        now: datetime | None = None) -> int:
     """Score every unscored refusal whose horizon has elapsed, at the
     current NBBO mid. Returns how many were scored. Broker failures skip
     the refusal (it stays unscored and is retried next cycle) - a
-    missing quote never fabricates an outcome."""
+    missing quote never fabricates an outcome. Every skip records WHY
+    in LAST_UNSCORED_REASONS."""
     now = now or datetime.now(timezone.utc)
     due_before = (now - timedelta(days=SCORING_HORIZON_DAYS)).isoformat()
     rows = conn.execute(
@@ -45,28 +54,41 @@ def score_due_refusals(broker: Broker, conn,
            WHERE r.scored_at IS NULL AND r.refused_at <= ?""",
         (due_before,)).fetchall()
     scored = 0
+    LAST_UNSCORED_REASONS.clear()
+
+    def skip(rowid, ticker, why):
+        LAST_UNSCORED_REASONS[rowid] = f"{ticker}: {why}"
+
     for rowid, price_at_refusal, ticker in rows:
         try:
             q = broker.get_latest_quote(ticker)
-        except BrokerError:
+        except BrokerError as exc:
+            skip(rowid, ticker, f"quote refused ({exc})")
             continue
         quote = q.get("quote") or {}
         if not isinstance(quote, dict):
+            skip(rowid, ticker, f"no quote object in {str(q)[:120]!r}")
             continue
         try:
             bid = Decimal(str(quote.get("bp")))
             ask = Decimal(str(quote.get("ap")))
         except (ArithmeticError, TypeError, ValueError):
+            skip(rowid, ticker, f"unreadable bid/ask {quote.get('bp')!r}/"
+                                f"{quote.get('ap')!r}")
             continue
         # NaN/Infinity survive Decimal() and raise on the FIRST
         # comparison instead (stress-tester defect 3).
         if not (bid.is_finite() and ask.is_finite()):
+            skip(rowid, ticker, "non-finite bid/ask")
             continue
         if bid <= 0 or ask <= 0 or ask < bid:
+            skip(rowid, ticker, f"unusable NBBO bid {bid} ask {ask} - "
+                                "an off-hours or halted quote")
             continue
         outcome = (bid + ask) / 2
         entry = Decimal(price_at_refusal)
         if entry <= 0:
+            skip(rowid, ticker, f"refusal price {entry} is not a price")
             continue
         ret = (outcome - entry) / entry
         conn.execute(

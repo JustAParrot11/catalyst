@@ -20,9 +20,12 @@ Every 15 minutes, unattended:
    Federal Register, ClinicalTrials.gov, Alpaca news. Free, keyless
    where possible, cached. This costs nothing per item.
 2. **Two things turn evidence into candidates.**
-   - The **mechanical screen** — Form 4 insider clusters and cross-feed
-     conjunctions. This is line-for-line the arm that was backtested, so
-     its measured edge means something.
+   - The **mechanical screens** — Form 4 insider clusters, cross-feed
+     conjunctions, and (since 2026-08-30) post-earnings drift from the
+     first-filed XBRL of every 10-Q/10-K filer. The first and last are
+     line-for-line the arms that were backtested, so their measured
+     edge means something; drift graded better (57% out of sample,
+     8.8% max drawdown vs 49% and 41%).
    - **Claude's hunt** — once a day (more if the budget allows), Claude
      reads the raw feed and nominates what the screen has no rule for.
      It may only cite events that already exist; every nomination is
@@ -114,7 +117,7 @@ remember:
 | monthly cap | daily ceiling | research/cycle | hunts/day |
 |---|---|---|---|
 | $20 | $5.00 | 3 | 0 |
-| $100 | $10.00 | 6 | 1 |
+| $100 | $10.00 | 6 | 2 |
 | $300 | $30.00 | 12 | 4 |
 
 Floors are the owner's own earlier figures, so lowering a cap can never
@@ -178,6 +181,45 @@ over-caution, and log every adjustment with the evidence behind it.
 The refusal tracker is the main feedback loop: record the price when a
 candidate is declined, then score what it went on to do.
 
+### What the owner decided on 2026-09-05, and the evidence behind it
+
+*"The bot isnt aggressive ... i dont really need any hard limit except
+a hard stop to stop bot using all the budget ... optimize heavily to
+ensure ... claude can make profitable trades and multiple times a
+month."* From their own 7-day bundles: 33 candidates researched, 31
+declined as priced in, 2 longs at 0.56 and 0.57 under a 0.60 floor, the
+drift arm producing nothing, and the bot **paused for 3.5 of the 7
+days** by a cost discrepancy that was a pricing forecast's fault.
+
+- **No pause but the budget.** The reconciliation records a discrepancy
+  with its reason and corrects the rate from the bill; it never gates
+  spending again. The governor keeps one integrity gate — an unpriced
+  row, which is a hole in the count the budget stop needs — and the
+  monthly and daily caps. That is the whole list.
+- **Conviction floor 0.60 → 0.50.** One long call in twenty-one ever
+  cleared 0.60, and the floor's own evidence sample (refusals refused
+  *for* the floor) was 15 against a 30 minimum, so it could never have
+  moved on its own. 0.50 is where the definition already draws the
+  line. The tracker can raise it again on evidence, three times faster
+  than it lowers.
+- **The drift arm's universe is every 10-Q/10-K filer**, from the same
+  daily index the Form 4 feed already downloads, not the companies
+  insiders happened to trade. Filers are fetched first. The research
+  prompt has a drift brief: a stock that has already moved on a beat is
+  confirming the setup, not exhausting it.
+- **Hunts 2/day at $100.** The two live days spent $1.33 and $6.69 of
+  a $10 ceiling with research slots to spare — candidate supply was the
+  constraint, not the budget to judge it.
+- **Daily position review was already daily** (`REVIEW_INTERVAL_HOURS
+  = 24`, brought forward by news). It ran zero times that week because
+  the only position was past its exit date and the pause blocked
+  everything else; there was nothing to fix there.
+
+**Kept, and why:** the hard bounds — 2% max loss per position, five
+positions, the daily-loss and drawdown kill switches. None of them was
+stopping a trade; they only bound how big a trade is. They stay the
+owner's decision.
+
 ---
 
 ## What is not proven
@@ -196,10 +238,11 @@ how a bot ends up looking finished while doing nothing.
 - **The graded configuration underperforms SPY** once real costs are
   applied. Out-of-sample, insider-cluster: +31.6% excess with no API
   cost, +6.7% at $8/month, −15.2% at $8/month with 30bp/side.
-- **Claude learns nothing between calls.** No past outcome reaches the
-  research prompt. It judges every candidate as if it were the first.
-  Closing that loop is the highest-value next change, and it needs
-  closed trades before there is anything to feed back.
+- **Claude now sees its own record, and it is one trade long.** Since
+  2026-09-05 the research prompt carries the closed trades and the
+  scored refusals (`research/record.py`): what earlier calls went on to
+  do, as text the model weighs and no code reads back. Whether being
+  shown a record improves the next call is itself unmeasured.
 - **The conviction scale is newly defined and uncalibrated.** Whether a
   0.6 call really resolves six in ten is unknown.
 

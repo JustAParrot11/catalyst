@@ -223,7 +223,16 @@ def hunts_per_day(owner_monthly_cap_cents=None) -> int:
         return 0
     # A hunt plus the candidates it produces. Below that, spend the
     # budget judging what the mechanical screen already found.
-    need = HUNT_ESTIMATE_CENTS * 3
+    #
+    # 2x, not 3x, since 2026-09-05. The owner's 7-day bundle showed the
+    # bot spending $1.33 and $6.69 on its two live days against a $10
+    # ceiling, and researching everything the screen produced with
+    # slots to spare - so the constraint was candidate SUPPLY, not the
+    # budget to judge them. A hunt is the one source that can widen
+    # supply, and the budget cap, not this divisor, is what stops it
+    # (owner-set: "i dont really need any hard limit except a hard stop
+    # to stop bot using all the budget"). Two a day at $100.
+    need = HUNT_ESTIMATE_CENTS * 2
     return min(4, int(per_day // need))
 
 
