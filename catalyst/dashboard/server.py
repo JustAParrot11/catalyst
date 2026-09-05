@@ -409,6 +409,68 @@ def route_setup(db: Db, params: dict) -> str:
 #: unopenable. Truncation is always DECLARED, never silent.
 FULL_DUMP_ROWS_PER_TABLE = 20_000
 
+#: A ROW LIMIT IS THE WRONG UNIT WHEN ONE COLUMN HOLDS A MEGABYTE.
+#:
+#: OWNER-REPORTED 2026-09-05: "when im getting logs for 7 days the file
+#: is too large to upload". Measured against their 2026-08-30 bundle -
+#: ONE day, 25MB of JSON:
+#:
+#:     17.52 MB  research_call_turns   <- 254 rows
+#:      2.10 MB  logs                  <- 5,945 rows
+#:      2.04 MB  research_calls        <- 6,326 rows
+#:
+#: 70% of the file came from 254 rows, because `raw_response` holds the
+#: model's verbatim reply including every web-search result block echoed
+#: back (34k input tokens median, 166k max). 20,000 rows of that is
+#: gigabytes, and the row cap never came close to firing.
+#:
+#: So the budget is in BYTES. Rows are dropped oldest-first until the
+#: table fits, and the bundle says how many went and what to ask for
+#: instead - a diagnostic that quietly halves itself is worse than one
+#: that admits it could not carry everything.
+MAX_BYTES_PER_TABLE = 6_000_000
+
+#: WINDOWING A TABLE THAT HAS NO CLOCK OF ITS OWN.
+#:
+#: The same bundle exposed the reason 17.5MB survived a ONE-DAY window:
+#: `research_call_turns` has no timestamp column, so `_time_column`
+#: returned "" and the table came out ENTIRE - every turn ever recorded,
+#: on every bundle, at every window setting. It was listed honestly
+#: under `window_not_applicable`, which is why nobody chased it.
+#:
+#: It does have a clock; the clock belongs to its parent. A turn is part
+#: of a research call, and the call is timestamped. Windowing through
+#: the foreign key is exact rather than approximate - the turn happened
+#: during the call by construction.
+#:
+#: {table: (fk, parent table, parent key, parent time column)}
+_WINDOW_VIA_PARENT = {
+    "research_call_turns": ("call_id", "research_calls", "id", "called_at"),
+}
+
+#: Tables that legitimately come out whole, with the reason. A table
+#: with no clock and no parent lands here ON PURPOSE, and a test refuses
+#: any table that is in neither place - so the next table added without
+#: a timestamp is a failing test rather than a 17MB surprise.
+_ALWAYS_WHOLE = {
+    "positions": "the CURRENT open positions - a window would hide the "
+                 "position you are asking about",
+    "pricing_overrides": "the rate table in force now; every row is "
+                         "current by definition",
+    "limit_applications": "which rule bound which decision; keyed by "
+                          "decision, tiny, and useless cut in half",
+    "limit_application_notes": "the per-stock evidence beside those "
+                               "bounds; same size, same reason",
+    "research_views": "what the model concluded, one row per candidate "
+                      "and the point of most bundles",
+    "backtest_sample_stats": "sample sizes behind a graded run; a few "
+                             "rows that never grow with time",
+    "sqlite_sequence": "SQLite's own bookkeeping, three rows",
+    "company_sic": "a ticker -> sector lookup, not an event log",
+    "benchmark_baselines": "the fixed comparison points",
+    "measured_factors": "the current correction factors",
+}
+
 
 class _Skipped(Exception):
     """This section is outside the requested scope."""
@@ -510,6 +572,35 @@ _TIME_COLUMNS = (
 def _time_column(db: Db, table: str) -> str:
     cols = set(db.columns(table))
     return next((c for c in _TIME_COLUMNS if c in cols), "")
+
+
+def _fit_to_budget(rows: list, budget: int | None = None):
+    """(rows that fit, how many were dropped). Rows arrive newest-first,
+    so the ones kept are the recent ones.
+
+    Measured per row rather than by serialising the whole list twice: a
+    table that would blow the budget is exactly the table too big to
+    render to a string just to find out.
+
+    A single row over budget is still kept. Dropping it would produce a
+    table that says "0 rows" while the count says otherwise, and the one
+    huge research turn is often precisely what the bundle was collected
+    to show.
+
+    The budget is read at CALL time, not bound as a default argument, so
+    the ceiling can be lowered for a test or by an operator without the
+    function keeping the value it was compiled with."""
+    budget = MAX_BYTES_PER_TABLE if budget is None else budget
+    kept, used = [], 0
+    for row in rows:
+        try:
+            used += len(json.dumps(row, default=str))
+        except Exception:  # noqa: BLE001 - an unmeasurable row still counts
+            used += budget
+        if kept and used > budget:
+            return kept, len(rows) - len(kept)
+        kept.append(row)
+    return kept, 0
 
 
 def window_days(raw) -> int | None:
@@ -618,26 +709,58 @@ def diagnostics_bundle(db: Db, scope: str = "all", days: int | None = None) -> d
         for name in sorted(present if row_tables is None
                            else present & set(row_tables)):
             col = _time_column(db, name) if cutoff else ""
+            parent = _WINDOW_VIA_PARENT.get(name)
             if cutoff:
                 if col:
                     bundle["window_applied_to"][name] = col
+                elif parent:
+                    bundle["window_applied_to"][name] = (
+                        f"{parent[0]} -> {parent[1]}.{parent[3]} (this table "
+                        "carries no time of its own, so the window is applied "
+                        "through its parent)")
                 else:
                     bundle["window_not_applicable"].append(name)
-            res = (db.q(f"SELECT * FROM {name} WHERE {col} >= ? LIMIT ?",
-                        (cutoff, FULL_DUMP_ROWS_PER_TABLE + 1))
-                   if col else
-                   db.q(f"SELECT * FROM {name} LIMIT ?",
-                        (FULL_DUMP_ROWS_PER_TABLE + 1,)))
+            # NEWEST FIRST, ALWAYS. When a cap does fire, the rows worth
+            # keeping are the recent ones - and the old query had no
+            # ORDER BY at all, so a truncated table handed back whatever
+            # SQLite happened to scan first, which for an append-only
+            # table is the OLDEST rows. A diagnostic that keeps the
+            # least useful half is a diagnostic nobody can use.
+            if cutoff and col:
+                res = db.q(f"SELECT * FROM {name} WHERE {col} >= ? "
+                           f"ORDER BY {col} DESC LIMIT ?",
+                           (cutoff, FULL_DUMP_ROWS_PER_TABLE + 1))
+            elif cutoff and parent:
+                fk, ptable, pkey, ptime = parent
+                res = db.q(
+                    f"SELECT t.* FROM {name} t JOIN {ptable} p "
+                    f"ON t.{fk} = p.{pkey} WHERE p.{ptime} >= ? "
+                    f"ORDER BY p.{ptime} DESC LIMIT ?",
+                    (cutoff, FULL_DUMP_ROWS_PER_TABLE + 1))
+            else:
+                res = db.q(f"SELECT * FROM {name}"
+                           + (f" ORDER BY {col} DESC" if col else "")
+                           + " LIMIT ?", (FULL_DUMP_ROWS_PER_TABLE + 1,))
             if res.error:
                 bundle["rows"][name] = [{"query_error": res.error}]
                 continue
             rows = res.dicts()
             if len(rows) > FULL_DUMP_ROWS_PER_TABLE:
                 bundle["rows_truncated"][name] = (
-                    f"more than {FULL_DUMP_ROWS_PER_TABLE} rows; the first "
-                    f"{FULL_DUMP_ROWS_PER_TABLE} are included. Ask for this "
-                    "table on its own with ?scope=everything&table=" + name)
+                    f"more than {FULL_DUMP_ROWS_PER_TABLE} rows; the "
+                    f"{FULL_DUMP_ROWS_PER_TABLE} most recent are included. "
+                    "Ask for a shorter window, or for this table on its own "
+                    "with ?scope=everything&table=" + name)
                 rows = rows[:FULL_DUMP_ROWS_PER_TABLE]
+            rows, dropped = _fit_to_budget(rows)
+            if dropped:
+                bundle["rows_truncated"][name] = (
+                    f"{dropped} older row(s) dropped to keep this table "
+                    f"under {MAX_BYTES_PER_TABLE // 1_000_000}MB - the "
+                    f"{len(rows)} most recent are here in full. This table "
+                    "holds very large values (a verbatim model reply is "
+                    "megabytes on its own). Ask for a shorter window to get "
+                    "all of them.")
             bundle["rows"][name] = rows
 
     wanted = spec["tables"]

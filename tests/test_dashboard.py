@@ -668,16 +668,25 @@ def test_an_ordinary_rate_change_needs_no_confirmation(seeded):
 
 
 @pytest.mark.parametrize("effective, baseline", [
-    (date(2026, 8, 15), "200"),      # inside Sonnet 5's intro window
-    (date(2026, 9, 15), "300"),      # after it ends
+    (date(2026, 8, 15), "200"),      # before the rate moves
+    (date(2026, 9, 15), "900"),      # after it moves
 ])
 def test_the_guard_measures_against_the_rate_in_force_on_the_effective_date(
         seeded, effective, baseline):
-    """Not against today's rate. The two differ across 2026-08-31, and
-    measuring a backdated change against the wrong one would fire the
-    guard on a rate that was never in force."""
+    """Not against today's rate. Measuring a backdated change against
+    the wrong one fires the guard on a rate that was never in force.
+
+    THE BOUNDARY IS BUILT HERE, not inherited. This used to straddle
+    2026-08-31, where pricing.py's built-in table stepped from 200 to
+    300 - a FORECAST the owner removed on 2026-09-05 ("stop locally
+    calculating the new price full stop trust the admin API"), so the
+    table is flat now and the test had nothing to straddle. A rate that
+    changes mid-window is still the ordinary case; it just comes from a
+    measured override rather than a prediction, so the test writes one."""
     from catalyst.cost.overrides import set_override
     conn = sqlite3.connect(seeded)
+    set_override(conn, "claude-sonnet-5", date(2026, 9, 1), "900", "4500",
+                 set_by="measured against the bill", allow_large_change=True)
     with pytest.raises(ValueError) as exc:
         set_override(conn, "claude-sonnet-5", effective, "1", "5",
                      set_by="Billy")

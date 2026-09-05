@@ -1,11 +1,18 @@
-"""Per-model pricing table, cents per million tokens.
+"""Cold-start pricing table, cents per million tokens.
+
+THE RATE THAT ACTUALLY PRICES A CALL DOES NOT LIVE HERE. It lives in
+`pricing_overrides`, written by `measured_rates.py` from what Anthropic
+actually billed for a closed day (owner-set 2026-09-05: "stop locally
+calculating the new price full stop trust the admin API"). This table is
+the starting point for a model that has never been billed yet, and it is
+never a forecast - nothing in it changes on a date.
 
 Every trap in TRAPS.md's cost section is encoded here as arithmetic:
 cache writes bill at 1.25x input, cache reads at 0.1x input, web search
-at $10 per 1,000 queries ON TOP of tokens. Rates are the documented
-public prices; update this table when Anthropic's pricing page changes
-and record the change in git - the raw usage object is always stored
-verbatim (schema: cost_events.raw_usage_json), so history can be
+at $10 per 1,000 queries ON TOP of tokens. Those multipliers are cold
+starts too - `measured_rates.learn_factors_from_closed_day` measures
+them from the bill's own itemisation. The raw usage object is always
+stored verbatim (schema: cost_events.raw_usage_json), so history can be
 repriced if a rate here was ever wrong.
 """
 
@@ -21,28 +28,52 @@ MODEL_RATES_CENTS_PER_MTOK: dict[str, tuple[Decimal, Decimal]] = {
     "claude-opus-5": (Decimal("500"), Decimal("2500")),
 }
 
-# Sonnet 5 launched with INTRODUCTORY pricing - $2/M in, $10/M out -
-# in effect through 2026-08-31 inclusive; the standard list price above
-# applies from 2026-09-01. Found empirically 2026-08-10: the first
-# tracked day priced ~41% above the owner's real-time console figure at
-# standard rates ($0.326 local vs ~$0.21 console), and intro rates
-# reprice the same verbatim usage to $0.231. The first closed-day
-# reconciliation is the hard check; a residual mismatch still pauses.
-SONNET5_INTRO_ENDS = date(2026, 8, 31)          # inclusive
-SONNET5_INTRO_RATES = (Decimal("200"), Decimal("1000"))
+#: NO PRICE CHANGE IS PREDICTED HERE ANY MORE.
+#:
+#: OWNER-SET 2026-09-05: "stop locally calculating the new price full
+#: stop trust the admin API".
+#:
+#: This file used to carry a SCHEDULE: Sonnet 5's introductory rate of
+#: 200/1000 through 2026-08-31, and 300/1500 from 1 September. That
+#: second half was a forecast read off a docs page, and on 1 September
+#: it fired - every call priced 50% higher on a date somebody typed in,
+#: with nothing having been billed to justify it. If Anthropic had held
+#: the introductory rate, the bot would have been throttling itself
+#: against an invented price, and the one mechanism able to correct it
+#: was allowed to walk the number back only 10% per three agreeing days.
+#:
+#: The bill is the price. `measured_rates.py` reads it from the Admin
+#: API's own closed-day figures and writes a date-effective override,
+#: and that override is what prices calls from then on. What is left
+#: here is a COLD START - the rate used for a model that has never been
+#: billed yet - and nothing else. It is never a prediction, so it never
+#: changes on a date.
+#:
+#: The intro figures are kept as the last rate this project has
+#: EVIDENCE for on Sonnet 5: the owner's console and our ledger agreed
+#: to the cent at 200/1000 (45.7446c on 2026-08-15, 364.2052c on
+#: 2026-08-17, zero difference both times). Starting from a measured
+#: number and letting the bill move it is the whole point; starting
+#: from a guessed one is what this change removes.
+MODEL_RATES_CENTS_PER_MTOK["claude-sonnet-5"] = (Decimal("200"),
+                                                 Decimal("1000"))
 
 
 def rates_for(model: str, on_date: date) -> tuple[Decimal, Decimal]:
-    """(input, output) cents/MTok in effect for `model` ON `on_date` -
-    pricing is a function of when the spend happened, not of when the
-    row is priced. Raises UnknownModelError; never returns a zero."""
+    """(input, output) cents/MTok for `model` when nothing has been
+    billed for it yet. Raises UnknownModelError; never returns a zero.
+
+    `on_date` is retained because callers price historical rows and the
+    date-effective lookup in `overrides.py` - which is where a MEASURED
+    rate lands - needs it. This table itself no longer varies by date:
+    a rate that changes on a date nobody was billed on is a forecast,
+    and forecasting prices is what the owner removed.
+    """
     if model not in MODEL_RATES_CENTS_PER_MTOK:
         raise UnknownModelError(
             f"No pricing for model {model!r}. Add it to pricing.py - "
             "an unknown model must never price itself at zero (TRAPS.md)."
         )
-    if model == "claude-sonnet-5" and on_date <= SONNET5_INTRO_ENDS:
-        return SONNET5_INTRO_RATES
     return MODEL_RATES_CENTS_PER_MTOK[model]
 
 CACHE_WRITE_MULTIPLIER = Decimal("1.25")      # 5m TTL x input rate (TRAPS.md)

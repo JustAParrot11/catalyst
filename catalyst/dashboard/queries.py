@@ -1471,8 +1471,12 @@ def _measured_rate(db: Db) -> dict | None:
     """
     try:
         rows = db.q(
+            # `ratio` came in with symmetric corrections (owner-set
+            # 2026-09-05): a correction can now LOWER the table, and
+            # billed/local is what says which way it went. Without it
+            # the page called every applied correction a rise.
             "SELECT target_date, model, local_total_cents, "
-            "       billed_total_cents, applied, reason "
+            "       billed_total_cents, ratio, applied, reason "
             "FROM measured_rate_observations "
             "ORDER BY target_date DESC, observed_at DESC LIMIT 1").rows
         return dict(rows[0]) if rows else None

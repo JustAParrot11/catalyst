@@ -54,16 +54,50 @@ class TestTheEstimateCoversWhatTheCallActuallyCosts:
             f"estimate {estimate}c does not cover a measured-shape "
             f"conjunction turn at {actual}c - the cap can be overshot")
 
-    def test_the_estimate_rises_when_the_intro_pricing_ENDS(self):
-        """2026-08-31 is a known date, not a surprise. An estimate that
-        does not move on it is optimistic by ~50% from 1 September."""
+    def test_the_estimate_follows_the_rate_in_force_on_the_day(self):
+        """WHAT THIS USED TO ASSERT: that the estimate rose on
+        2026-09-01, because pricing.py carried a forecast that Sonnet
+        5's introductory rate ended on 2026-08-31.
+
+        The owner removed that forecast on 2026-09-05 - "stop locally
+        calculating the new price full stop trust the admin API" - so
+        the built-in table no longer changes on a date nobody was billed
+        on. What must still hold is the property the old test was really
+        protecting: the estimate is computed from the rate in force on
+        the spend date, so when a MEASURED rate moves, the estimate
+        moves with it and the governor is not authorising against a
+        stale number."""
+        from decimal import Decimal
+
+        from catalyst.cost import pricing
+
+        model = boundary.RESEARCH_MODEL if hasattr(
+            boundary, "RESEARCH_MODEL") else "claude-sonnet-5"
         before = boundary.exploration_turn_estimate_cents(
             prompts.CONJUNCTION_SEARCHES, on_date=INTRO)
-        after = boundary.exploration_turn_estimate_cents(
-            prompts.CONJUNCTION_SEARCHES, on_date=AFTER_INTRO)
+
+        original = dict(pricing.MODEL_RATES_CENTS_PER_MTOK)
+        try:
+            in_r, out_r = pricing.MODEL_RATES_CENTS_PER_MTOK[model]
+            pricing.MODEL_RATES_CENTS_PER_MTOK[model] = (in_r * 2, out_r * 2)
+            after = boundary.exploration_turn_estimate_cents(
+                prompts.CONJUNCTION_SEARCHES, on_date=INTRO)
+        finally:
+            pricing.MODEL_RATES_CENTS_PER_MTOK.clear()
+            pricing.MODEL_RATES_CENTS_PER_MTOK.update(original)
+
         assert after > before, (
-            f"same estimate ({before}c) either side of the Sonnet 5 intro "
-            "price ending - the rate table moved and the estimate did not")
+            f"same estimate ({before}c) after the rate doubled - the "
+            "estimate is not reading the rate at all")
+
+    def test_the_table_no_longer_predicts_a_price_change(self):
+        """The forecast that fired on 1 September, gone. If a date-based
+        change ever reappears here it is a prediction, and predicting
+        prices is what the owner removed."""
+        from catalyst.cost.pricing import rates_for
+
+        seen = {rates_for("claude-sonnet-5", d) for d in (INTRO, AFTER_INTRO)}
+        assert len(seen) == 1, f"the table still changes on a date: {seen}"
 
     def test_more_searches_cost_more(self):
         """Web search is 1c a query on top of tokens, and the search
