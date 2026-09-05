@@ -26,10 +26,14 @@ Every 15 minutes, unattended:
      line-for-line the arms that were backtested, so their measured
      edge means something; drift graded better (57% out of sample,
      8.8% max drawdown vs 49% and 41%).
-   - **Claude's hunt** — once a day (more if the budget allows), Claude
-     reads the raw feed and nominates what the screen has no rule for.
-     It may only cite events that already exist; every nomination is
-     validated against them.
+   - **Claude's hunt** — twice a day at the current cap, Claude reads
+     the raw feed and, since 2026-09-05, **goes looking**: it runs its
+     own EDGAR full-text searches for phrases it chooses, opens filings
+     to read the body where the dates live, and checks the news on a
+     name. Up to eight tool calls a hunt, every turn through the
+     governor. It may only cite events that exist — but what a tool
+     finds is written to `raw_events` and counts, so the rule is
+     unchanged and the reach is not.
 3. **Claude researches** each candidate: given the live price, the move
    since the catalyst, volume, range position and three years of the
    stock's own history, plus its own web searches. It returns a

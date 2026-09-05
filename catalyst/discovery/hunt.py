@@ -198,6 +198,12 @@ class HuntResult:
     prompt: str = ""
     raw_response: object = None
     cost_cents: Decimal = Decimal("0")
+    #: What the hunt DID before nominating: [(tool, inputs, is_error)].
+    #: Audit trail for "how did it find this" (BUILD-BRIEF: every trade
+    #: reconstructable), and the count the dashboard reads.
+    tool_calls: list = field(default_factory=list)
+    found: int = 0          # events the tools added to the citable set
+    turns: int = 0
     skipped_reason: str | None = None
 
 
@@ -259,12 +265,54 @@ def _digest(events: list, as_of: datetime) -> tuple[str, dict]:
     return "\n".join(lines), by_id
 
 
+def _tools_section(searchers: dict | None) -> str:
+    """What the model may do before it nominates, when it has hands."""
+    from catalyst.discovery.hunt_tools import MAX_TOOL_CALLS, tool_schemas
+
+    offered = [t["name"] for t in tool_schemas(searchers)]
+    if not offered:
+        return ""
+    try:
+        from catalyst.data.sources.edgar_fts import QUERIES
+
+        fixed = "; ".join(q.phrase for q in QUERIES)
+    except Exception:  # noqa: BLE001 - the list is guidance, not a gate
+        fixed = "(the fixed query table could not be read)"
+    return (
+        "YOU HAVE HANDS - USE THEM BEFORE YOU NOMINATE. The feed below is "
+        "a skim: 320 characters per item, and the mechanical feed only "
+        "ever searches these fixed phrases: " + fixed + ". Everything "
+        "that table does not say is yours to look for.\n"
+        + ("- search_filings: full-text search of the last 21 days of SEC "
+           "filings for a phrase YOU choose. Think about what a tradeable "
+           "dated event looks like in a filing and search for THAT - a "
+           "special meeting date, a hearing, a decision deadline, a "
+           "contract award with a start date, a going-private vote, an "
+           "activist demand with a deadline.\n"
+           if "search_filings" in offered else "")
+        + ("- read_filing: open any item in the feed, or anything you "
+           "found, and read the body. The DATE is in the body, not the "
+           "snippet. Read before you nominate on a date.\n"
+           if "read_filing" in offered else "")
+        + ("- search_news: what is being written about a name you are "
+           "considering, to check whether an event is already widely "
+           "reported.\n"
+           if "search_news" in offered else "")
+        + f"Up to {MAX_TOOL_CALLS} tool calls this hunt. Anything a tool "
+        "returns is citable by its source_id exactly as if it had been in "
+        "the feed. Then submit with nominate_candidates - and an empty "
+        "list after a real search is still a good answer."
+    )
+
+
 def render_hunt_prompt(events: list, as_of: datetime,
-                       already_known: set | None = None) -> str:
+                       already_known: set | None = None,
+                       searchers: dict | None = None) -> str:
     """Ask for a short list, from evidence that exists."""
     digest, _ = _digest(events, as_of)
     known = ", ".join(sorted(already_known or set())) or "none"
-    return "\n\n".join([
+    tools_text = _tools_section(searchers)
+    return "\n\n".join([part for part in [
         "You are the discovery step of an automated trading system. You "
         "are reading a day of raw regulatory filings and market news, "
         "and choosing which of them are worth paying to research "
@@ -320,13 +368,16 @@ def render_hunt_prompt(events: list, as_of: datetime,
         "candidate that was never worth researching spends money that a "
         "real one needed. An empty list is a good answer on a quiet day.",
 
+        tools_text,
+
         "THE FEED (source, id, payload). Cite ids from this list "
-        "exactly; anything you cite that is not here is discarded:\n"
-        + digest,
+        "exactly" + (", or from what your tools return" if tools_text
+                     else "") + "; anything you cite that is not here is "
+        "discarded:\n" + digest,
 
         "Submit with the nominate_candidates tool. Do not wait to be "
         "asked.",
-    ])
+    ] if part])
 
 
 def _validate(nom: dict, by_id: dict, as_of: datetime,
@@ -412,9 +463,17 @@ def _validate(nom: dict, by_id: dict, as_of: datetime,
     )
 
 
+#: Per additional tool turn, re-authorised by the governor before it is
+#: sent: the digest plus everything found so far is re-sent each turn.
+#: The first turn is covered by HUNT_ESTIMATE_CENTS.
+HUNT_TURN_ESTIMATE_CENTS = Decimal("20")
+#: Turns in one hunt, tool turns plus the final nomination.
+MAX_HUNT_TURNS = 10
+
+
 def hunt(events: list, as_of: datetime, transport, cost_context,
-         already_known: set | None = None, model: str | None = None
-         ) -> HuntResult:
+         already_known: set | None = None, model: str | None = None,
+         searchers: dict | None = None) -> HuntResult:
     """One hunt: read the feed, nominate, validate, return candidates.
 
     NEVER RAISES. Discovery is upstream of everything, so a hunt that
@@ -443,7 +502,8 @@ def hunt(events: list, as_of: datetime, transport, cost_context,
     if not by_id:
         result.skipped_reason = "no_raw_events_carried_a_source_id"
         return result
-    result.prompt = render_hunt_prompt(events, as_of, already_known)
+    result.prompt = render_hunt_prompt(events, as_of, already_known,
+                                       searchers)
 
     conn = cost_context.conn
     call_id = str(uuid.uuid4())
@@ -460,34 +520,119 @@ def hunt(events: list, as_of: datetime, transport, cost_context,
                                  if decision.reason else "budget_denied")
         return result
 
+    from catalyst.discovery.hunt_tools import (
+        MAX_TOOL_CALLS, run_tool, tool_schemas,
+    )
+
+    searchers = dict(searchers or {})
+    offered = tool_schemas(searchers)
+    forced = {"type": "tool", "name": "nominate_candidates"}
+    messages = [{"role": "user", "content": result.prompt}]
     payload = {
         "model": model,
         "max_tokens": 4000,
-        "messages": [{"role": "user", "content": result.prompt}],
-        "tools": [NOMINATE_TOOL],
-        "tool_choice": {"type": "tool", "name": "nominate_candidates"},
+        "messages": messages,
+        "tools": [NOMINATE_TOOL] + offered,
+        # With hands, the model chooses when it has searched enough. Without
+        # them there is nothing to wait for, so the nomination is forced on
+        # the first turn exactly as before.
+        "tool_choice": {"type": "auto"} if offered else forced,
     }
-    try:
-        response = transport(payload)
-    except Exception as exc:  # noqa: BLE001 - discovery must not die here
-        result.skipped_reason = f"transport_error: {type(exc).__name__}: {exc}"
-        return result
-    if not isinstance(response, dict):
-        response = {"unparseable_response": repr(response)[:2000]}
-    result.raw_response = response
 
-    # Price it BEFORE reading the answer. A call that produced nothing
-    # usable still cost money, and a row priced later is a row that can
-    # be missed entirely if the parse below raises.
-    raw_usage = response.get("usage") or {
-        "unparseable_usage": "response carried no usage object"}
-    try:
-        event = record_usage(raw_usage, model, cost_context.kind, "hunt",
-                             conn, api_call_id=call_id)
-        if event.priced_cents is not None:
-            result.cost_cents = event.priced_cents
-    except Exception:  # noqa: BLE001 - record_usage writes the row first
-        _log.debug("hunt usage could not be priced", exc_info=True)
+    def _priced(response):
+        # Price it BEFORE reading the answer. A call that produced nothing
+        # usable still cost money, and a row priced later is a row that can
+        # be missed entirely if the parse below raises.
+        raw_usage = response.get("usage") or {
+            "unparseable_usage": "response carried no usage object"}
+        try:
+            event = record_usage(raw_usage, model, cost_context.kind, "hunt",
+                                 conn, api_call_id=call_id)
+            if event.priced_cents is not None:
+                result.cost_cents += event.priced_cents
+        except Exception:  # noqa: BLE001 - record_usage writes the row first
+            _log.debug("hunt usage could not be priced", exc_info=True)
+
+    def _has_nomination(response):
+        return any(isinstance(b, dict) and b.get("name") == "nominate_candidates"
+                   for b in (response.get("content") or []))
+
+    response: dict = {}
+    # Without hands the first turn IS the forced nomination, so there
+    # is nothing to ask a second time - one call, exactly as before.
+    forced_already = not offered
+    for _turn in range(MAX_HUNT_TURNS):
+        try:
+            response = transport(payload)
+        except Exception as exc:  # noqa: BLE001 - discovery must not die here
+            result.skipped_reason = f"transport_error: {type(exc).__name__}: {exc}"
+            return result
+        if not isinstance(response, dict):
+            response = {"unparseable_response": repr(response)[:2000]}
+        result.raw_response = response
+        result.turns += 1
+        _priced(response)
+        if _has_nomination(response):
+            break
+
+        content = response.get("content") or []
+        uses = [b for b in content if isinstance(b, dict)
+                and b.get("type") == "tool_use" and b.get("id")
+                and b.get("name") in {t["name"] for t in offered}]
+        # THE MODEL SEES ITS OWN LAST TURN. The API refuses an assistant
+        # message with no content, so a turn that carried none is not
+        # echoed (research/boundary.py learned this on four dead calls).
+        echo = ({"role": "assistant", "content": [b for b in content
+                                                  if isinstance(b, dict)]}
+                if any(isinstance(b, dict) for b in content) else None)
+
+        # MORE TOOL WORK? Only while there is budget for it: the whole
+        # transcript is re-sent every turn, and the governor is asked
+        # before each one so a hunt cannot outspend its day.
+        room = (uses and len(result.tool_calls) + len(uses) <= MAX_TOOL_CALLS
+                and not forced_already)
+        if room:
+            decision = authorize(
+                CostEstimate(estimated_cents=HUNT_TURN_ESTIMATE_CENTS,
+                             basis="one hunt tool turn (discovery/hunt.py)",
+                             kind=cost_context.kind, component="hunt"),
+                conn, cost_context.governor_profit_share,
+                cycle_id=cost_context.cycle_id,
+                owner_monthly_cap_cents=cost_context.owner_monthly_cap_cents)
+            room = decision.authorized
+        answers = []
+        for use in uses:
+            if room:
+                text, is_error = run_tool(str(use.get("name")),
+                                          use.get("input") or {}, searchers,
+                                          by_id, conn, as_of)
+                result.tool_calls.append((use.get("name"), use.get("input"),
+                                          is_error))
+            else:
+                text, is_error = ("No more tool calls are available in this "
+                                  "hunt. Nominate from what you have, or "
+                                  "nothing."), True
+            answers.append({"type": "tool_result", "tool_use_id": use["id"],
+                            "is_error": is_error, "content": text})
+        if echo is not None:
+            messages.append(echo)
+        if room and answers:
+            messages.append({"role": "user", "content": answers})
+            continue
+        # NO NOMINATION AND NOTHING LEFT TO DO: ask for it once, forced.
+        if forced_already:
+            break
+        forced_already = True
+        messages.append({"role": "user", "content": (answers or []) + [
+            {"type": "text", "text": "Submit your nominations now via "
+                                     "nominate_candidates - an empty list "
+                                     "is a valid answer."}]}
+                        if answers else
+                        {"role": "user", "content": "Submit your nominations "
+                         "now via nominate_candidates - an empty list is a "
+                         "valid answer."})
+        payload["tool_choice"] = forced
+    result.found = max(0, len(by_id) - len(_digest(events, as_of)[1]))
 
     noms = None
     for block in response.get("content") or []:

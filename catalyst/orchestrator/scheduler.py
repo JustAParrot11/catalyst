@@ -1370,12 +1370,21 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
                 share = Decimal(str(current_values(conn)[
                     "governor_profit_share"]))
                 known = {c.ticker for c in out}
+                # THE HUNT HAS HANDS (owner-asked 2026-09-05: "he needs
+                # to get really creative with finding links"). Real
+                # searchers bound to the credentials the feeds already
+                # use; hunt_tools.py bounds what they may cost.
+                from catalyst.discovery.hunt_tools import live_searchers
+
                 res = hunt(raw_events, as_of, transport,
                            CostContext(conn=conn,
                                        governor_profit_share=share,
                                        cycle_id=None, kind="scheduled",
                                        owner_monthly_cap_cents=owner_cap),
-                           already_known=known)
+                           already_known=known,
+                           searchers=live_searchers(
+                               getattr(creds, "alpaca_key", None),
+                               getattr(creds, "alpaca_secret", None)))
                 fresh = [c for c in res.candidates if c.ticker not in known]
                 out.extend(fresh)
                 _record_origin(conn, fresh, "hunt", res.rationales, as_of)
@@ -1383,9 +1392,17 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
                     _log.info("Hunt did not run: %s", res.skipped_reason)
                 else:
                     _log.info(
-                        "Hunt: %d nomination(s), %d new candidate(s), "
-                        "%d rejected against the evidence.",
-                        res.nominations, len(fresh), len(res.rejected))
+                        "Hunt: %d turn(s), %d tool call(s) that found %d "
+                        "event(s) the feed did not carry, %d nomination(s), "
+                        "%d new candidate(s), %d rejected against the "
+                        "evidence, %sc.",
+                        res.turns, len(res.tool_calls), res.found,
+                        res.nominations, len(fresh), len(res.rejected),
+                        res.cost_cents)
+                    for name, inputs, is_error in res.tool_calls:
+                        _log.info("Hunt tool %s(%s)%s", name,
+                                  str(inputs)[:160],
+                                  " -> error" if is_error else "")
                     for ticker, why in res.rejected[:10]:
                         _log.info("Hunt rejected %s: %s", ticker, why)
         except Exception:  # noqa: BLE001 - never lose the graded strategy
