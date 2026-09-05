@@ -1250,17 +1250,44 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
     m = c.measured_rate
     if m:
         local, billed = esc(m["local_total_cents"]), esc(m["billed_total_cents"])
-        verdict = ("and the table was raised to match"
-                   if m["applied"] else "and they agreed")
+        # THE VERDICT COMES FROM THE READING, not from `applied` alone.
+        #
+        # This used to read "the table was raised to match" whenever a
+        # correction applied and "they agreed" whenever it did not. Both
+        # halves are now wrong: since 2026-09-05 a correction applies in
+        # EITHER direction (owner-set, "trust the admin API"), so the
+        # first sentence would call a price cut a rise; and `applied is
+        # False` covers a day too small to measure from and a factor too
+        # large to be a price, neither of which is agreement.
+        if not m["applied"]:
+            verdict = "and the table was left alone"
+        else:
+            # ratio is billed/local: under 1 means we had been pricing
+            # HIGHER than Anthropic charges, so the table comes down.
+            try:
+                lowered = Decimal(str(m.get("ratio"))) < 1
+            except (ArithmeticError, TypeError, ValueError):
+                lowered = False
+            verdict = ("and the table was LOWERED to match" if lowered
+                       else "and the table was RAISED to match")
         measured_line = (
             f' Checked against the real bill for {esc(m["target_date"])}: '
-            f"priced {local}c locally against {billed}c billed, {verdict}.")
+            f"priced {local}c locally against {billed}c billed, {verdict}. "
+            f"{esc(m['reason'])}")
     else:
         measured_line = (
             " The table has not yet been checked against a real bill - that "
-            "needs one closed day with an admin key set and spend on it.")
+            "needs one closed day with an admin key set and spend on it. "
+            "Until then the cold-start rate in pricing.py applies.")
 
-    if c.rates_stale:
+    # A MEASURED RATE RETIRES THE STALENESS ALARM.
+    #
+    # rates_stale() asks how long ago a human last typed a date into
+    # pricing.py. That was the only provenance the table had; it is not
+    # any more. When a closed day's real bill has set the rate, the hand
+    # table is a cold start that is no longer being used, and alarming
+    # about its age is alarming about a number nothing reads.
+    if c.rates_stale and not (m and m["applied"]):
         out.append(alarm(
             f'<b id="{p}-rates-stale">Pricing table is stale.</b> '
             f"catalyst/cost/pricing.py was last verified against the published rates "

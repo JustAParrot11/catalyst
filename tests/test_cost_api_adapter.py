@@ -152,28 +152,51 @@ class TestReadOnlyGuarantee:
         assert len(page.records) == 1 and len(calls) == 1
 
 
-class TestSonnet5IntroPricing:
-    """Found empirically 2026-08-10: Anthropic bills Sonnet 5 at INTRO
-    rates ($2/$10 per MTok) through 2026-08-31 - the owner's real-time
-    console showed ~$0.21 where standard rates predicted $0.326 for the
-    same verbatim usage, and intro rates predict $0.231. Rates are
-    date-effective: the spend date decides, never the reprice date.
+class TestTheTableForecastsNothing:
+    """OWNER-SET 2026-09-05: "stop locally calculating the new price full
+    stop trust the admin API".
 
-    Sabotage (house rule 4): SONNET5_INTRO_ENDS moved to 2026-07-31 in
-    a copy - test_rates_flip_on_september_first failed on the August
-    side. Restored, green."""
+    pricing.py used to carry a SCHEDULE: Sonnet 5 at intro rates through
+    2026-08-31 and standard rates from 1 September. The first half was
+    measured - the owner's console showed ~$0.21 where standard rates
+    predicted $0.326 for the same verbatim usage, and intro rates
+    predict $0.231. The second half was a FORECAST read off a docs page,
+    and on 1 September it fired: every call priced 50% higher on a typed
+    date with nothing having been billed to justify it.
 
-    def test_rates_flip_on_september_first(self):
+    The table is now a cold start - the rate for a model that has never
+    been billed - and measured_rates.py moves it from the Admin API's
+    own closed-day figures. Rates stay date-effective through
+    overrides.py, which is where a measured rate lands.
+    """
+
+    def test_the_built_in_rate_does_not_change_on_a_date(self):
         from datetime import date as _date
 
         from catalyst.cost.pricing import rates_for
-        assert rates_for("claude-sonnet-5", _date(2026, 8, 10)) == \
-            (Decimal("200"), Decimal("1000"))
-        assert rates_for("claude-sonnet-5", _date(2026, 8, 31)) == \
-            (Decimal("200"), Decimal("1000"))     # inclusive last day
+
+        days = [_date(2026, 8, 10), _date(2026, 8, 31), _date(2026, 9, 1),
+                _date(2027, 3, 4)]
+        seen = {rates_for("claude-sonnet-5", d) for d in days}
+        assert len(seen) == 1, (
+            f"the cold-start table still forecasts a price change: {seen}")
+
+    def test_it_starts_from_the_rate_this_project_has_evidence_for(self):
+        """200/1000 is what the owner's console and our ledger agreed on
+        to the cent, twice. Starting from a measured number and letting
+        the bill move it is the point."""
+        from datetime import date as _date
+
+        from catalyst.cost.pricing import rates_for
+
         assert rates_for("claude-sonnet-5", _date(2026, 9, 1)) == \
-            (Decimal("300"), Decimal("1500"))
-        # only sonnet-5 has an intro window
+            (Decimal("200"), Decimal("1000"))
+
+    def test_other_models_are_untouched(self):
+        from datetime import date as _date
+
+        from catalyst.cost.pricing import rates_for
+
         assert rates_for("claude-sonnet-4-6", _date(2026, 8, 10)) == \
             (Decimal("300"), Decimal("1500"))
 

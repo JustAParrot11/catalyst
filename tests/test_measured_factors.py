@@ -213,9 +213,14 @@ class TestPriceUsesTheMeasuredMultipliers:
                             cache_read=CACHE_READ_MULTIPLIER))
 
 
-class TestTheDerivationOnlyTightensOnOneReading:
-    """Same asymmetry as the rates, for the same reason: a multiplier
-    that comes out lower LOOSENS the budget."""
+class TestTheDerivationFollowsTheBillBothWays:
+    """Same rule as the rates, for the same reason (owner-set
+    2026-09-05, "trust the admin API"): these come out of the bill's own
+    itemisation, so a clean reading applies in whichever direction it
+    points. It used to hold a lower multiplier back until three days
+    agreed, on the reasoning that a cheaper multiplier loosens the
+    budget - which is the right rule for a parameter inferred from
+    outcomes and the wrong one for a number read off an invoice."""
 
     def _seed(self, db, day, tokens, cents):
         db.execute(
@@ -246,7 +251,10 @@ class TestTheDerivationOnlyTightensOnOneReading:
         assert after.cache_read > DEFAULT_FACTORS.cache_read, msg
         assert "cache_read" in msg
 
-    def test_a_lower_measured_multiplier_is_held_on_one_reading(self, db):
+    def test_a_lower_measured_multiplier_also_applies_at_once(self, db):
+        """THE CHANGE. Anthropic charging less for a cache read than we
+        assumed is a fact about the bill, not a temptation to overspend;
+        holding the old number just prices the ledger wrong."""
         from catalyst.cost.measured_rates import learn_factors_from_closed_day
 
         day = datetime.now(timezone.utc).date() - timedelta(days=1)
@@ -254,14 +262,14 @@ class TestTheDerivationOnlyTightensOnOneReading:
                              "output_tokens": 1_000_000,
                              "cache_read_input_tokens": 1_000_000}, "100")
         # cache read billed at 2c/Mtok against a 200c input = 0.01x,
-        # BELOW the assumed 0.1x - cheaper, so it loosens.
+        # BELOW the assumed 0.1x - cheaper.
         msg = learn_factors_from_closed_day(
             db, day, MODEL, Decimal("402"),
             self._records(200, 200, 2))
 
         after = factors_for_on(db, MODEL, day + timedelta(days=1))
-        assert after.cache_read == DEFAULT_FACTORS.cache_read, msg
-        assert "held" in msg.lower()
+        assert after.cache_read < DEFAULT_FACTORS.cache_read, msg
+        assert "cache_read" in msg
 
     def test_a_bill_it_cannot_split_leaves_every_multiplier_alone(self, db):
         from catalyst.cost.measured_rates import learn_factors_from_closed_day

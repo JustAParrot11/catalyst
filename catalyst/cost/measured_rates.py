@@ -19,34 +19,44 @@ ledger) and what Anthropic actually CHARGED for it (the Cost API).
 Their ratio is the correction factor for the rate table, measured rather
 than asserted.
 
-WHY THE TABLE CANNOT SIMPLY BE DELETED. The governor has to decide
-whether the NEXT call is affordable, in the middle of a day. The Cost
-API reports whole CLOSED days only and cannot answer that at any price
-(TRAPS.md). So a local rate is structurally required. What is not
-required is that a human maintains it by hand - after this, the table is
-the last measured value rather than a standing assertion.
+THE RULE, owner-set 2026-09-05: "stop locally calculating the new price
+full stop trust the admin API".
 
-THE SAFETY RULE, and the reason this is not symmetric. A rate that is
-too HIGH makes the bot spend LESS than the owner allowed; a rate that is
-too LOW lets it spend MORE. So:
+    measured bill HIGHER than we priced  -> our rate was too low
+    measured bill LOWER  than we priced  -> our rate was too high
 
-    measured bill HIGHER than we priced  -> our rate is too low
-                                         -> raise it, automatically.
-                                            This TIGHTENS the budget and
-                                            is always safe.
+    Either way the rate becomes what the bill divides to, in full, on
+    one clean day's evidence.
 
-    measured bill LOWER than we priced   -> our rate is too high
-                                         -> record it, change nothing.
-                                            Lowering a rate loosens the
-                                            budget, and this project does
-                                            not let the system loosen its
-                                            own limits (ARCHITECTURE 6.1,
-                                            BUILD-BRIEF "two tiers").
+THIS REPLACES AN ASYMMETRY, and the asymmetry is worth remembering
+because it is right everywhere else in this codebase. Rises used to
+apply at up to +25% on one day; cuts needed three agreeing days and
+moved at most -10%, on the reasoning that lowering a rate lets the bot
+spend more and the system must not loosen its own limits.
 
-Owner's decision, asked and answered directly: "correct down, alarm up".
+That reasoning belongs to ADAPTIVE PARAMETERS - conviction floors, stop
+widths - which are inferred from noisy outcomes, where a run of luck
+must never buy a looser limit. A price is not inferred. It is
+Anthropic's charge for a day divided by Anthropic's token counts for
+the same day: arithmetic on an invoice. Refusing to believe it in one
+direction does not make the ledger safer, it makes it knowingly wrong
+for longer - and it did. pricing.py carried a FORECAST that Sonnet 5's
+introductory rate would end on 2026-08-31; on 1 September every call
+priced 50% higher on a date somebody had typed, and the only mechanism
+that could undo it was rationed to 10% per three agreeing days.
 
-Every guard below exists to stop a confidently wrong number reaching the
-governor, because a wrong rate here is not a display bug - it is money.
+WHAT STILL GUARDS IT. A day too small to measure from (MIN_DAY_CENTS),
+a reading inside the deadband, a day with more than one model billed,
+and a factor beyond SANITY_MULTIPLE - all refused and recorded. Beneath
+all of it, governor.DAILY_CAP_CENTS bounds a day's spend whatever the
+rate says, so a bad reading costs one day and is corrected by the next
+one.
+
+WHY THE TABLE CANNOT SIMPLY BE DELETED, still. The governor has to
+decide whether the NEXT call is affordable, in the middle of a day, and
+the Cost API reports whole CLOSED days only (TRAPS.md). A local rate is
+structurally required; what is no longer required is that anybody
+maintains or predicts it.
 """
 
 from __future__ import annotations
@@ -72,28 +82,50 @@ MIN_DAY_CENTS = Decimal("25")
 #: it halted the bot for a day over five cents.
 DEADBAND = Decimal("0.02")          # 2%
 
-#: BOUNDED STEP (BUILD-BRIEF: "no parameter moves more than a small
-#: fraction per adjustment, however emphatic the evidence"). A single
-#: strange day - a billing correction, a credit, a partial outage -
-#: cannot move the table far. A real rate change converges over a few
-#: days instead of arriving in one jump, and every step is on the record.
-MAX_STEP = Decimal("0.25")          # at most +25% per adjustment
+#: THE BILL IS NOT AN INFERENCE, SO IT IS NOT WALKED TOWARD.
+#:
+#: OWNER-SET 2026-09-05: "stop locally calculating the new price full
+#: stop trust the admin API".
+#:
+#: This module used to move the table a fraction at a time, and
+#: asymmetrically: +25% maximum on one day's evidence, -10% maximum and
+#: only after three agreeing days. That shape is the brief's rule for
+#: ADAPTIVE PARAMETERS - conviction floors, stop widths - and it is
+#: right for those, because they are inferred from noisy outcomes and a
+#: run of luck must not loosen a limit.
+#:
+#: A price is not inferred. It is Anthropic's own charge for the day
+#: divided by Anthropic's own token counts for the same day - arithmetic
+#: on an invoice, not a hypothesis about the market. Walking toward it
+#: does not make it safer; it just means the ledger is knowingly wrong
+#: for longer, in whichever direction. Sonnet 5 going from 300 back to
+#: 200 is a 33% cut: four adjustments, three agreeing days each, most of
+#: a month priced 50% high while the owner's research budget throttles
+#: against a number nobody was ever charged.
+#:
+#: So a clean reading applies in full, both ways. What survives is the
+#: guard that a rate this far out is not a price at all:
+#: A derived rate more than this far from the one in force, in either
+#: direction, is refused and recorded rather than applied. Anthropic has
+#: never moved a published price by 4x; a factor that large is a credit,
+#: a refund, a partial outage or a shape change in the API's answer -
+#: the same order-of-magnitude guard `overrides.py` puts on a rate the
+#: owner types by hand, for the same reason.
+#:
+#: WHAT BOUNDS THE DAMAGE IF A BAD READING STILL LANDS. An under-priced
+#: rate lets the governor authorise more calls than it should. That is
+#: capped by governor.DAILY_CAP_CENTS (500c) regardless of any rate, and
+#: the NEXT closed day's bill corrects the rate again - so the exposure
+#: is one day, bounded by a limit that does not depend on this file
+#: being right.
+SANITY_MULTIPLE = Decimal("4")
 
-#: ASYMMETRIC SPEED, which is the brief's rule verbatim: "tighten
-#: quickly on evidence of harm; loosen slowly on evidence of
-#: over-caution." A rate that is too HIGH only costs opportunity - the
-#: bot runs more cautiously than the owner allowed. A rate that is too
-#: LOW costs money. So a rise applies on one day's evidence at up to
-#: MAX_STEP, and a CUT has to clear a higher bar in both directions:
-#: more days agreeing, and a smaller move when they do.
-#:
-#: Owner's decision, asked directly: "3 agreeing days, small step".
-#:
-#: Worst case from a single bad measurement is therefore bounded at
-#: DOWN_MAX_STEP of under-pricing for one day, and only after two
-#: earlier days already said the same thing.
-DOWN_MAX_STEP = Decimal("0.10")     # at most -10% per adjustment
-DOWN_AGREEING_DAYS = 3              # this reading plus two before it
+#: The same idea for the cache and web-search MULTIPLIERS, stated
+#: ABSOLUTELY rather than relatively - see learn_factors_from_closed_day
+#: for why a relative bound would refuse the corrections they exist to
+#: make. Nothing that discounts or surcharges an input rate can bill at
+#: ten times it; a reading outside that is a misread bill split.
+FACTOR_CEILING = Decimal("10")
 
 
 @dataclass(frozen=True)
@@ -136,120 +168,6 @@ def _sole_model(conn: sqlite3.Connection, target_date: date) -> str | None:
         (target_date.isoformat(),),
     ).fetchall()
     return rows[0][0] if len(rows) == 1 else None
-
-
-#: How far ahead to look for the next change in the BUILT-IN schedule.
-#: Comfortably past any announced pricing window; the probe is a few
-#: hundred calls to a pure function, run at most once a day.
-SCHEDULE_HORIZON_DAYS = 400
-
-
-def _future_schedule_changes(
-    model: str, after: date,
-) -> list[tuple[date, tuple[Decimal, Decimal]]]:
-    """Dates after `after` where the BUILT-IN rate for `model` changes.
-
-    PROBED FROM THE REAL FUNCTION, never a hand-written list of known
-    windows (house rule 7). Whoever adds the next introductory-pricing
-    window will not remember to update a list here, and the failure that
-    causes is silent and expensive - see below for what it costs.
-    """
-    from catalyst.cost.pricing import rates_for
-
-    out: list[tuple[date, tuple[Decimal, Decimal]]] = []
-    prev = rates_for(model, after)
-    for i in range(1, SCHEDULE_HORIZON_DAYS + 1):
-        d = after + timedelta(days=i)
-        cur = rates_for(model, d)
-        if cur != prev:
-            out.append((d, cur))
-            prev = cur
-    return out
-
-
-def _preserve_scheduled_changes(
-    conn: sqlite3.Connection, model: str, effective: date,
-) -> list[date]:
-    """Stop a learned rate from swallowing a future scheduled change.
-
-    THE BUG THIS EXISTS FOR. rates_for_on() resolves a rate as "the
-    newest override effective on or before that day wins". An override
-    is therefore not a correction to the schedule - it REPLACES the
-    schedule from its date onward, forever. So a rate learned on 25
-    August would still be winning on 1 September, and Sonnet 5's
-    introductory pricing would never end as far as the ledger was
-    concerned: the bot would price at ~220 against a real 300 and
-    under-price itself by 27%, which is the overspending direction this
-    module exists to prevent.
-
-    THE CORRECTION IS NOT CARRIED ACROSS THE BOUNDARY, deliberately. The
-    measurement said "our pricing ran k low WHILE PRICING AT THE OLD
-    RATE" and cannot tell whether the old rate was itself the reason. At
-    a scheduled change the schedule wins and the correction is re-learned
-    from fresh evidence - which costs at most one day of measurement,
-    and self-corrects. Carrying it would compound a guess, and since
-    corrections downward need a human, an over-tightened rate would then
-    stay over-tightened.
-    """
-    restored = []
-    for when, (sched_in, sched_out) in _future_schedule_changes(model, effective):
-        set_override(
-            conn, model, when, sched_in, sched_out,
-            set_by="scheduled rate restored",
-            note=(f"the published rate changes to {sched_in}/{sched_out} per "
-                  f"Mtok on {when}. Re-stated here so the correction learned "
-                  f"for {effective} cannot outlive it - an override otherwise "
-                  "replaces the schedule from its date onward for good."),
-            allow_large_change=True)
-        restored.append(when)
-    return restored
-
-
-def _recent_ratios(
-    conn: sqlite3.Connection, model: str, before: date, limit: int,
-) -> list[Decimal]:
-    """The `limit` most recent measured ratios for `model` before `before`."""
-    rows = conn.execute(
-        "SELECT ratio FROM measured_rate_observations "
-        "WHERE model = ? AND target_date < ? "
-        "ORDER BY target_date DESC, observed_at DESC LIMIT ?",
-        (model, before.isoformat(), limit)).fetchall()
-    return [Decimal(str(r[0])) for r in rows]
-
-
-def _prior_high_readings(
-    conn: sqlite3.Connection, model: str, before: date, want: int,
-) -> bool:
-    """True when the `want` readings before `before` ALL said the table
-    is running high.
-
-    Counts READINGS, not calendar days: a day with no spend produces no
-    evidence either way, and demanding literal consecutive dates would
-    let a quiet weekend reset a run that is genuinely three measurements
-    long. Every reading still has to agree - one disagreement in the
-    window and the run is broken.
-    """
-    if want <= 0:
-        return True
-    got = _recent_ratios(conn, model, before, want)
-    if len(got) < want:
-        return False
-    return all(r < Decimal("1") - DEADBAND for r in got)
-
-
-def _high_run_length(
-    conn: sqlite3.Connection, model: str, upto: date,
-) -> int:
-    """How many readings in a row now say the table is high, counting
-    the one being taken. Shown to the owner so a pending cut reads as
-    progress rather than as nothing happening."""
-    run = 1
-    for r in _recent_ratios(conn, model, upto, DOWN_AGREEING_DAYS):
-        if r < Decimal("1") - DEADBAND:
-            run += 1
-        else:
-            break
-    return min(run, DOWN_AGREEING_DAYS)
 
 
 def _day_token_counts(conn: sqlite3.Connection, target_date: date) -> dict:
@@ -365,10 +283,12 @@ def learn_factors_from_closed_day(
     so a corrected day's cost was still built out of guesses. This
     measures them on the same evidence.
 
-    Applies on the SAME asymmetry as a rate, and for the same reason: a
-    multiplier that comes out HIGHER means the bot has been under-pricing
-    and applying it tightens the budget, so it lands at once. A LOWER one
-    loosens, so it waits for the agreement a cut already requires.
+    Applies the same way a rate does, and for the same reason (owner-set
+    2026-09-05, "trust the admin API"): these come out of the bill's own
+    itemisation, so a clean reading is applied in whichever direction it
+    points rather than walked toward. The guard that survives is the one
+    that says a reading is not a multiplier at all - a split that does
+    not add up is refused by `classify` before it reaches here.
 
     Never raises. A split that cannot be trusted leaves every multiplier
     exactly as it was, and says so.
@@ -414,16 +334,26 @@ def learn_factors_from_closed_day(
             new = new.quantize(Decimal("0.0001"))
             if new == now:
                 fields[name] = now
-            elif new > now:
-                fields[name] = new                 # tightens - apply now
-                changes.append(f"{name} {now}->{new}")
-            elif _prior_high_readings(conn, model, target_date,
-                                      DOWN_AGREEING_DAYS - 1):
-                fields[name] = new                 # loosens, but agreed
-                changes.append(f"{name} {now}->{new}")
-            else:
+            elif not (Decimal("0") < new <= FACTOR_CEILING):
+                # THE GUARD ON A MULTIPLIER IS ABSOLUTE, NOT RELATIVE.
+                #
+                # SANITY_MULTIPLE bounds a RATE, where a 4x move is
+                # impossible. These are ratios against the input rate,
+                # living between 0.1 (a cache read) and 2.0 (a 1h cache
+                # write), so a legitimate correction is routinely a
+                # large multiple of the old value: the documented 0.1x
+                # cache read measuring at 0.5x is a 5x move and a
+                # perfectly ordinary finding. Bounding them relatively
+                # would refuse exactly the corrections they exist to
+                # make. What is impossible is a cache read costing ten
+                # times the input rate it discounts.
                 fields[name] = now
-                held.append(f"{name} measured {new}, held at {now}")
+                held.append(f"{name} measured {new}, held at {now} - outside "
+                            f"0 to {FACTOR_CEILING}x, so it is a misread "
+                            "split rather than a multiplier")
+            else:
+                fields[name] = new
+                changes.append(f"{name} {now}->{new}")
 
         if not changes:
             msg = "Multipliers measured from the bill and unchanged."
@@ -502,85 +432,51 @@ def learn_from_closed_day(
             _record(conn, m)
             return m
 
-        if ratio <= Decimal("1") + DEADBAND:
-            if ratio < Decimal("1") - DEADBAND:
-                # The table is charging the bot MORE than Anthropic does.
-                # This direction LOOSENS the budget, so it needs more
-                # evidence than a rise and moves less far when it gets it.
-                agreeing = _prior_high_readings(
-                    conn, model, target_date, DOWN_AGREEING_DAYS - 1)
-                if not agreeing:
-                    m = _replace(base, reason=(
-                        f"billed {billed}c against {local}c priced locally - "
-                        f"the table is running {(1 - ratio) * 100:.1f}% HIGH. "
-                        f"Lowering a rate lets the bot spend more, so it needs "
-                        f"{DOWN_AGREEING_DAYS} days agreeing; this is day "
-                        f"{_high_run_length(conn, model, target_date)} of "
-                        f"{DOWN_AGREEING_DAYS}."))
-                    _record(conn, m)
-                    return m
-
-                down = max(ratio, Decimal("1") - DOWN_MAX_STEP)
-                cut_in = (base_in * down).quantize(Decimal("1"))
-                cut_out = (base_out * down).quantize(Decimal("1"))
-                if cut_in <= 0 or cut_out <= 0:
-                    return None
-                capped = (" (capped at the maximum single cut)"
-                          if down > ratio else "")
-                reason = (
-                    f"billed {billed}c against {local}c priced locally - the "
-                    f"table has run {(1 - ratio) * 100:.1f}% HIGH for "
-                    f"{DOWN_AGREEING_DAYS} readings running, so it has been "
-                    f"lowered by {(1 - down) * 100:.1f}%{capped}.")
-                set_override(conn, model, effective, cut_in, cut_out,
-                             set_by="measured against the bill", note=reason)
-                _preserve_scheduled_changes(conn, model, effective)
-                m = _replace(base, applied=True, reason=reason,
-                             old_input=base_in, old_output=base_out,
-                             new_input=cut_in, new_output=cut_out)
-                _record(conn, m)
-                return m
-            else:
-                m = _replace(base, reason=(
-                    f"agreed within {DEADBAND * 100:.0f}%: billed {billed}c "
-                    f"against {local}c priced locally"))
+        if abs(ratio - Decimal("1")) <= DEADBAND:
+            m = _replace(base, reason=(
+                f"agreed within {DEADBAND * 100:.0f}%: billed {billed}c "
+                f"against {local}c priced locally"))
             _record(conn, m)
             return m
 
-        # Under-priced. Raise the rate - bounded, and toward the truth.
-        step = min(ratio, Decimal("1") + MAX_STEP)
-        # What the measurement says the true rate is: the rate the day
-        # was actually priced at, scaled by how far the bill came out.
-        implied_in = (old_in * step).quantize(Decimal("1"))
-        implied_out = (old_out * step).quantize(Decimal("1"))
-        # NEVER BELOW WHAT IS ALREADY SCHEDULED. This floor is what makes
-        # "only ever tightens" structural rather than an argument - no
-        # arithmetic above it, however wrong, can produce a rate lower
-        # than the table would have used anyway.
-        new_in = max(implied_in, base_in)
-        new_out = max(implied_out, base_out)
+        # A FACTOR THIS LARGE IS NOT A PRICE. Refused and recorded, not
+        # applied - see SANITY_MULTIPLE.
+        if ratio > SANITY_MULTIPLE or ratio < (Decimal("1") / SANITY_MULTIPLE):
+            m = _replace(base, reason=(
+                f"billed {billed}c against {local}c priced locally is a "
+                f"factor of {ratio:.2f} - beyond {SANITY_MULTIPLE}x, which no "
+                "published price move has ever been. Treated as a credit, a "
+                "refund or a changed API answer and NOT applied; the rate is "
+                "unchanged and this reading is on the record."))
+            _record(conn, m)
+            return m
+
+        # THE BILL, APPLIED IN FULL, IN WHICHEVER DIRECTION IT POINTS.
+        # `ratio` is what Anthropic charged divided by what we priced, so
+        # the rate that reproduces the bill is simply the rate the day
+        # was priced at, scaled by it.
+        new_in = (old_in * ratio).quantize(Decimal("1"))
+        new_out = (old_out * ratio).quantize(Decimal("1"))
         if new_in <= 0 or new_out <= 0:
             return None
 
         if new_in == base_in and new_out == base_out:
-            # The schedule already covers the whole discrepancy - which
-            # is precisely what a priced-at-the-old-rate day looks like
-            # on the eve of a known price change. Nothing to write.
             m = _replace(base, old_input=base_in, old_output=base_out,
                          reason=(
                              f"billed {billed}c against {local}c priced locally, "
-                             f"which the rate already scheduled for {effective} "
+                             f"which the rate already in force for {effective} "
                              f"({base_in}/{base_out} per Mtok) covers in full - "
                              "no override needed"))
             _record(conn, m)
             return m
 
-        capped = " (capped at the maximum single step)" if step < ratio else ""
+        direction = "LOW" if ratio > 1 else "HIGH"
         reason = (
             f"billed {billed}c against {local}c priced locally - the table was "
-            f"running {(ratio - 1) * 100:.1f}% LOW, so it has been raised by "
-            f"{(step - 1) * 100:.1f}%{capped}. Raising a rate can only make "
-            f"the bot spend less, so it is applied without waiting."
+            f"running {abs(ratio - 1) * 100:.1f}% {direction}, so it is now "
+            f"{new_in}/{new_out} per Mtok, which is what the bill divides to. "
+            "The Admin API is the price (owner-set 2026-09-05), so a clean "
+            "reading is applied in full rather than walked toward."
         )
         # Effective from the day AFTER the day it was measured on, so
         # already-priced history keeps the rate that was actually in
@@ -588,11 +484,10 @@ def learn_from_closed_day(
         # still reprices it correctly.
         set_override(conn, model, effective,
                      new_in, new_out, set_by="measured against the bill",
-                     note=reason)
-        # ...and immediately re-state any scheduled change that the
-        # override just buried. Order matters: written AFTER, so a later
-        # effective_from wins on its own day.
-        _preserve_scheduled_changes(conn, model, effective)
+                     # The measured rate can be far from the last one when
+                     # a real price changes; SANITY_MULTIPLE above is what
+                     # bounds it, not overrides.py's typo guard.
+                     allow_large_change=True, note=reason)
         m = _replace(base, applied=True, reason=reason,
                      old_input=base_in, old_output=base_out,
                      new_input=new_in, new_output=new_out)

@@ -878,10 +878,13 @@ class TestOwnerEditableTokenPrices:
         """The whole point of date-effective. August tokens were bought
         at August prices and must stay priced that way forever."""
         from catalyst.cost.overrides import rates_for_on
-        from catalyst.cost.pricing import SONNET5_INTRO_RATES
+        from catalyst.cost.pricing import MODEL_RATES_CENTS_PER_MTOK
         self._set(tmp_db, "claude-sonnet-5", date(2026, 9, 1), "300", "1500")
+        # Before any override, the cold-start table applies - and it no
+        # longer varies by date, so August reads the same rate it always
+        # did rather than a scheduled one (owner-set 2026-09-05).
         assert rates_for_on(tmp_db, "claude-sonnet-5", date(2026, 8, 15)) \
-            == SONNET5_INTRO_RATES
+            == MODEL_RATES_CENTS_PER_MTOK["claude-sonnet-5"]
 
     def test_the_latest_row_on_or_before_the_day_wins(self, tmp_db):
         from catalyst.cost.overrides import rates_for_on
