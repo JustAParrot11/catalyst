@@ -119,14 +119,35 @@ def render_record(trades: list[dict], refusals: list[dict]) -> str | None:
             conv = (f"{float(r['conviction']):.2f}"
                     if r["conviction"] is not None else "?")
             flag = " [called priced in]" if r["priced_in"] else ""
+            # TWO SCALES, LABELLED, NEVER SIDE BY SIDE UNMARKED.
+            #
+            # On a directional view the number is a frequency over
+            # market outcomes. On a no_trade it is confidence in the
+            # abstention - a different quantity that happens to share
+            # the column. Measured on the owner's 2026-09-11 record,
+            # the no_trade numbers run median 0.68 with 97 at 0.80+
+            # while every directional view ever produced sits between
+            # 0.30 and 0.62, so rendering them identically would show
+            # the model a track record in which declining always scored
+            # higher than committing. That is a lesson this file would
+            # be teaching by accident, and the refusal tracker was
+            # about to start supplying the rows for it.
+            kind = ("confidence in declining"
+                    if (r["direction"] or "") == "no_trade"
+                    else "directional frequency")
             lines.append(
                 f"  - {r['ticker']} ({r['catalyst_type'] or '?'}), you said "
-                f"{r['direction'] or '?'} at {conv}{flag}: the stock went "
-                f"{_pct(r['ret'])} after {r['refused_at']}.")
+                f"{r['direction'] or '?'} at {conv} ({kind}){flag}: the "
+                f"stock went {_pct(r['ret'])} after {r['refused_at']}.")
         lines.append(
             "A declined name that went on to rise is a trade this system "
             "refused without skill; a run of them says the bar is too "
             "high. A declined name that fell says the refusal was right.")
+        lines.append(
+            "Read the two conviction kinds separately. A high confidence "
+            "in declining is not evidence that declining paid - only the "
+            "return beside it is, and these are the names where that can "
+            "be checked.")
     return "\n".join(lines)
 
 
