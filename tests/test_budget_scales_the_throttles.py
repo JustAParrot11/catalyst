@@ -199,7 +199,15 @@ class TestTheCycleUsesTheDerivedNumber:
 
         src = inspect.getsource(cycle.run_cycle)
         assert "if max_research == MAX_RESEARCH_PER_CYCLE:" in src
-        assert "research_per_cycle(owner_monthly_cap_cents)" in src
+        # The connection is passed too since 2026-09-11, so the belt can
+        # read what calls have ACTUALLY cost instead of the typed seed
+        # (owner: "we dont want to be changing estimates manually").
+        # The property under test is unchanged: only the DEFAULT is
+        # replaced, so a caller that named a number still wins.
+        assert "research_per_cycle(owner_monthly_cap_cents" in src
+        assert "research_per_cycle(owner_monthly_cap_cents, conn)" in src, (
+            "the belt no longer reads the ledger, so the seed is back "
+            "in charge")
 
     def test_the_worst_case_call_cost_is_used_not_the_average(self):
         """Deriving a count from the AVERAGE cost over-reaches on a day

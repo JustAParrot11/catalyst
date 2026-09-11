@@ -207,7 +207,7 @@ class HuntResult:
     skipped_reason: str | None = None
 
 
-def hunts_per_day(owner_monthly_cap_cents=None) -> int:
+def hunts_per_day(owner_monthly_cap_cents=None, conn=None) -> int:
     """How many hunts a day the budget supports.
 
     Derived, like every other throttle, so raising the cap raises what
@@ -271,7 +271,24 @@ def hunts_per_day(owner_monthly_cap_cents=None) -> int:
     # that demoted conjunctions applies to every arm, so no directional
     # view in 40+ paid calls drops the hunt to a probe share too,
     # recomputed from the record every cycle.
-    need = HUNT_ESTIMATE_CENTS * 2
+    # MEASURED COST PER HUNT WHERE THERE IS ONE, for the same reason
+    # research_per_cycle does it: HUNT_ESTIMATE_CENTS is 60c and the
+    # measured cost was 11.6c over 18 calls. Owner-asked 2026-09-11:
+    # "we dont want to be changing estimates manually."
+    #
+    # NOTE THE DIRECTION THIS MOVES. A measured cost BELOW the seed
+    # raises the hunt rate, and that is the loosening case - so it is
+    # bounded twice: by min(4, ...) here, and by the governor's real
+    # daily cap on actual spend. A measured cost ABOVE the seed lowers
+    # the rate, which needs no guard at all.
+    per_hunt = HUNT_ESTIMATE_CENTS
+    if conn is not None:
+        from catalyst.cost.observed import observed_call_cents
+
+        measured, _n = observed_call_cents(conn, "hunt", HUNT_ESTIMATE_CENTS)
+        if measured > 0:
+            per_hunt = measured
+    need = per_hunt * 2
     return min(4, int(per_day // need))
 
 
@@ -557,6 +574,25 @@ def _validate(nom: dict, by_id: dict, as_of: datetime,
 #: sent: the digest plus everything found so far is re-sent each turn.
 #: The first turn is covered by HUNT_ESTIMATE_CENTS.
 HUNT_TURN_ESTIMATE_CENTS = Decimal("20")
+
+
+def _turn_estimate(conn) -> Decimal:
+    """A continuation turn, estimated from what whole hunts have cost.
+
+    There is no separate ledger row for a single turn - a hunt's cost is
+    recorded per CALL, which is why this constant was never measured and
+    stayed at 20c indefinitely. What can be measured is the whole hunt,
+    and a continuation turn re-reads the transcript so far, so it is
+    bounded above by the hunt total. Using that total is deliberately
+    pessimistic: the governor compares an estimate against actual spend
+    rather than reserving it, so over-estimating costs only at the cap
+    boundary while under-estimating costs the cap.
+    """
+    from catalyst.cost.observed import observed_call_cents
+
+    measured, n = observed_call_cents(conn, "hunt", HUNT_TURN_ESTIMATE_CENTS)
+    return max(measured, HUNT_TURN_ESTIMATE_CENTS) if n else \
+        HUNT_TURN_ESTIMATE_CENTS
 #: Turns in one hunt, tool turns plus the final nomination.
 MAX_HUNT_TURNS = 10
 
@@ -597,9 +633,19 @@ def hunt(events: list, as_of: datetime, transport, cost_context,
 
     conn = cost_context.conn
     call_id = str(uuid.uuid4())
+    # WHAT A HUNT HAS ACTUALLY COST, not what someone typed after
+    # reading one bundle. Owner-asked 2026-09-11: "we dont want to be
+    # changing estimates manually." The seed stays for the cold start,
+    # and the basis says which of the two this figure is so the
+    # authorisation record can be read later.
+    from catalyst.cost.observed import observed_call_cents
+
+    per_hunt, n_seen = observed_call_cents(conn, "hunt", HUNT_ESTIMATE_CENTS)
     estimate = CostEstimate(
-        estimated_cents=HUNT_ESTIMATE_CENTS,
-        basis="one bounded digest pass (discovery/hunt.py)",
+        estimated_cents=per_hunt,
+        basis=("one bounded digest pass (discovery/hunt.py), "
+               + (f"p75 of {n_seen} measured hunt(s)" if n_seen
+                  else "seed estimate, nothing measured yet")),
         kind=cost_context.kind, component="hunt")
     decision = authorize(estimate, conn, cost_context.governor_profit_share,
                          cycle_id=cost_context.cycle_id,
@@ -713,7 +759,7 @@ def hunt(events: list, as_of: datetime, transport, cost_context,
                 and not forced_already)
         if room:
             decision = authorize(
-                CostEstimate(estimated_cents=HUNT_TURN_ESTIMATE_CENTS,
+                CostEstimate(estimated_cents=_turn_estimate(conn),
                              basis="one hunt tool turn (discovery/hunt.py)",
                              kind=cost_context.kind, component="hunt"),
                 conn, cost_context.governor_profit_share,

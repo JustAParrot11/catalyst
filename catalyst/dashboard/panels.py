@@ -987,6 +987,74 @@ def funnel_panel(db: Db, p: str = "funnel") -> str:
 # --------------------------------------------------------------------------
 
 
+def _estimate_provenance(db: Db, p: str) -> str:
+    """Which pre-call estimates are MEASURED and which are still seeds.
+
+    OWNER-ASKED 2026-09-11: "i want to be absolutely certain aswell we
+    have not hard coded api costs... we dont want to be changing
+    estimates manually."
+
+    Being certain should not require reading the source, so the page says
+    it. Two facts per estimate: the figure in force, and whether it came
+    from the ledger or from the cold-start constant. BUILD-BRIEF: "Every
+    number says where it came from - billed or estimated, which window,
+    how many samples."
+
+    THE CHAIN THIS SITS AT THE END OF, which is the part worth trusting:
+    the Admin API's charge for a closed day divides by its own token
+    counts to set the rate (measured_rates.py) -> the rate prices every
+    call (cost_events.priced_cents) -> those prices estimate the next
+    call (cost/observed.py). No figure in the live path is a typed
+    number once one day has closed with spend on it.
+    """
+    from catalyst.cost.observed import (
+        MIN_OBSERVED_CALLS, OBSERVED_WINDOW_DAYS, observed_call_cents,
+    )
+    from catalyst.discovery.hunt import HUNT_ESTIMATE_CENTS
+    from catalyst.orchestrator.cycle import TYPICAL_RESEARCH_CALL_CENTS
+
+    conn = getattr(db, "conn", None)
+    rows, measured_n, total = [], 0, 0
+    for label, component, seed, what in (
+            ("A research call", "research", TYPICAL_RESEARCH_CALL_CENTS,
+             "sets how many candidates a cycle may investigate"),
+            ("A hunt", "hunt", HUNT_ESTIMATE_CENTS,
+             "sets how many hunts a day the budget affords"),
+    ):
+        total += 1
+        try:
+            value, n = observed_call_cents(db.conn, component, seed)
+        except Exception:            # noqa: BLE001 - a panel, not a cycle
+            value, n = Decimal(str(seed)), 0
+        if n:
+            measured_n += 1
+        source = (pill("good", f"measured, {n} call(s)") if n
+                  else pill("idle", "seed - nothing measured yet"))
+        rows.append([esc(label), f"{Decimal(str(value)):.2f}c", source,
+                     esc(what)])
+    body = table(f"{p}-estimates",
+                 ["estimate", "in force", "where it came from", "what it sets"],
+                 rows)
+    words = (
+        "<b>No API cost in the live path is a typed number once a day has "
+        "closed with spend on it.</b> The chain: Anthropic's charge for a "
+        "closed day divided by its own token counts sets the rate; the rate "
+        "prices every call; those prices estimate the next one. The "
+        "constants in the source are cold-start seeds and are replaced "
+        f"after {MIN_OBSERVED_CALLS} priced calls, read over a "
+        f"{OBSERVED_WINDOW_DAYS}-day window at the 75th percentile - high "
+        "rather than average, because an estimate exists to cover the dear "
+        "calls.")
+    if measured_n < total:
+        words += (f" <b>{total - measured_n} of {total} is still on its "
+                  "seed</b>, which is the expected reading until the bot "
+                  "has made enough calls of that kind.")
+    return _fold(f"{p}-estimates-fold",
+                 "Where the cost estimates come from "
+                 f"({measured_n} of {total} measured)",
+                 body + figcap(words))
+
+
 def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
     c = queries.cost_panel(db)
     out = []
@@ -1301,6 +1369,9 @@ def cost_panel(db: Db, p: str = "cost", compact: bool = False) -> str:
             f"Pricing table provenance: verified {c.rates_verified_on}, "
             f"rates_stale() = False as of {c.as_of}." + measured_line
         ))
+
+    # EVERY ESTIMATE, AND WHETHER IT IS MEASURED OR STILL A SEED.
+    out.append(_estimate_provenance(db, p))
 
     if c.unpriced_q.rows:
         rows = [[esc(r["id"]), esc(r["model"]), esc(r["kind"]), esc(r["component"]),

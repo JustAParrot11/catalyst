@@ -988,7 +988,7 @@ def _owner_cap_cents(budget_usd):
 #: to re-read the same digest ~26 times a day for the same nominations.
 #: The marker lives in the loop's once-a-day state dict, beside the
 #: benchmark refresh which works the same way.
-def _hunt_due(daily_state: dict | None, owner_cap, as_of) -> bool:
+def _hunt_due(daily_state: dict | None, owner_cap, as_of, conn=None) -> bool:
     """Has today's hunt allowance been used?
 
     Returns False when the budget affords none - a nomination nobody can
@@ -997,7 +997,7 @@ def _hunt_due(daily_state: dict | None, owner_cap, as_of) -> bool:
     """
     from catalyst.discovery.hunt import hunts_per_day
 
-    allowed = hunts_per_day(owner_cap)
+    allowed = hunts_per_day(owner_cap, conn)
     if allowed <= 0:
         return False
     if daily_state is None:
@@ -1369,7 +1369,7 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
         try:
             from catalyst.discovery.hunt import hunt
 
-            if _hunt_due(daily_state, owner_cap, as_of):
+            if _hunt_due(daily_state, owner_cap, as_of, conn):
                 # Decimal is imported HERE because this module has no
                 # top-level import of it - and this line raised
                 # NameError on every hunt that came due, so Claude's

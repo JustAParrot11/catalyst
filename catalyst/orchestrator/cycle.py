@@ -73,7 +73,7 @@ MAX_RESEARCH_PER_CYCLE_CEILING = 12
 TYPICAL_RESEARCH_CALL_CENTS = 50
 
 
-def research_per_cycle(owner_monthly_cap_cents=None) -> int:
+def research_per_cycle(owner_monthly_cap_cents=None, conn=None) -> int:
     """How many candidates one cycle may investigate.
 
     OWNER-REPORTED, from a day where 51 of 60 candidates were deferred
@@ -112,7 +112,23 @@ def research_per_cycle(owner_monthly_cap_cents=None) -> int:
         per_day = monthly / BUDGET_MONTH_DAYS
     except (ArithmeticError, TypeError, ValueError):
         return MAX_RESEARCH_PER_CYCLE
-    derived = int(per_day // TYPICAL_RESEARCH_CALL_CENTS)
+    # MEASURED COST PER CALL WHERE THERE IS ONE.
+    #
+    # OWNER-ASKED 2026-09-11: "we dont want to be changing estimates
+    # manually." TYPICAL_RESEARCH_CALL_CENTS is 50c and the measured
+    # blended cost is 22.8c - a number somebody typed after reading one
+    # bundle, wrong by more than a factor of two, with nothing anywhere
+    # to say so. cost/observed.py reads the ledger instead and falls
+    # back to the constant only until there is a sample.
+    per_call = TYPICAL_RESEARCH_CALL_CENTS
+    if conn is not None:
+        from catalyst.cost.observed import observed_call_cents
+
+        measured, _n = observed_call_cents(
+            conn, "research", TYPICAL_RESEARCH_CALL_CENTS)
+        if measured > 0:
+            per_call = measured
+    derived = int(per_day // Decimal(str(per_call)))
     return max(MAX_RESEARCH_PER_CYCLE,
                min(MAX_RESEARCH_PER_CYCLE_CEILING, derived))
 
@@ -895,7 +911,7 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
     # the budget actually in force rather than to the one this constant
     # was written for.
     if max_research == MAX_RESEARCH_PER_CYCLE:
-        max_research = research_per_cycle(owner_monthly_cap_cents)
+        max_research = research_per_cycle(owner_monthly_cap_cents, conn)
     cycle_id = str(uuid.uuid4())
     params = current_values(conn)
     report = CycleReport(cycle_id=cycle_id, started_at=now,
