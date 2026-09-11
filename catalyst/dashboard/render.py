@@ -322,11 +322,34 @@ h3 { font-size: 11px; margin: 14px 0 5px 0; text-transform: uppercase;
 .pos-stop { stroke: var(--critical); stroke-width: 1.5; stroke-dasharray: 4 3; }
 .pos-price { fill: none; stroke: var(--series-1); stroke-width: 2;
   stroke-linejoin: round; }
-.pos-now { fill: var(--series-1); }
-.pos-review { stroke: var(--accent); stroke-width: 1; stroke-dasharray: 2 3; }
-.pos-review-exit { stroke: var(--series-2); stroke-width: 1.5; }
+.pos-now { fill: var(--series-1); stroke: var(--surface); stroke-width: 2; }
+/* WHERE IT ACTUALLY SOLD - the mark this chart was missing until
+   2026-09-11. Deliberately NOT green-for-profit / red-for-loss: that
+   pair measures deltaE 4.1 under deuteranopia against the light
+   surface, so it is not a distinction a reader can rely on. The
+   outcome is carried by the dot's POSITION against the entry rule, by
+   its own price label, and by the sentence above the chart. The 2px
+   surface ring keeps it legible where it lands on the price line. */
+.pos-exit { fill: var(--ink); stroke: var(--surface); stroke-width: 2; }
+/* Review ticks live in a lane BELOW the plot, so five reviews on a
+   14-day hold can no longer stripe the price line (owner's screenshot,
+   2026-09-11: full-height dashed rules with "held" printed over
+   itself). Short, quiet, one per day, and counted in a single label. */
+.pos-tick { stroke: var(--muted); stroke-width: 1.5; }
+.pos-tick-exit { stroke: var(--series-2); stroke-width: 2; }
 .pos-today { stroke: var(--series-2); stroke-width: 1.5; stroke-dasharray: 3 2; }
 .pos-label { fill: var(--muted); font-size: 10px; }
+/* Direct value labels on the plot - a price beside the mark it belongs
+   to, so no value needs a tooltip to be read. */
+.pos-val { fill: var(--ink); font-size: 10.5px; }
+.pos-key { fill: var(--ink-2); font-size: 10.5px; }
+/* THE PRICE LADDER, for a position with no cached bars at all. Same
+   scale, same tokens, no time axis - because a chart with no series is
+   not a chart, and the old one drew the whole frame around an empty
+   plot. */
+.lad-entry { stroke: var(--ink-2); stroke-width: 1.5; }
+.lad-stop { stroke: var(--critical); stroke-width: 1.5; stroke-dasharray: 4 3; }
+.lad-exit { stroke: var(--ink); stroke-width: 2; }
 /* The 20-day average, under the price and quieter than it: the price
    is the fact, the average is the reading of it. */
 .pos-sma { fill: none; stroke: var(--muted); stroke-width: 1.2;
@@ -775,6 +798,33 @@ button { background: var(--series-1); color: #fff; border-color: transparent;
 /* THE PROSE, FOLDED. Reported "text heavy" twice. None of it is wrong -
    it is the provenance and reasoning the brief demands - so it is put
    one click away rather than deleted. */
+/* THE SUMMARY PARAGRAPH, first thing on a trade card. Owner-asked
+   2026-09-11: "i want easy summaries of what happened and decisions".
+   Set at reading size and measure-limited, because it is the one block
+   on the card meant to be READ rather than scanned. */
+.trade-sum { font-size: var(--t-body); color: var(--ink); max-width: 68ch;
+  line-height: 1.55; margin: 2px 0 8px; }
+/* What the code decided, and which rule decided it. Quieter than the
+   summary: it answers a question the reader asks second. */
+.trade-dec { font-size: var(--t-fine); color: var(--ink-2); max-width: 68ch;
+  line-height: 1.5; margin: 0 0 12px; padding-left: 10px;
+  border-left: 2px solid var(--hairline); }
+/* A NAMED DROPDOWN. Distinct from .why-fold - that one is always the
+   words "why this matters", this one carries its own label, so its
+   summary has to read as a heading a reader chooses to open. */
+.fold { margin: 10px 0; border-top: 1px solid var(--hairline); }
+.fold summary { font-size: var(--t-fine); color: var(--ink-2);
+  cursor: pointer; padding: 7px 0; font-weight: 500; }
+.fold summary:hover { color: var(--ink); }
+.fold[open] summary { color: var(--ink); }
+.fold > div { padding: 2px 0 8px; }
+/* Key/value rows for the unrounded figures. tabular-nums here and
+   NOT on the tiles: these align vertically, the tiles do not. */
+.kv { width: 100%; max-width: 460px; border-collapse: collapse; }
+.kv th { text-align: left; font-weight: 400; color: var(--muted);
+  font-size: var(--t-fine); padding: 3px 10px 3px 0; }
+.kv td.num { text-align: right; font-variant-numeric: tabular-nums;
+  font-size: var(--t-fine); color: var(--ink); padding: 3px 0; }
 .why-fold { margin: 6px 0 10px; }
 .why-fold summary { font-size: var(--t-fine); color: var(--muted);
   cursor: pointer; }

@@ -322,6 +322,83 @@ been wrong:
 
 ---
 
+## 10b. The dashboard — what has been rebuilt, and why
+
+Owner reports on the dashboard are worth their own section because the
+same defect keeps recurring in a different panel: **a figure is on the
+page, correct, and unreadable.** The page holds the fact and does not
+answer the question.
+
+| date | reported | measured cause | what changed |
+|---|---|---|---|
+| 08-21 | "on the trade info this bar is broken" | entry label anchored end-at-52 while 72px wide, so it drew at x=−5; review rules landed on one pixel and labels overprinted into "skipp/jjjgted" | label clearance, same-day collapse, skipped reviews not drawn |
+| 08-21 | "still dont understand what beating it by 0.89pp" | "pp" on every page | `signed_pp` deleted outright, and a test forbids the package mentioning it again |
+| 08-21 | "loads of why is this here dropdown with no data" | nested panels: the outer provenance harvest cut lines out of a fold the inner call had already made, leaving the promise with no contents | already-folded regions masked before harvest |
+| 08-24 | SPY line flat / missing | benchmark gaps; a refused feed never recovered | retry, self-rebuild, lag measured against a real close |
+| **09-11** | **"i want easy summaries of what happened and decisions and drop downs if I want more detail... This graph feels a bit dumb"** | see below | the trade card rebuilt summary-first |
+
+### What the 09-11 trade card actually got wrong
+
+Six things, each measured off the owner's screenshot of the EMBC card
+rather than judged by eye:
+
+1. **The chart never drew the exit.** On a closed trade the most
+   important mark is where it sold; the chart drew entry, stop and a
+   price line while the sale price lived only in a tile. EMBC sold at
+   $4.9736 against a $4.55 stop, so the **calendar** ended that trade,
+   not the risk engine — and the picture could not say which. Those two
+   need opposite responses.
+2. **It drew a full time chart with no series in it.** No daily closes
+   are cached for EMBC, so the plot was a 60-day run-up window, a
+   full-width axis, date labels at both ends and a full-width risk block
+   around an empty middle. A chart with no series is not a chart.
+3. **Five reviews printed as a picket fence** — a full-height dashed
+   rule each, with "held" overprinting itself.
+4. **The tiles were unreadable at a glance:** `$4.9736`,
+   `79.1295 @ $5.06`, `$-6.84`, `hard_exit`.
+5. **No sentence anywhere said what happened.** The reader assembled
+   the narrative out of a dozen figures, every time.
+6. **One dropdown existed and five of them were labelled identically.**
+   "why this matters" ×5 is no better than five unlabelled buttons.
+
+### What it is now
+
+- **A plain-English paragraph first**, before any figure: what was
+  bought, how much, why that stock, what Claude rated it, what ended the
+  trade, and the result in money and as a share of the position. Then a
+  second line for the decision: the size, the bound that set it, the
+  worst case in dollars, and that the model cannot touch any of it.
+- **Rounded tiles, exact figures behind "The exact numbers".** Anything
+  you intend to *check* belongs unrounded in a fold; anything you intend
+  to *read* belongs rounded on a tile.
+- **Named dropdowns**, one per subject, no duplicates.
+- **A chart with two kinds.** With bars: time across, price line, entry
+  and stop rules, the **exit dot labelled with its price**, review ticks
+  in their own lane under the plot with a single count, risk band
+  spanning only the days actually held, and the axis starting at the
+  first bar that exists rather than 60 days back. With no bars: a
+  **price ladder** — entry, stop and sale as levels on a real price
+  scale with the gap measured — and a caption saying plainly that no
+  closes are cached.
+
+**Colour was computed, not chosen.** The palette validator
+(`dataviz` skill) was run against this dashboard's own light and dark
+surfaces. Blue price line plus red stop threshold passes every check in
+both themes. **Profit and loss are deliberately NOT green against red:**
+that pair measures ΔE 4.1 under deuteranopia on the light surface, which
+is not a distinction a reader can rely on. The outcome is carried by the
+dot's **position** against the entry rule, by its own price label, and by
+the sentence above the chart. A test asserts the exit dot does not change
+colour with the outcome.
+
+**The lesson that generalises, and it has now cost four reports:** a
+number being present is not the same as a question being answered. When
+a panel is reported as confusing, ask what question the reader brought
+to it and whether any single element answers that question — not whether
+the facts are all there.
+
+---
+
 ## 11. Sizing — what scales with the account and what does not
 
 Owner-asked 2026-09-11: *"does that number of position cap change

@@ -22,6 +22,7 @@ defining conviction as a frequency fixed a units mismatch rather than
 merely reworded one.
 """
 
+import contextlib
 import json
 import re
 
@@ -43,6 +44,46 @@ INVALIDATION = ("Close below $4.60 (below the low end of the insider "
                 "purchase price cluster, $4.67-$4.99).")
 PRICED_IN_WHY = ("Since the Form 4 cluster became public price has been "
                  "roughly flat; coverage is limited to aggregators.")
+
+
+def _chart_svg(html):
+    """The position chart's own <svg>, whichever kind was drawn."""
+    i = html.index('class="pos-chart"')
+    svg = html[html.rindex("<svg", 0, i):]
+    return svg[:svg.index("</svg>") + 6]
+
+
+@contextlib.contextmanager
+def with_bars(first="2026-07-20", n=45, start_price=5.40, step=-0.006):
+    """Daily closes for EMBC, so the TIME chart draws.
+
+    WHY THIS EXISTS. Until 2026-09-11 the position chart drew its whole
+    time apparatus - axis, 60-day run-up, date labels, a full-width
+    risk band - whether or not a single bar existed, so these tests
+    passed with an empty plot. The owner screenshotted the result and
+    called it "a bit dumb", correctly: a chart with no series is not a
+    chart. No bars now means the PRICE LADDER instead, so a test about
+    the time chart has to supply the prices that make one.
+    """
+    from datetime import date, timedelta
+    from decimal import Decimal
+    from unittest import mock
+
+    from catalyst.dashboard import panels as _panels
+
+    class _Bar:
+        def __init__(self, day, close):
+            self.day = day
+            self.close = Decimal(str(round(close, 4)))
+            self.low = Decimal(str(round(close * 0.99, 4)))
+            self.high = Decimal(str(round(close * 1.01, 4)))
+
+    day0 = date.fromisoformat(first)
+    bars = [_Bar(day0 + timedelta(days=i), start_price + i * step)
+            for i in range(n)]
+    with mock.patch.object(_panels, "_load_position_bars",
+                           return_value=bars):
+        yield bars
 
 
 def _seed(tmp_path, *, closed=False, reviews=(), stops=None):
@@ -230,8 +271,13 @@ class TestAClosedTradeGetsTheWholeBreakdown:
             self, tmp_path):
         html = _page(_seed(tmp_path, closed=True))
         assert "$44.31" in html, "the realised P&L is not shown"
-        assert "$5.62" in html and "hard_exit_date" in html
-        assert "expected 12d" in html
+        assert "$5.62" in html
+        # WRITTEN FOR A READER, not copied from the enum. Owner-asked
+        # 2026-09-11: "Make it more user firnedly to glance and
+        # understand what happened easily." The underlying value is
+        # unchanged and still exact in "the exact numbers".
+        assert "hard exit date" in html, "the exit reason is still a token"
+        assert "planned 12d" in html
 
     def test_a_loss_is_not_dressed_up(self, tmp_path):
         path = _seed(tmp_path, closed=True)
@@ -388,7 +434,15 @@ class TestItExplainsTheSize:
         """A share of the account cannot be computed without the account.
         Better silent than wrong."""
         html = _page(_seed_with_limits(tmp_path, equity=""))
-        assert "% of the" not in html
+        # NARROWED DELIBERATELY. This forbade the substring "% of the",
+        # which also caught "1.7% of the position" - a share of the
+        # NOTIONAL, which is always known and is one of the figures the
+        # owner asked to see. What cannot be computed without an equity
+        # snapshot is a share of the ACCOUNT, so that is what is
+        # asserted absent.
+        assert not re.search(r"[\d.]+% of the account", html), (
+            "a share of the account was printed without an equity "
+            "snapshot to divide by")
         assert "most it may lose on a single position" in html
 
     def test_nothing_binding_is_said_plainly(self, tmp_path):
@@ -460,8 +514,15 @@ class TestEachTradeFoldsShut:
         that answer "is this the one I am looking for"."""
         html = _page(_seed_two(tmp_path))
         head = html[html.index("<summary"):html.index("</summary>")]
-        for fact in ("EMBC", "open", "$400.00", "2026-08-17", "0.60"):
+        # THE FACTS, NOT THEIR SPELLING. This asserted "$400.00" and
+        # "2026-08-17"; both were rewritten for a glance on 2026-09-11
+        # ("$400", "17 Aug") at the owner's request, which is a change
+        # to how the five facts READ and not to which five they are.
+        for fact in ("EMBC", "open", "$400", "17 Aug", "0.60"):
             assert fact in head, f"the folded summary omits {fact}"
+        assert "2026-08-17" not in head, (
+            "the folded line is back to printing an ISO date the reader "
+            "has to parse")
 
     def test_a_closed_trade_shows_its_result_while_folded(self, tmp_path):
         """The single most useful thing about a finished trade, and the
@@ -1025,32 +1086,61 @@ class TestThePositionChart:
     REVIEW = [("2026-08-19T14:00:00+00:00", "hold", False, "intact", [])]
 
     def test_it_draws_what_it_cost_and_what_it_sells_for(self, tmp_path):
-        html = _page(_seed(tmp_path))
+        with with_bars():
+            html = _page(_seed(tmp_path))
         assert 'class="pos-chart"' in html
         assert "bought $5.06" in html and "stop $4.55" in html
 
     def test_the_money_at_risk_is_the_shaded_band(self, tmp_path):
-        html = _page(_seed(tmp_path))
+        with with_bars():
+            html = _page(_seed(tmp_path))
         m = re.search(r'<rect[^>]*height="([\d.]+)"[^>]*class="pos-risk"', html)
         assert m and float(m.group(1)) > 0
 
+    def test_the_risk_band_spans_only_the_days_it_was_held(self, tmp_path):
+        """It used to start at the left edge of the chart, so the money
+        looked at risk during the run-up, before the position existed."""
+        with with_bars():
+            svg = _chart_svg(_page(_seed(tmp_path)))
+        m = re.search(r'<rect x="([\d.]+)"[^>]*class="pos-risk"', svg)
+        assert m and float(m.group(1)) > 88, (
+            "the risk band starts at the plot's left margin, which is "
+            "before the trade was opened")
+
     def test_every_call_to_claude_is_marked_on_the_day_it_happened(
             self, tmp_path):
-        html = _page(_seed(tmp_path, reviews=self.REVIEW))
-        assert "pos-review" in html
-        assert ">held</text>" in html
+        with with_bars():
+            html = _page(_seed(tmp_path, reviews=self.REVIEW))
+        assert "pos-tick" in html
+        # COUNTED, NOT REPEATED. Five reviews on a 14-day hold printed
+        # "held" five times over itself in the owner's screenshot; the
+        # marks stay, the word is said once.
+        assert "1 review" in html
+        assert ">held</text>" not in html
 
     def test_an_exit_review_is_drawn_differently_from_a_hold(self, tmp_path):
-        html = _page(_seed(tmp_path, reviews=[
-            ("2026-08-19T14:00:00+00:00", "exit_now", True, "broken", [])]))
-        assert "pos-review-exit" in html
-        assert ">EXIT</text>" in html
+        with with_bars():
+            html = _page(_seed(tmp_path, reviews=[
+                ("2026-08-19T14:00:00+00:00", "exit_now", True, "broken",
+                 [])]))
+        assert "pos-tick-exit" in html
+        assert "said exit" in html, (
+            "a review that decided to get out reads the same as a hold")
 
     def test_the_hard_exit_date_is_the_right_hand_edge(self, tmp_path):
-        html = _page(_seed(tmp_path))
-        assert "closes 2026-08-29" in html
+        with with_bars():
+            html = _page(_seed(tmp_path))
+        assert "closes 29 Aug" in html
 
     def test_it_says_how_many_times_claude_has_looked(self, tmp_path):
+        with with_bars():
+            html = _page(_seed(tmp_path, reviews=self.REVIEW))
+        assert "re-read the thesis <b>1</b> time(s)" in html
+
+    def test_the_count_is_reported_with_no_bars_too(self, tmp_path):
+        """It used to live only in the time chart's caption, so the one
+        case the owner actually had - no cached bars - reported it
+        nowhere."""
         html = _page(_seed(tmp_path, reviews=self.REVIEW))
         assert "re-read the thesis <b>1</b> time(s)" in html
 
@@ -1062,17 +1152,36 @@ class TestThePositionChart:
                         opened_at="2026-08-01", planned_exit_date="2026-08-20",
                         reviews=[("2026-08-05T00:00:00+00:00", "hold", False,
                                   "", [], "too soon")])
+        # No bars here, so this is the ladder - and it must report the
+        # count too.
         assert "<b>0</b> time(s)" in panels._position_chart(st, "tr", 0)
+        with with_bars(first="2026-07-25", n=30):
+            assert "<b>0</b> time(s)" in panels._position_chart(st, "tr", 0)
 
     def test_NOTHING_IS_PROJECTED(self, tmp_path):
         """The one line this chart must not cross. The only future marks
         allowed are DATES the bot has already committed to - never a
         price it might reach."""
         html = _page(_seed(tmp_path))
-        svg = html[html.rindex('<svg', 0, html.index('class="pos-chart"')):]
-        svg = svg[:svg.index("</svg>")]
+        svg = _chart_svg(html)
         real = {"5.06", "4.55"}
         assert set(re.findall(r"\$([\d.]+)", svg)) <= real
+
+    def test_NOTHING_IS_PROJECTED_with_bars_either(self, tmp_path):
+        """Every price the chart may print is one that was recorded: the
+        fill, the stop, and the newest cached close. Never a level it
+        might reach."""
+        import datetime as _dt
+
+        with with_bars() as bars:
+            svg = _chart_svg(_page(_seed(tmp_path)))
+        # Only bars inside the plotted window can be printed, and the
+        # window ends at the hard exit date - so the newest VISIBLE
+        # close is the one to allow, not the newest in the fixture.
+        end = _dt.date.fromisoformat("2026-08-29")
+        visible = [b for b in bars if b.day <= end]
+        allowed = {"5.06", "4.55", f"{float(visible[-1].close):.2f}"}
+        assert set(re.findall(r"\$([\d.]+)", svg)) <= allowed
 
     def test_a_missing_bar_cache_says_so_rather_than_guessing(self, tmp_path):
         html = _page(_seed(tmp_path))
@@ -1261,27 +1370,39 @@ class TestThePositionChartIsLEGIBLE:
         margin was 52."""
         from catalyst.dashboard import charts
 
-        svg = self.svg_of(_page(_seed(tmp_path)))
+        with with_bars():
+            svg = self.svg_of(_page(_seed(tmp_path)))
         assert not charts.labels_outside_viewbox(svg)
         assert ">bought $5.06<" in svg, "the entry label is cut again"
 
+    def test_no_label_is_clipped_on_the_ladder_either(self, tmp_path):
+        """The ladder puts its prices in a right-hand gutter, which is a
+        fresh chance to run off the edge."""
+        from catalyst.dashboard import charts
+
+        svg = self.svg_of(_page(_seed(tmp_path)))
+        assert "ladder" in svg
+        assert not charts.labels_outside_viewbox(svg)
+
     def test_same_day_reviews_collapse_to_one_marker(self, tmp_path):
-        html = _page(_seed(tmp_path, reviews=[
-            ("2026-08-19T09:00:00+00:00", "hold", False, "a", []),
-            ("2026-08-19T15:00:00+00:00", "hold", False, "b", []),
-            ("2026-08-20T15:00:00+00:00", "hold", False, "c", []),
-        ]))
-        assert self.svg_of(html).count('class="pos-review') == 2, (
+        with with_bars():
+            html = _page(_seed(tmp_path, reviews=[
+                ("2026-08-19T09:00:00+00:00", "hold", False, "a", []),
+                ("2026-08-19T15:00:00+00:00", "hold", False, "b", []),
+                ("2026-08-20T15:00:00+00:00", "hold", False, "c", []),
+            ]))
+        assert self.svg_of(html).count('class="pos-tick') == 2, (
             "two reviews on one day drew two rules on the same pixel")
 
     def test_a_decision_outranks_a_hold_on_the_same_day(self, tmp_path):
-        html = _page(_seed(tmp_path, reviews=[
-            ("2026-08-19T09:00:00+00:00", "hold", False, "a", []),
-            ("2026-08-19T15:00:00+00:00", "exit_now", False, "b", []),
-        ]))
+        with with_bars():
+            html = _page(_seed(tmp_path, reviews=[
+                ("2026-08-19T09:00:00+00:00", "hold", False, "a", []),
+                ("2026-08-19T15:00:00+00:00", "exit_now", False, "b", []),
+            ]))
         svg = self.svg_of(html)
-        assert "pos-review-exit" in svg
-        assert ">EXIT<" in svg
+        assert "pos-tick-exit" in svg
+        assert "said exit" in html
 
     def test_a_SKIPPED_review_is_not_drawn_at_all(self, tmp_path):
         """It cost nothing and decided nothing. It is still counted in
@@ -1293,28 +1414,34 @@ class TestThePositionChartIsLEGIBLE:
             opened_at="2026-08-01", planned_exit_date="2026-08-20",
             reviews=[("2026-08-05T00:00:00+00:00", "hold", False, "", [],
                       "too soon")])
-        svg = panels._position_chart(st, "tr", 0)
-        assert "pos-review" not in svg
+        with with_bars(first="2026-07-25", n=30):
+            svg = panels._position_chart(st, "tr", 0)
+        assert "pos-tick" not in svg
         assert ">skipped<" not in svg
 
     def test_crowded_labels_are_dropped_rather_than_overprinted(self,
                                                                 tmp_path):
-        """An unreadable label is worse than none - the rule and its
-        tooltip still carry the fact."""
-        html = _page(_seed(tmp_path, reviews=[
-            (f"2026-08-{d}T12:00:00+00:00", "hold", False, "x", [])
-            for d in (18, 19, 20, 21, 22, 23, 24, 25, 26)
-        ]))
+        """THE ORIGINAL FIX, NOW STRUCTURAL. Nine reviews used to draw
+        nine full-height rules and label as many as fitted, which is
+        how the owner's screenshot got "held" printed over itself. The
+        marks are short ticks in their own lane now and the word is
+        said ONCE, as a count, so crowding cannot produce an
+        unreadable label at any density."""
+        with with_bars():
+            html = _page(_seed(tmp_path, reviews=[
+                (f"2026-08-{d}T12:00:00+00:00", "hold", False, "x", [])
+                for d in (18, 19, 20, 21, 22, 23, 24, 25, 26)
+            ]))
         svg = self.svg_of(html)
-        rules = svg.count('class="pos-review')
-        labels = len(re.findall(r'class="pos-label">held<', svg))
-        assert rules == 9
-        assert labels < rules, "every crowded label was drawn anyway"
+        assert svg.count('class="pos-tick') == 9
+        assert len(re.findall(r">held<", svg)) == 0
+        assert "9 reviews" in svg
 
     def test_every_marker_carries_a_tooltip_even_unlabelled(self,
                                                             tmp_path):
-        html = _page(_seed(tmp_path, reviews=[
-            ("2026-08-19T12:00:00+00:00", "hold", False, "x", [])]))
+        with with_bars():
+            html = _page(_seed(tmp_path, reviews=[
+                ("2026-08-19T12:00:00+00:00", "hold", False, "x", [])]))
         assert "<title>2026-08-19: held</title>" in self.svg_of(html)
 
     def test_only_actions_the_schema_permits_are_translated(self):
