@@ -201,6 +201,65 @@ incomparable to a backtest that trades every day.
 **So the only cost levers are allocation and price per call.** Both were
 pulled on 09-11.
 
+### Is any API cost hard-coded? — audited 2026-09-11
+
+Owner: *"i want to be absolutely certain aswell we have not hard coded
+api costs, remember we have access with the admin API... we dont want to
+be changing estimates manually."*
+
+The audit found two categories and only one was already right.
+
+**Already self-correcting — the PRICES, which decide what a call cost
+once it happened:**
+
+| what | how it corrects |
+|---|---|
+| per-token rates | `measured_rates.py` divides Anthropic's charge for a closed day by its own token counts and calls `set_override()`, so `pricing.py`'s table is a cold start nothing reads afterwards |
+| cache and web-search multipliers | `factors.py` derives them from the itemised bill, discarding any derivation whose components do not add back up to the billed total |
+| input tokens per web search | `boundary.py` seeds 12k and replaces it with the observed 75th percentile after 8 searching turns |
+
+**NOT self-correcting — the ESTIMATES, which decide *before* a call
+whether it is affordable and how many to allow:**
+
+| constant | typed value | measured |
+|---|---|---|
+| `TYPICAL_RESEARCH_CALL_CENTS` | 50c | **22.8c** blended |
+| `HUNT_ESTIMATE_CENTS` | 60c | **11.6c** (18 calls, $2.08) |
+| `HUNT_TURN_ESTIMATE_CENTS` | 20c | never measured at all |
+
+Wrong by two to five times, each a number somebody typed after reading
+one bundle, with nothing anywhere to say so. They now read the ledger
+through `cost/observed.py` — minimum sample of 8, 75th percentile, a
+30-day window, the constant demoted to a cold-start seed.
+
+**The chain, end to end, and it is now closed:**
+
+```
+Admin API charge for a closed day
+  -> measured_rates.learn_from_closed_day -> set_override
+  -> pricing_overrides table
+  -> price() -> cost_events.priced_cents
+  -> observed_call_cents -> the estimate for the NEXT call
+```
+
+So **no API cost in the live path is a typed number once one day has
+closed with spend on it.** The cost panel shows which estimates are
+measured and which are still seeds, with the sample size, so this is
+checkable without reading the source.
+
+**What is still typed, correctly:** the CAPS. A cap is a decision the
+owner makes, not a measurement — the monthly cap, `DAILY_CAP_CENTS`,
+the reconciliation floors. `tests/test_no_cost_is_hard_coded.py` holds
+the distinction with a permit list: a new `*_CENTS` constant appearing
+outside the modules that account for one fails the suite.
+
+**A note on the guard's first version**, because it is the pattern to
+avoid: it matched `_USD` too, and flagged `MIN_TOTAL_VALUE_USD` — the
+minimum insider purchase a cluster must total. That is a strategy
+threshold, not an API cost. A guard that cries wolf teaches the next
+reader to add files to the permit list without thinking, so it was
+narrowed to cost-shaped names only.
+
 ### The hurdle, which every "is this working" conversation starts from
 
 At **$100/month on $2,000 the bot must clear roughly 60% a year to match
