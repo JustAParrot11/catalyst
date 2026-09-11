@@ -136,11 +136,26 @@ class TestItDoesNotTeachTheModelToClearTheBar:
             conn.close()
 
         text = self._all_text()
-        assert f"{float(floor):.2f}" not in text or "0.60 means" in text, (
-            f"the live floor {floor} appears in the instructions")
+        # THE ESCAPE HATCH HERE USED TO BE `or "0.60 means" in text`,
+        # which is in this module's own source and therefore always
+        # true - so from the moment it was added this assertion could
+        # not fail (house rule 4). It was written when the floor was
+        # 0.60 and the prompt happened not to say "0.60"; the floor is
+        # 0.50 now and the scale's own anchor is "0.50 is a coin flip",
+        # so the digits cannot be the test at all.
+        #
+        # What is actually forbidden is stating the floor AS A BAR, and
+        # that is what the loop below checks. The digits are allowed
+        # where they define the SCALE - they have to be, or the scale
+        # cannot be explained.
+        assert "0.50 is a coin flip" in text, (
+            "the scale's anchors are gone; conviction has no definition "
+            "again, which is what cost every trade before 2026-08-17")
         for phrase in ("conviction floor", "minimum conviction",
-                       "at least 0.6", "above 0.6", "threshold of 0.6",
-                       "must exceed", "in order to trade you"):
+                       "at least 0.6", "above 0.6", "threshold of",
+                       "at least 0.5", "above 0.5",
+                       "must exceed", "in order to trade you",
+                       "must be at least", "the bar is"):
             assert phrase not in text, (
                 f"the model is being told the bar: {phrase!r}. It will "
                 "clear it, and the number stops meaning anything")

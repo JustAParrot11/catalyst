@@ -67,6 +67,58 @@ DIGEST_CHARS = 320
 
 SEC_TOOLS = ("search_filings", "read_filing")
 
+#: WEB SEARCHES PER HUNT. The hunt had none: its tools were SEC
+#: full-text search, filing reads and news-by-symbol, so the only world
+#: it could see was the one described in filings.
+#:
+#: OWNER-ASKED 2026-09-11: "claude isnt making very detailed connections
+#: currently e.g. this happened because of the war it impacted this
+#: company who supplies this company and will likely make profit".
+#:
+#: That chain cannot start in a filing. It starts in reporting - who
+#: supplies whom, which route is closed, which input got more
+#: expensive - and the bot already pays for exactly this tool in the
+#: research step (measured: 216 searches across 71 research calls in
+#: the owner's 2026-09-11 week; the hunt's own count was ZERO, because
+#: it was never offered the tool).
+#:
+#: Five, against research's three: the hunt's question is broader (what
+#: is worth looking at at all) and it runs twice a day, not six times a
+#: cycle. At $10 per 1,000 searches plus the results as input tokens
+#: that is roughly 25-35c a hunt against 11.6c measured today - call it
+#: $0.50 a day of the $10 ceiling.
+HUNT_SEARCHES = 5
+
+
+def web_search_tools(remaining: int | None = None) -> list[dict]:
+    """The server-side web_search tool, identical to the one the research
+    step uses - same type, same billing, one definition.
+
+    `max_uses` is per REQUEST, so a continuation must be handed what is
+    LEFT rather than a fresh allowance (the lesson boundary.py records
+    in _tools_with_remaining_searches). Zero left means the tool is not
+    offered at all.
+    """
+    from catalyst.research.prompts import exploration_tools
+
+    budget = HUNT_SEARCHES if remaining is None else int(remaining)
+    if budget <= 0:
+        return []
+    return list(exploration_tools(budget))
+
+
+def searches_billed(usages) -> int:
+    """Web searches CHARGED so far this hunt, from the usage objects the
+    turns already record - what was billed, not what was intended."""
+    total = 0
+    for raw in usages or ():
+        try:
+            total += int(((raw or {}).get("server_tool_use") or {})
+                         .get("web_search_requests") or 0)
+        except (AttributeError, TypeError, ValueError):
+            continue
+    return total
+
 SEARCH_FILINGS_TOOL = {
     "name": "search_filings",
     "description": (

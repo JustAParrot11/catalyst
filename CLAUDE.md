@@ -34,6 +34,18 @@ Every 15 minutes, unattended:
      governor. It may only cite events that exist — but what a tool
      finds is written to `raw_events` and counts, so the rule is
      unchanged and the reach is not.
+
+     Since 2026-09-11 it also has **web_search, five times a hunt**, and
+     a brief for using it: **second-order chains**. A screen matches a
+     pattern in one company's own filings and cannot reason that a
+     closed shipping lane raises a freight rate, that the rate squeezes
+     an importer, and that the importer's domestically-sourced
+     competitor gains. The method the prompt asks for is: start from the
+     cause, name the company and the mechanism in one line, **then find
+     the dated event** — a consequence is not a catalyst — then cite
+     what you found. "Two or three links is reasoning. Five is
+     astrology." It had billed **zero** web searches across 18 calls
+     before this, because it had never been offered the tool.
 3. **Claude researches** each candidate: given the live price, the move
    since the catalyst, volume, range position and three years of the
    stock's own history, plus its own web searches. It returns a
@@ -224,6 +236,78 @@ positions, the daily-loss and drawdown kill switches. None of them was
 stopping a trade; they only bound how big a trade is. They stay the
 owner's decision.
 
+### What 2026-09-11 measured, and what moved
+
+Everything above shipped and is working. The 09-11 bundles show
+denials with `reconciliation_discrepancy_unacknowledged` stopping dead
+at 2026-09-05T00:15 followed by 89 allows; the drift arm producing 32
+candidates where it produced none; the hunt producing 8 forward-dated
+candidates; **69 research calls over four trading days** against 33 in
+the whole previous week; $21.25 of $100 spent; reconciliation agreeing
+to the cent on every closed day.
+
+**The blocker moved rather than persisting.** 69 researched produced
+four directional views, and all four died:
+
+| | | |
+|---|---|---|
+| CASY | short 0.58 | cash account cannot short |
+| COO | short 0.60 | cash account cannot short |
+| BWFG | long 0.55 | spread gate: half-spread 99.2bp vs a 20bp bound |
+| UBER | long 0.62 priced_in | needed 0.65 |
+
+**Two of the four are correct and stay correct.** BWFG is a microcap
+bank whose half-spread measured 99.2 basis points — a ~2% round trip
+against an 8% assumed move — and that is a hard bound, so it is the
+owner's to change; on this evidence it is right. The shorts are a cash
+account being a cash account.
+
+- **Priced-in premium 0.15 → 0.05.** On a 0.50 floor, 0.15 is a 0.65
+  bar. `priced_in` is set on nearly everything — 62 of 65 no_trades
+  and 1 of 2 longs — because for a public filing days old the honest
+  answer usually is "partly". But conviction is *defined* as a
+  frequency: a model that thinks half the move is gone says so by
+  scoring 0.62 rather than 0.80, and charging 0.15 again double-counts
+  it. Not zero: a priced-in long now needs 0.55, so UBER trades and a
+  0.52 priced-in long still does not.
+- **The research prompt says the account cannot short.** Two of four
+  paid directional views were shorts the engine must discard. Phrased
+  as a fact about the account, never as pressure toward `long` — a
+  bearish read is still the right answer, recorded as `no_trade` with
+  the bearish case in the thesis, which the refusal tracker scores.
+  What was wasted was the search budget spent *building* a case that
+  cannot be acted on.
+- **The hunt gets web_search and a second-order brief** (see "What the
+  bot actually does" above). The chain the owner asked for — war →
+  supplier → beneficiary — cannot start in a filing, and the hunt had
+  no tool that could see outside one.
+- **Unscored refusals now say why.** 291 refusals, essentially none
+  scored, and nothing anywhere saying what they were waiting on. The
+  reason was held in a module-level dict, which no diagnostic bundle
+  can carry — the bundle is written by a different process. It is a
+  side table now (`refusal_scoring_skips`), with an attempt counter, so
+  "the quote failed once" and "this ticker has refused forty times" are
+  different facts.
+- **The SPY health probe retries a transient answer.** The owner's
+  "reachable, but no feed returned a SPY bar ... HTTP 504" was one bad
+  second reported as a verdict, while the bot read bars happily because
+  `refresh_benchmark` retries and the probe did not. Three attempts on
+  429/5xx; **not** on 401/403, which are the entitlement and never fix
+  themselves.
+
+**Recorded, not changed: the conviction floor at 0.50 refuses nothing
+by construction.** The prompt's own scale says "Below 0.50 on a
+direction is a contradiction", so a directional view under 0.50 is one
+the model is instructed never to submit. The owner's week bears it out:
+lowest directional view 0.55, `below conviction floor` fired zero
+times. That is what "the only stop is the budget" means, and the real
+bounds are the hard bounds and the priced-in premium — but it is
+written down because a threshold that looks like it works and refuses
+nothing is exactly the shape the adaptive table exists to prevent. The
+floor can only start mattering again by being *raised* above 0.50 on
+scored evidence. Treat a zero count of `below conviction floor` as the
+expected reading, not as good news.
+
 ---
 
 ## What is not proven
@@ -249,6 +333,13 @@ how a bot ends up looking finished while doing nothing.
   shown a record improves the next call is itself unmeasured.
 - **The conviction scale is newly defined and uncalibrated.** Whether a
   0.6 call really resolves six in ten is unknown.
+- **The main feedback loop has produced no evidence yet.** 291 refusals
+  on record and essentially none scored as of 2026-09-11. Since the
+  brief calls the refusal tracker "the single most important feedback
+  loop in the system", every adaptive number in the table is still
+  sitting on its estimate — including the two that were moved by hand
+  on 09-05 and 09-11. The tracker now says *why* each refusal is
+  unscored, which is the prerequisite for fixing it, not the fix.
 
 ---
 

@@ -272,6 +272,8 @@ def _tools_section(searchers: dict | None) -> str:
     offered = [t["name"] for t in tool_schemas(searchers)]
     if not offered:
         return ""
+    from catalyst.discovery.hunt_tools import HUNT_SEARCHES
+
     try:
         from catalyst.data.sources.edgar_fts import QUERIES
 
@@ -298,7 +300,12 @@ def _tools_section(searchers: dict | None) -> str:
            "considering, to check whether an event is already widely "
            "reported.\n"
            if "search_news" in offered else "")
-        + f"Up to {MAX_TOOL_CALLS} tool calls this hunt. Anything a tool "
+        + f"- web_search, up to {HUNT_SEARCHES} times: the world outside "
+        "the filings. Who supplies whom, what a route closing does to a "
+        "freight rate, which company a shortage reaches. This is where a "
+        "chain starts, and it is the one tool that can tell you something "
+        "no screen could have known.\n"
+        + f"Up to {MAX_TOOL_CALLS} client tool calls this hunt. Anything a tool "
         "returns is citable by its source_id exactly as if it had been in "
         "the feed. Then submit with nominate_candidates - and an empty "
         "list after a real search is still a good answer."
@@ -362,6 +369,56 @@ def render_hunt_prompt(events: list, as_of: datetime,
         "shareholder votes, trial readouts, anything where the mechanism "
         "is specific and no screen encodes it. "
         f"Tickers already found this pass, do not repeat them: {known}",
+
+        # THE CHAIN THE OWNER ASKED FOR, AND WHY IT WAS IMPOSSIBLE.
+        #
+        # OWNER, 2026-09-11: "claude isnt making very detailed
+        # connections currently e.g. this happened because of the war it
+        # impacted this company who supplies this company and will
+        # likely make profit as an example".
+        #
+        # Two things blocked exactly that. The hunt had no view of the
+        # world - its tools were SEC search, filing reads and
+        # news-by-symbol, so a war, a tariff or a closed shipping lane
+        # only existed if a filing happened to mention it (it now has
+        # web_search, same tool the research step bills 3 times a call).
+        # And this section listed only FIRST-ORDER, single-company
+        # events, so "what no screen has a rule for" read as a list of
+        # things that happen TO one company rather than as an invitation
+        # to reason about consequences.
+        #
+        # The anti-invention rule is what makes a chain safe rather than
+        # a story, so it is stated as the method instead of as a wall.
+        "THE CONNECTIONS NO SCREEN CAN MAKE ARE THE POINT OF YOU.\n"
+        "A screen matches a pattern in one company's own filings. It "
+        "cannot reason that a shipping lane closing raises a freight "
+        "rate, that the freight rate squeezes an importer's margin, and "
+        "that the importer's competitor who sources domestically gains "
+        "- because no single filing says any of that. You can, and "
+        "second-order reasoning is where an edge is least likely to be "
+        "already priced.\n"
+        "HOW TO MAKE A CHAIN NOMINABLE, since it must still cite real "
+        "evidence:\n"
+        "  1. Start from the cause. A war, a tariff, a shortage, a "
+        "recall, a competitor's failure, a regulatory decision in "
+        "another company's favour - from the feed below or from "
+        "web_search.\n"
+        "  2. Name the company you think it reaches, and say the "
+        "mechanism in one line: who sells what to whom, and which "
+        "direction the money moves. If you cannot name the mechanism, "
+        "you have a theme and not a trade.\n"
+        "  3. FIND THE DATED EVENT. A consequence is not a catalyst: "
+        "the chain tells you where to look, and the nomination still "
+        "needs something that resolves on a day you can name - the "
+        "company's next guidance, a contract decision, a hearing, a "
+        "vote. Use search_filings and search_news on that company to "
+        "find it.\n"
+        "  4. Cite what you found. The citation is what separates a "
+        "chain from a story, and a nomination citing nothing real is "
+        "discarded whatever the reasoning was.\n"
+        "Two or three links is reasoning. Five is astrology - if the "
+        "chain needs that many, the market has more ways to be right "
+        "than you do.",
 
         "NOMINATE NOTHING RATHER THAN SOMETHING WEAK. Every nomination "
         "costs a research call out of a fixed monthly budget, and a "
@@ -521,11 +578,19 @@ def hunt(events: list, as_of: datetime, transport, cost_context,
         return result
 
     from catalyst.discovery.hunt_tools import (
-        MAX_TOOL_CALLS, run_tool, tool_schemas,
+        HUNT_SEARCHES, MAX_TOOL_CALLS, run_tool, searches_billed,
+        tool_schemas, web_search_tools,
     )
 
     searchers = dict(searchers or {})
-    offered = tool_schemas(searchers)
+    # CLIENT tools are the ones this process executes and must answer
+    # with a tool_result. web_search is SERVER-side: Anthropic runs it
+    # inside the turn and answers it there, so it is offered in the
+    # payload and never appears in `uses` below.
+    client_tools = tool_schemas(searchers)
+    client_names = {t["name"] for t in client_tools}
+    usages: list = []
+    offered = client_tools + web_search_tools()
     forced = {"type": "tool", "name": "nominate_candidates"}
     messages = [{"role": "user", "content": result.prompt}]
     payload = {
@@ -545,6 +610,7 @@ def hunt(events: list, as_of: datetime, transport, cost_context,
         # be missed entirely if the parse below raises.
         raw_usage = response.get("usage") or {
             "unparseable_usage": "response carried no usage object"}
+        usages.append(raw_usage)
         try:
             event = record_usage(raw_usage, model, cost_context.kind, "hunt",
                                  conn, api_call_id=call_id)
@@ -557,9 +623,17 @@ def hunt(events: list, as_of: datetime, transport, cost_context,
         return any(isinstance(b, dict) and b.get("name") == "nominate_candidates"
                    for b in (response.get("content") or []))
 
+    def _live_tools():
+        """The tools for the NEXT request, with the search allowance
+        carried over. max_uses is per request, so re-sending the list
+        verbatim would refill it every turn."""
+        return ([NOMINATE_TOOL] + client_tools
+                + web_search_tools(HUNT_SEARCHES - searches_billed(usages)))
+
     response: dict = {}
-    # Without hands the first turn IS the forced nomination, so there
-    # is nothing to ask a second time - one call, exactly as before.
+    # With no tools at all the first turn IS the forced nomination, so
+    # there is nothing to ask a second time - one call, exactly as the
+    # hunt was before it had any.
     forced_already = not offered
     for _turn in range(MAX_HUNT_TURNS):
         try:
@@ -578,13 +652,26 @@ def hunt(events: list, as_of: datetime, transport, cost_context,
         content = response.get("content") or []
         uses = [b for b in content if isinstance(b, dict)
                 and b.get("type") == "tool_use" and b.get("id")
-                and b.get("name") in {t["name"] for t in offered}]
+                and b.get("name") in client_names]
         # THE MODEL SEES ITS OWN LAST TURN. The API refuses an assistant
         # message with no content, so a turn that carried none is not
         # echoed (research/boundary.py learned this on four dead calls).
         echo = ({"role": "assistant", "content": [b for b in content
                                                   if isinstance(b, dict)]}
                 if any(isinstance(b, dict) for b in content) else None)
+
+        # A SERVER-SIDE SEARCH STILL IN FLIGHT. `pause_turn` means
+        # Anthropic ran a web_search inside the turn and stopped to let
+        # us continue; the answer is already in the content it handed
+        # back. Echoing it and asking again is the whole protocol
+        # (research/boundary.py does the same) - forcing a nomination
+        # here instead would cut the search off mid-thought, which is
+        # the one thing that would make the tool useless.
+        if (response.get("stop_reason") == "pause_turn" and not uses
+                and echo is not None):
+            messages.append(echo)
+            payload["tools"] = _live_tools()
+            continue
 
         # MORE TOOL WORK? Only while there is budget for it: the whole
         # transcript is re-sent every turn, and the governor is asked
@@ -618,6 +705,7 @@ def hunt(events: list, as_of: datetime, transport, cost_context,
             messages.append(echo)
         if room and answers:
             messages.append({"role": "user", "content": answers})
+            payload["tools"] = _live_tools()
             continue
         # NO NOMINATION AND NOTHING LEFT TO DO: ask for it once, forced.
         if forced_already:

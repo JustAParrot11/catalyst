@@ -395,6 +395,24 @@ def render_research_prompt(candidate: Candidate,
         "says so and say why; do not refuse to be safe.\n"
         "- Thin, stale or genuinely consumed evidence still means "
         "no_trade, and a no_trade you can justify is a good answer.\n"
+        # THE ACCOUNT CANNOT SHORT, AND HALF THE DIRECTIONAL VIEWS WERE
+        # SHORTS. Owner's 2026-09-11 bundle: of four directional views
+        # in a week, two were shorts (CASY 0.58, COO 0.60) that the risk
+        # engine discarded as `short_unavailable_cash_account`. Both
+        # theses were good work on the wrong question, and each cost a
+        # paid research call.
+        #
+        # Said here rather than in the tool schema so it reads as a fact
+        # about the account, not as pressure toward `long`: a short
+        # thesis is still the right ANSWER, it is just recorded as
+        # no_trade. Nothing about this makes a long more attractive.
+        "- THIS IS A CASH, LONG-ONLY ACCOUNT. It cannot short, at any "
+        "conviction. If your honest read is that this falls, answer "
+        "no_trade and put the bearish case in the thesis - that is a "
+        "correct and useful answer, and the refusal tracker scores it. "
+        "What is wasted is spending your searches BUILDING a short "
+        "case: the question worth your budget is whether there is a "
+        "long here.\n"
         "- Insider buying is public information. Your question is whether "
         "THIS cluster is still under-consumed by the market, not whether "
         "insider buying works in general.\n"

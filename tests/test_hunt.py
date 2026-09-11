@@ -225,7 +225,12 @@ class TestItSpendsThroughTheGovernorLikeEverythingElse:
         n = ctx.conn.execute(
             "SELECT COUNT(*) FROM cost_events WHERE component='hunt'"
         ).fetchone()[0]
-        assert n == 1, "a billed hunt left no cost row"
+        # EVERY TURN, not just the first. Since 2026-09-11 the hunt
+        # always holds web_search, so a model that answers nothing on
+        # the first turn is asked once more (forced) - two billed turns,
+        # two rows. The property is that no billed turn goes unrecorded.
+        assert n == res.turns, "a billed hunt turn left no cost row"
+        assert n >= 1
 
     def test_hunts_scale_with_the_budget(self):
         assert H.hunts_per_day(None) == 0

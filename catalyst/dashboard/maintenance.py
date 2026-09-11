@@ -38,6 +38,16 @@ from decimal import Decimal
 
 #: Short, because this runs while somebody waits for a page.
 PROBE_TIMEOUT_SECONDS = 6.0
+#: A transient upstream answer is asked again before it becomes a red
+#: check - see the note in _default_market_data_probe. Three attempts
+#: with a short backoff, because this runs while somebody is waiting on
+#: a page.
+PROBE_ATTEMPTS = 3
+PROBE_BACKOFF_SECONDS = 0.4
+#: "Ask again", not "this is broken". 401/403 are the entitlement and
+#: are deliberately absent: retrying them spends time to be told the
+#: same thing, and falling through to the next feed is the answer.
+PROBE_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 OK, WARN, FAIL, UNKNOWN = "ok", "warn", "fail", "unknown"
 
@@ -621,13 +631,42 @@ def _default_market_data_probe(creds):
                   "end": today.isoformat()}
         last = ""
         for feed in FEED_PREFERENCE:
-            resp = httpx.get(
-                "https://data.alpaca.markets/v2/stocks/bars",
-                params={"symbols": "SPY", "timeframe": "1Day", "limit": 10,
-                        "feed": feed, "adjustment": "all", **window},
-                headers=headers, timeout=PROBE_TIMEOUT_SECONDS)
+            # A GATEWAY TIMEOUT IS NOT A BROKEN FEED.
+            #
+            # OWNER-REPORTED 2026-09-11: "alpaca market data reachable,
+            # but no feed returned a SPY bar. Last answer: HTTP 504 on
+            # iex: {"message":"backend request timeout"}".
+            #
+            # 504 is Alpaca's edge giving up on its own backend for one
+            # request. The probe asked once per feed and reported the
+            # first answer as the verdict, so a single bad second showed
+            # a red check until someone reloaded the page - while the
+            # bot itself was reading bars happily, because
+            # refresh_benchmark retries and this did not. A check that
+            # is more fragile than the code it checks generates false
+            # alarms, which is worse than no check (the same lesson this
+            # probe already carries about feed=sip).
+            #
+            # Retried: 429 and 5xx, which are "ask again". NOT 401/403 -
+            # those are the entitlement, they will never fix themselves,
+            # and the fallback to the next feed is the right answer.
+            resp = None
+            for attempt in range(PROBE_ATTEMPTS):
+                resp = httpx.get(
+                    "https://data.alpaca.markets/v2/stocks/bars",
+                    params={"symbols": "SPY", "timeframe": "1Day",
+                            "limit": 10, "feed": feed, "adjustment": "all",
+                            **window},
+                    headers=headers, timeout=PROBE_TIMEOUT_SECONDS)
+                if resp.status_code not in PROBE_RETRY_STATUSES:
+                    break
+                if attempt + 1 < PROBE_ATTEMPTS:
+                    time.sleep(PROBE_BACKOFF_SECONDS * (attempt + 1))
             if resp.status_code != 200:
-                last = f"HTTP {resp.status_code} on {feed}: {resp.text[:160]}"
+                tried = ("" if resp.status_code not in PROBE_RETRY_STATUSES
+                         else f" after {PROBE_ATTEMPTS} attempts")
+                last = (f"HTTP {resp.status_code} on {feed}{tried}: "
+                        f"{resp.text[:160]}")
                 continue
             if ((resp.json() or {}).get("bars") or {}).get("SPY"):
                 if feed == FEED_PREFERENCE[0]:

@@ -35,8 +35,46 @@ SCORING_HORIZON_DAYS = 12
 #: the dashboard so "6 of 223 scored" can say what the other 217 are
 #: waiting on - a quote that keeps failing is a delisted or renamed
 #: ticker, which is a different fact from "not due yet" (house rule 3).
-#: In-process only; the rows themselves stay unscored and are retried.
+#: In-process only; `refusal_scoring_skips` is the durable copy.
 LAST_UNSCORED_REASONS: dict = {}
+
+
+def _remember_skip(conn, candidate_id, ticker, reason, now) -> None:
+    """Persist WHY this refusal is still unscored.
+
+    IN-PROCESS WAS NOT ENOUGH. The dict above was added on 2026-09-05 to
+    answer exactly this question and it cannot: a diagnostic bundle is
+    written by a different process from the cycle, so it only ever saw
+    an empty dict. The owner's 2026-09-11 bundle then showed 291
+    refusals and ~none scored, with nothing anywhere saying why.
+
+    `attempts` counts, so "the quote failed once" and "this ticker has
+    refused a quote forty times" - a delisting, a rename - are
+    different facts rather than the same line. Never raises: a
+    diagnostic must not be able to break the loop it describes.
+    """
+    try:
+        conn.execute(
+            "INSERT INTO refusal_scoring_skips "
+            "(candidate_id, ticker, reason, attempted_at, attempts) "
+            "VALUES (?,?,?,?,1) "
+            "ON CONFLICT(candidate_id) DO UPDATE SET "
+            "  ticker=excluded.ticker, reason=excluded.reason, "
+            "  attempted_at=excluded.attempted_at, "
+            "  attempts=refusal_scoring_skips.attempts + 1",
+            (str(candidate_id), str(ticker), str(reason)[:500],
+             now.isoformat()))
+    except Exception:  # noqa: BLE001 - an older database has no table yet
+        pass
+
+
+def _forget_skip(conn, candidate_id) -> None:
+    """A refusal that scored is no longer waiting on anything."""
+    try:
+        conn.execute("DELETE FROM refusal_scoring_skips WHERE candidate_id = ?",
+                     (str(candidate_id),))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def score_due_refusals(broker: Broker, conn,
@@ -49,52 +87,54 @@ def score_due_refusals(broker: Broker, conn,
     now = now or datetime.now(timezone.utc)
     due_before = (now - timedelta(days=SCORING_HORIZON_DAYS)).isoformat()
     rows = conn.execute(
-        """SELECT r.rowid, r.price_at_refusal, c.ticker
+        """SELECT r.rowid, r.price_at_refusal, c.ticker, r.candidate_id
            FROM refusals r JOIN candidates c ON c.id = r.candidate_id
            WHERE r.scored_at IS NULL AND r.refused_at <= ?""",
         (due_before,)).fetchall()
     scored = 0
     LAST_UNSCORED_REASONS.clear()
 
-    def skip(rowid, ticker, why):
+    def skip(rowid, ticker, why, candidate_id):
         LAST_UNSCORED_REASONS[rowid] = f"{ticker}: {why}"
+        _remember_skip(conn, candidate_id, ticker, why, now)
 
-    for rowid, price_at_refusal, ticker in rows:
+    for rowid, price_at_refusal, ticker, candidate_id in rows:
         try:
             q = broker.get_latest_quote(ticker)
         except BrokerError as exc:
-            skip(rowid, ticker, f"quote refused ({exc})")
+            skip(rowid, ticker, f"quote refused ({exc})", candidate_id)
             continue
         quote = q.get("quote") or {}
         if not isinstance(quote, dict):
-            skip(rowid, ticker, f"no quote object in {str(q)[:120]!r}")
+            skip(rowid, ticker, f"no quote object in {str(q)[:120]!r}", candidate_id)
             continue
         try:
             bid = Decimal(str(quote.get("bp")))
             ask = Decimal(str(quote.get("ap")))
         except (ArithmeticError, TypeError, ValueError):
             skip(rowid, ticker, f"unreadable bid/ask {quote.get('bp')!r}/"
-                                f"{quote.get('ap')!r}")
+                                f"{quote.get('ap')!r}", candidate_id)
             continue
         # NaN/Infinity survive Decimal() and raise on the FIRST
         # comparison instead (stress-tester defect 3).
         if not (bid.is_finite() and ask.is_finite()):
-            skip(rowid, ticker, "non-finite bid/ask")
+            skip(rowid, ticker, "non-finite bid/ask", candidate_id)
             continue
         if bid <= 0 or ask <= 0 or ask < bid:
             skip(rowid, ticker, f"unusable NBBO bid {bid} ask {ask} - "
-                                "an off-hours or halted quote")
+                                "an off-hours or halted quote", candidate_id)
             continue
         outcome = (bid + ask) / 2
         entry = Decimal(price_at_refusal)
         if entry <= 0:
-            skip(rowid, ticker, f"refusal price {entry} is not a price")
+            skip(rowid, ticker, f"refusal price {entry} is not a price", candidate_id)
             continue
         ret = (outcome - entry) / entry
         conn.execute(
             """UPDATE refusals SET scored_at = ?, outcome_price = ?,
                outcome_return = ? WHERE rowid = ?""",
             (now.isoformat(), str(outcome), str(ret), rowid))
+        _forget_skip(conn, candidate_id)
         scored += 1
     conn.commit()
     return scored

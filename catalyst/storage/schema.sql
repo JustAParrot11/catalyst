@@ -626,3 +626,32 @@ CREATE TABLE IF NOT EXISTS xbrl_facts_fetched (
 
 CREATE INDEX IF NOT EXISTS idx_xbrl_facts_fetched_at
     ON xbrl_facts_fetched (fetched_at);
+
+-- WHY A DECLINED CANDIDATE HAS NOT BEEN SCORED YET.
+--
+-- OWNER'S 7-DAY BUNDLE, 2026-09-11: 291 refusals on record and
+-- essentially none scored. The refusal tracker is, in the brief's own
+-- words, "the single most important feedback loop in the system" - it
+-- is what would tell us whether the conviction floor and the priced-in
+-- premium are refusing trades that went on to earn - and it was
+-- returning nothing with no way to see why.
+--
+-- score_due_refusals already knew the reason for every skip (a quote
+-- the broker refused, an off-hours NBBO, a ticker that no longer
+-- trades) and held it in a module-level dict, which no bundle can
+-- carry. Here it survives the process, so the next bundle answers
+-- "why 0 of 291" instead of posing it.
+--
+-- A SIDE TABLE (CLAUDE.md: never add a column to a hot table), one row
+-- per refusal, replaced on each attempt - it is the CURRENT reason, not
+-- a history of attempts.
+CREATE TABLE IF NOT EXISTS refusal_scoring_skips (
+    candidate_id TEXT PRIMARY KEY,
+    ticker       TEXT NOT NULL,
+    reason       TEXT NOT NULL,   -- the raw upstream refusal (house rule 3)
+    attempted_at TEXT NOT NULL,
+    attempts     INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_refusal_scoring_skips_at
+    ON refusal_scoring_skips (attempted_at DESC);

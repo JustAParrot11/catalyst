@@ -198,6 +198,24 @@ _CATALYST_SHAPES = {
 #: it, exactly as before. What bounds a wrong call meanwhile is
 #: unchanged: 2% of the account per position, five positions, the
 #: daily-loss and drawdown kill switches.
+#:
+#: AND BE HONEST ABOUT WHAT 0.50 MEANS: THE FLOOR NOW REFUSES NOTHING.
+#: Found 2026-09-11 while checking whether the prompt leaks the bar.
+#: The prompt's own scale says "Below 0.50 on a direction is a
+#: contradiction - the answer is no_trade", so a directional view below
+#: 0.50 is one the model is instructed never to submit. A floor AT 0.50
+#: therefore cannot bind, and the owner's 2026-09-11 week bears that
+#: out: four directional views, the lowest 0.55, and `below conviction
+#: floor` fired zero times.
+#:
+#: That is not a defect - it is what "the only stop is the budget"
+#: means, and the real bounds are the hard bounds and the priced-in
+#: premium. It is written down because a threshold that looks like it
+#: is working and refuses nothing is exactly the shape this table
+#: exists to prevent, and because it changes what the adaptive loop is
+#: for: the floor can only ever start MATTERING again by being raised
+#: above 0.50 on scored evidence. Until then, treat "below conviction
+#: floor" counts of zero as the expected reading, not as good news.
 DEFAULT_PARAMS: dict = {
     "conviction_floor": Decimal("0.50"),
     _GAP: {k: Decimal(v[0]) for k, v in _CATALYST_SHAPES.items()},

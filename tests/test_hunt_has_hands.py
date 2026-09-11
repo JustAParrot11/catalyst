@@ -316,24 +316,100 @@ class TestFailuresAreReadableNotFatal:
         assert "found nothing" in r["content"] and r["is_error"] is False
 
 
-class TestWithoutHandsNothingChanged:
-    def test_no_searchers_means_the_old_single_forced_call(self, ctx):
+class TestWebSearchIsAlwaysOffered:
+    """WEB SEARCH NEEDS NO SEARCHER. It is executed server-side by
+    Anthropic inside the turn, so it is offered whatever credentials
+    this process holds - and it is the tool the owner's example needs
+    ("this happened because of the war, it impacted this company who
+    supplies this company"). That chain does not start in a filing.
+
+    Measured in the owner's 2026-09-11 week: the research step billed
+    216 web searches across 71 calls; the hunt billed ZERO across 18,
+    because it had never been offered the tool."""
+
+    def test_it_is_offered_with_no_searchers_at_all(self, ctx):
         t = Script([nominate([])])
         H.hunt(FEED, NOW, t, ctx)
         p = t.payloads[0]
-        assert p["tool_choice"] == {"type": "tool", "name": "nominate_candidates"}
-        assert [x["name"] for x in p["tools"]] == ["nominate_candidates"]
-        assert "YOU HAVE HANDS" not in p["messages"][0]["content"]
+        assert {x["name"] for x in p["tools"]} == {"nominate_candidates",
+                                                   "web_search"}
+        # The model chooses when it has read enough, so nothing is forced
+        # on the first turn any more.
+        assert p["tool_choice"] == {"type": "auto"}
 
-    def test_with_searchers_the_choice_is_the_models(self, ctx):
+    def test_the_client_tools_still_need_their_searchers(self, ctx):
+        t = Script([nominate([])])
+        H.hunt(FEED, NOW, t, ctx)
+        names = {x["name"] for x in t.payloads[0]["tools"]}
+        assert "search_filings" not in names and "read_filing" not in names
+
+    def test_with_searchers_everything_is_on_offer(self, ctx):
         searchers, _ = fake_searchers()
         t = Script([nominate([])])
         H.hunt(FEED, NOW, t, ctx, searchers=searchers)
         p = t.payloads[0]
         assert p["tool_choice"] == {"type": "auto"}
         assert {x["name"] for x in p["tools"]} == {
-            "nominate_candidates", "search_filings", "search_news", "read_filing"}
+            "nominate_candidates", "search_filings", "search_news",
+            "read_filing", "web_search"}
         assert "YOU HAVE HANDS" in p["messages"][0]["content"]
+
+    def test_the_search_allowance_is_what_is_LEFT_not_a_fresh_one(self, ctx):
+        """max_uses is per REQUEST. Re-sending the list verbatim hands
+        the model a new allowance on every continuation, which is how a
+        5-search budget becomes 5 per turn (boundary.py records the same
+        lesson)."""
+        searchers, _ = fake_searchers()
+        searched = reply([use("search_filings", {"phrase": "x",
+                                                 "catalyst_type": "merger_vote"})])
+        searched["usage"] = {"input_tokens": 30000, "output_tokens": 500,
+                             "server_tool_use": {"web_search_requests": 3}}
+        t = Script([searched, nominate([])])
+        H.hunt(FEED, NOW, t, ctx, searchers=searchers)
+        first = [x for x in t.payloads[0]["tools"] if x["name"] == "web_search"]
+        second = [x for x in t.payloads[1]["tools"] if x["name"] == "web_search"]
+        assert first[0]["max_uses"] == T.HUNT_SEARCHES
+        assert second[0]["max_uses"] == T.HUNT_SEARCHES - 3
+
+    def test_a_spent_allowance_withdraws_the_tool(self, ctx):
+        searchers, _ = fake_searchers()
+        searched = reply([use("search_filings", {"phrase": "x",
+                                                 "catalyst_type": "merger_vote"})])
+        searched["usage"] = {"input_tokens": 30000, "output_tokens": 500,
+                             "server_tool_use": {
+                                 "web_search_requests": T.HUNT_SEARCHES}}
+        t = Script([searched, nominate([])])
+        H.hunt(FEED, NOW, t, ctx, searchers=searchers)
+        assert not [x for x in t.payloads[1]["tools"]
+                    if x["name"] == "web_search"]
+
+
+class TestAServerSideSearchIsNotCutOff:
+    """`pause_turn` means Anthropic ran a web_search inside the turn and
+    stopped so we can continue. Forcing a nomination there would cut the
+    search off mid-thought and make the tool useless."""
+
+    def test_a_pause_turn_is_continued_not_forced(self, ctx):
+        paused = reply([{"type": "text", "text": "Looking into the war."}],
+                       stop="pause_turn")
+        t = Script([paused, nominate([])])
+        res = H.hunt(FEED, NOW, t, ctx)
+        assert res.turns == 2
+        second = t.payloads[1]
+        assert second["tool_choice"] == {"type": "auto"}, (
+            "a search in flight was forced to conclude")
+        assert second["messages"][-1]["role"] == "assistant"
+
+    def test_a_pause_turn_with_no_content_cannot_poison_the_next_request(self, ctx):
+        """The API rejects an assistant message with an empty content
+        array - four of the owner's five live research calls died that
+        way on 2026-08-10."""
+        t = Script([reply([], stop="pause_turn"), nominate([])])
+        res = H.hunt(FEED, NOW, t, ctx)
+        for p in t.payloads:
+            for m in p["messages"]:
+                assert m["content"], "an empty content array was sent"
+        assert res.turns == 2
 
 
 class TestThePromptTellsItWhatTheFixedFeedAlreadySearches:
