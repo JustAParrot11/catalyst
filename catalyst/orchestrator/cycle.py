@@ -116,6 +116,168 @@ def research_per_cycle(owner_monthly_cap_cents=None) -> int:
     return max(MAX_RESEARCH_PER_CYCLE,
                min(MAX_RESEARCH_PER_CYCLE_CEILING, derived))
 
+
+#: WHICH ARM GETS A CYCLE'S RESEARCH SLOTS, in order of what its record
+#: actually shows. This is a ROTATION ORDER, not a priority queue: every
+#: arm present gets a turn in each round, and this list only decides who
+#: goes first inside a round.
+#:
+#: OWNER'S 7-DAY WINDOW, 2026-09-11, measured per arm:
+#:
+#:   arm              paid calls   spend    $/call   directional views
+#:   conjunction         33 (48%)  $9.15     0.277   0 of 89 EVER
+#:   insider (screen)    23 (33%)  $4.10     0.178   23 of 189
+#:   earnings_drift      13 (19%)  $2.45     0.189   0 of 13
+#:   hunt                 0         -          -     0 of 2
+#:
+#: The cause was not a judgement about arms - there was no judgement at
+#: all. `fresh[:max_research]` took the first six of a list built in the
+#: order insider -> conjunctions -> drift -> hunt, so allocation was by
+#: LIST POSITION. The arm that emits most candidates wins the budget,
+#: and conjunctions emit across fifteen catalyst types.
+#:
+#: So the most expensive arm per call took nearly half the calls and
+#: well over half the money for a lifetime record of zero tradeable
+#: views, while the BEST-GRADED arm (drift: 57.1% hit out of sample,
+#: 8.8% max drawdown, against insider's 49.3% and 41.2%) got 13 calls
+#: and the hunt got none.
+#:
+#: Ordered by what is measured, not by what is hoped:
+#:   1. earnings_drift - the best-graded arm on the bake-off
+#:   2. hunt           - Claude's own reasoning; tiny volume, so it can
+#:                       never crowd anything out, and it is the half of
+#:                       discovery the owner most asked for
+#:   3. screen         - insider clusters: graded worse, but the only
+#:                       arm that has ever produced a directional view
+#:   4. conjunction    - 0 for 89, and never backtested at all
+ARM_ROTATION = ("earnings_drift", "hunt", "screen", "conjunction")
+
+#: PAID research calls an arm must have had before a record of zero
+#: directional views counts as evidence rather than bad luck.
+#:
+#: DEFENDED, because the brief requires the minimum to be stated and
+#: defended. The insider arm's measured conversion is 23 directional
+#: views in 189 paid calls, 12.2%. An arm converting at that rate would
+#: show no view at all in 40 calls with probability 0.878^40, about 0.6%
+#: - so 40 calls with nothing is a real difference at better than the
+#: 99% level, and below 40 it is not yet distinguishable from a quiet
+#: run. The hunt sits at 2 calls and is therefore NOT demoted, which is
+#: the intended behaviour: it is new, not proven bad.
+ARM_PROBE_MIN_CALLS = 40
+
+#: An arm on probation gets a slot one round in this many, rather than
+#: none. It keeps being measured, which is the only thing that can
+#: return it to a full share, and it stops funding an arm that has never
+#: produced a tradeable view out of a budget that is fully committed.
+ARM_PROBE_EVERY = 4
+
+
+def arm_conversion(conn) -> dict:
+    """(paid research calls, directional views) per arm, lifetime.
+
+    The only question asked here is whether an arm has ever turned money
+    into a view a risk engine could act on. It is a closed, counted
+    outcome - not a projection and not the model's own confidence - and
+    it is the fact nobody could see while conjunctions and insider
+    clusters shared the origin 'screen'.
+
+    Never raises: allocation must survive a database that predates the
+    origin stamp, and it does so by demoting nothing.
+    """
+    out: dict = {}
+    try:
+        for row in conn.execute(
+                "SELECT o.origin, COUNT(*) FROM research_calls r "
+                "JOIN candidate_origin o ON o.candidate_id = r.candidate_id "
+                "WHERE r.skipped_reason IS NULL GROUP BY o.origin"):
+            out[row[0]] = [int(row[1]), 0]
+        for row in conn.execute(
+                "SELECT o.origin, COUNT(*) FROM research_views v "
+                "JOIN candidate_origin o ON o.candidate_id = v.candidate_id "
+                "WHERE v.direction IN ('long','short') GROUP BY o.origin"):
+            out.setdefault(row[0], [0, 0])[1] = int(row[1])
+    except sqlite3.Error:
+        return {}
+    return {k: (v[0], v[1]) for k, v in out.items()}
+
+
+def demoted_arms(conversion: dict) -> set:
+    """Arms whose own record says they have never produced a view, on a
+    sample large enough to mean it. Recomputed every cycle from
+    arm_conversion, so an arm returns to a full share on the cycle after
+    it finally produces one - the demotion is a reading of the record,
+    never a stored flag that could outlive the evidence."""
+    return {arm for arm, (calls, views) in (conversion or {}).items()
+            if views == 0 and calls >= ARM_PROBE_MIN_CALLS}
+
+
+def _arm_of(conn, candidate_ids) -> dict:
+    """Each candidate's origin arm, from the side table the builders
+    stamp before research. Never raises: a missing origin must not cost
+    a research slot, it just sorts with the unknowns."""
+    if not candidate_ids:
+        return {}
+    try:
+        marks = ",".join("?" * len(list(candidate_ids)))
+        rows = conn.execute(
+            f"SELECT candidate_id, origin FROM candidate_origin "
+            f"WHERE candidate_id IN ({marks})", list(candidate_ids)).fetchall()
+        return {r[0]: r[1] for r in rows}
+    except sqlite3.Error:
+        return {}
+
+
+def interleave_by_arm(candidates, origins: dict,
+                      rotation=ARM_ROTATION, demoted=()) -> list:
+    """Round-robin the candidates across their arms.
+
+    ONE PER ARM PER ROUND, so the arm that emits most candidates can no
+    longer take the whole cycle. With four arms present and six slots
+    the worst-performing arm gets one call instead of three, and the
+    best-graded arm gets one instead of waiting for a quiet cycle.
+
+    CLASSIFIED BY THE RULE, NOT BY ENUMERATION (house rule 7): an arm
+    that is not named in `rotation` is not dropped and is not promoted -
+    it rotates after the named ones, in a stable order. A source added
+    later therefore inherits a share of the budget automatically instead
+    of either starving or silently jumping the queue, which is exactly
+    how conjunctions came to take half the calls.
+
+    An arm in `demoted` takes a turn one round in ARM_PROBE_EVERY
+    instead of every round - a probe share, not an exclusion, so it
+    keeps generating the evidence that would restore it. Nothing is ever
+    discarded: a demoted arm's candidates still appear, just later, so
+    on a quiet cycle it is researched exactly as before.
+
+    Order within an arm is preserved, so whatever the builder thought
+    was its best candidate is still that arm's first call.
+    """
+    buckets: dict = {}
+    for c in candidates:
+        buckets.setdefault(origins.get(c.id) or "", []).append(c)
+    named = [a for a in rotation if a in buckets]
+    rest = sorted(a for a in buckets if a not in rotation)
+    order = named + rest
+    demoted = set(demoted)
+    out: list = []
+    rnd = 0
+    while len(out) < len(candidates):
+        progressed = False
+        for arm in order:
+            if arm in demoted and rnd % ARM_PROBE_EVERY:
+                continue
+            if buckets[arm]:
+                out.append(buckets[arm].pop(0))
+                progressed = True
+        # A ROUND THAT PLACED NOTHING IS NOT THE END. When only demoted
+        # arms have candidates left, three rounds in four place nothing
+        # and returning here would silently drop them - the one thing
+        # this function must never do. Only an empty board ends it.
+        if not progressed and not any(buckets.values()):
+            break
+        rnd += 1
+    return out
+
 # Broker statuses that mean "this order will never fill". An entry in
 # one of these with nothing filled bought nothing, so it opens nothing.
 _TERMINAL_UNFILLED = {"canceled", "expired", "done_for_day", "rejected",
@@ -929,6 +1091,32 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
     conn.commit()
     report.drop_reasons["screened"] = screen_reasons
     report.funnel["screened"] = len(fresh)
+
+    # WHOSE TURN IT IS, rather than who happened to be built first.
+    # Everything below this line is unchanged; only the ORDER of `fresh`
+    # differs, and with it which candidates fall past `max_research`.
+    # See ARM_ROTATION for the measurements that made this necessary.
+    arms = _arm_of(conn, [c.id for c in fresh])
+    conversion = arm_conversion(conn)
+    probation = demoted_arms(conversion)
+    fresh = interleave_by_arm(fresh, arms, demoted=probation)
+    if fresh:
+        _log.info(
+            "Research order across %d candidate(s), one per arm per "
+            "round: %s. First %d get a call this cycle.%s",
+            len(fresh),
+            ", ".join(f"{c.ticker}({arms.get(c.id) or 'unstamped'})"
+                      for c in fresh[:max_research + 2]),
+            max_research,
+            # NOT A FAULT, AND IT MUST NOT READ AS ONE. An arm on a
+            # probe share is routine attrition with a number behind it.
+            (" On a probe share (no directional view yet in "
+             f"{ARM_PROBE_MIN_CALLS}+ paid calls): "
+             + ", ".join(
+                 f"{a} {conversion.get(a, (0, 0))[1]} view(s) in "
+                 f"{conversion.get(a, (0, 0))[0]} call(s)"
+                 for a in sorted(probation)))
+            if probation else "")
 
     cluster_keys = cluster_fn(fresh, list(portfolio.open_positions))
 

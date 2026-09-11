@@ -1238,6 +1238,22 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
             # One candidate per COMPANY per pass. See merge_with_form4.
             out, duplicates = merge_with_form4(out, extra)
             dropped.extend(duplicates)
+            # STAMPED AS ITS OWN ARM, not as "screen".
+            #
+            # The blanket `_record_origin(kept, "screen")` below put
+            # insider clusters and conjunctions in one bucket, so the
+            # record could not answer "what has this arm ever produced?"
+            # - and when it was finally asked, on the owner's
+            # 2026-09-11 window, the answer was 33 of 69 paid research
+            # calls and $9.15 of $15.70 for zero directional views in 89
+            # lifetime calls. An arm that cannot be told apart from a
+            # working one cannot be held to its own record.
+            #
+            # INSERT OR IGNORE means the first stamp wins, so this must
+            # run before the "screen" sweep - which it does.
+            survived = {c.id for c in extra}
+            _record_origin(conn, [c for c in out if c.id in survived],
+                           "conjunction", None, as_of)
             _log.info("Conjunctions: %d candidate(s) from cross-feed "
                       "agreement, %d considered and dropped.",
                       len(extra), len(dropped))
