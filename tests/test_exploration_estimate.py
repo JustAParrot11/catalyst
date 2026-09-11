@@ -174,15 +174,22 @@ class TestTheExtractionTurnIsEstimatedToo:
 
     def test_it_scales_with_the_search_budget(self):
         """A flat constant is exactly what was wrong. The re-read is
-        bigger when there was more to read."""
-        base = boundary.extraction_turn_estimate_cents(
-            prompts.BASE_SEARCHES, on_date=INTRO)
-        conj = boundary.extraction_turn_estimate_cents(
-            prompts.CONJUNCTION_SEARCHES, on_date=INTRO)
-        assert conj > base, (
-            f"extraction estimated at {base}c for {prompts.BASE_SEARCHES} "
-            f"searches and {conj}c for {prompts.CONJUNCTION_SEARCHES} - it "
-            "is not scaling with the context it re-reads")
+        bigger when there was more to read.
+
+        WRITTEN AGAINST EXPLICIT COUNTS, not against BASE_SEARCHES and
+        CONJUNCTION_SEARCHES. Those were two different numbers when this
+        test was written and became the same number on 2026-09-11, when
+        the conjunction arm's privileged allowance was withdrawn on its
+        own record - so the test went red for a strategy decision that
+        has nothing to do with whether the estimate scales. The property
+        under test is the scaling, and it is stated here directly."""
+        few, many = 3, 10
+        base = boundary.extraction_turn_estimate_cents(few, on_date=INTRO)
+        more = boundary.extraction_turn_estimate_cents(many, on_date=INTRO)
+        assert more > base, (
+            f"extraction estimated at {base}c for {few} searches and "
+            f"{more}c for {many} - it is not scaling with the context it "
+            "re-reads")
 
     def test_it_charges_no_searches(self):
         """The forced turn offers only the schema tool, so it cannot

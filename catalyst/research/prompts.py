@@ -395,6 +395,50 @@ def render_research_prompt(candidate: Candidate,
         "says so and say why; do not refuse to be safe.\n"
         "- Thin, stale or genuinely consumed evidence still means "
         "no_trade, and a no_trade you can justify is a good answer.\n"
+        # WHAT A REAL EDGE LOOKS LIKE ON THIS SCALE, AND WHOSE JOB THE
+        # THRESHOLD IS.
+        #
+        # OWNER'S 2026-09-11 WINDOW, and the measurement that made this
+        # necessary. Across all 293 research views on record:
+        #
+        #   268 no_trade   conviction median 0.68, 97 of them >= 0.80,
+        #                  max 0.85
+        #    25 directional     every single one between 0.30 and 0.62
+        #
+        # The two numbers are not the same quantity. A directional
+        # conviction is a frequency over market outcomes, where being
+        # right 57% of the time is a career; a no_trade conviction is
+        # self-certainty about an abstention, which is nearly free to
+        # feel strongly about. Sharing one name and one column, the
+        # scale reads as though declining were the confident answer and
+        # committing the weak one - so an honest 0.56 long looks like a
+        # shrug next to a 0.85 no_trade, and 91.5% of calls went the
+        # comfortable way.
+        #
+        # THE FLOOR IS STILL NOT NAMED, and must not be: telling the
+        # model the bar teaches it to clear the bar. What is said here
+        # is the project's own measured evidence for what the scale
+        # means in this domain, plus the true fact that the threshold
+        # decision is not the model's to make. Nothing here asks for a
+        # higher number - it asks for the honest one, and removes the
+        # reason to retreat from it.
+        "- WHAT A REAL EDGE LOOKS LIKE HERE, because the scale is easy "
+        "to misread in the abstract. Measured out of sample on this "
+        "system's own backtest, the better-graded arm resolved its way "
+        "57% of the time and the other managed 49%. Those are the only "
+        "edges this project has ever actually demonstrated. A "
+        "days-to-weeks equity direction is a hard problem, and a "
+        "modest-looking frequency on it is not the same thing as no "
+        "opinion - read your own number against what is achievable "
+        "here, not against what certainty would feel like.\n"
+        "- WHETHER A NUMBER IS BIG ENOUGH IS NOT YOUR DECISION. A "
+        "deterministic threshold you cannot see reads your conviction "
+        "and decides whether anything happens; code also decides the "
+        "size and the stop. Your job is the honest frequency and the "
+        "reasoning behind it. Do not convert a real but modest edge "
+        "into no_trade because the number looks unimpressive - that "
+        "discards the judgement and the measurement at once. Give the "
+        "direction and the number, and let the threshold do its job.\n"
         # THE ACCOUNT CANNOT SHORT, AND HALF THE DIRECTIONAL VIEWS WERE
         # SHORTS. Owner's 2026-09-11 bundle: of four directional views
         # in a week, two were shorts (CASY 0.58, COO 0.60) that the risk
@@ -434,17 +478,30 @@ def render_research_prompt(candidate: Candidate,
 #: question is narrow and more searching does not sharpen it.
 BASE_SEARCHES = 3
 #: Searches for a CONJUNCTION - two or more independent feeds agreeing.
-#: The question is genuinely open ("do these connect?") and the answer
-#: lives in reporting the feeds do not carry, so this is the one place
-#: where more searching plausibly changes the answer.
 #:
-#: THE ARITHMETIC, because the budget is small and near-fixed. Measured
-#: live 2026-08-11: 48 cross-feed conjunctions in three weeks, capped at
-#: 12 candidates a pass. At the extra 7 searches below that is $0.07 a
-#: candidate, so even 30 conjunctions a month is ~$2.10 of search on top
-#: of tokens. The free structured feeds do the filtering; the paid model
-#: pass only fires where two unrelated sources already agree.
-CONJUNCTION_SEARCHES = 10
+#: WAS 10, AND THE ARM SPENT IT WITHOUT EVER PRODUCING A VIEW.
+#:
+#: The reasoning for 10 was that the question is genuinely open ("do
+#: these connect?") and the answer lives in reporting the feeds do not
+#: carry, so this was the one place where more searching plausibly
+#: changed the answer. It was a good argument. It has now been tested,
+#: and the measurement disagrees.
+#:
+#: OWNER'S 7-DAY WINDOW, 2026-09-11: conjunctions took 33 of 69 paid
+#: research calls and $9.15 of $15.70 - $0.277 a call against $0.178
+#: for insider clusters and $0.189 for drift, the gap being these
+#: searches and the results arriving as input tokens. Lifetime record
+#: across 89 calls at the larger allowance: ZERO directional views.
+#:
+#: Zero for 89 is not a small sample for this question. If the arm
+#: converted at the insider arm's measured rate (23 of 189, 12.2%), the
+#: chance of seeing no view at all in 89 calls is about 1 in 80,000. So
+#: the extra seven searches are not the missing ingredient, and the
+#: docstring under searches_for already states the rule this violates:
+#: evidence buys budget, never hope. The arm keeps its slot in the
+#: rotation and can earn the larger allowance back by producing a view
+#: at the same price as everything else.
+CONJUNCTION_SEARCHES = BASE_SEARCHES
 
 
 def searches_for(candidate=None, signals=None) -> int:
