@@ -2440,6 +2440,9 @@ class OriginSplit:
     recent_q: QueryResult | None = None
     n_hunted: int = 0
     n_screened: int = 0
+    #: origin -> (paid research calls, cents spent). Paid only.
+    spend: dict = field(default_factory=dict)
+    spend_q: QueryResult | None = None
 
 
 @dataclass
@@ -2485,6 +2488,17 @@ class TradeStory:
     #: limit the risk engine checked, and the one that decided the size.
     limits: list = field(default_factory=list)
     equity_at_entry: str = ""
+    #: THE EVIDENCE ITSELF, not a summary of it.
+    #: [(source, source_id, when, headline, publisher, url)] - one per
+    #: raw event the candidate was built from. Owner-asked 2026-09-11:
+    #: "link the different articles from the news". The card quoted
+    #: Claude's reading of the evidence and never the evidence, so there
+    #: was no way to check the reasoning against what it actually read.
+    sources: list = field(default_factory=list)
+    #: Web searches the research call actually billed, with the queries
+    #: it chose. What the model went looking for is part of why it
+    #: concluded what it did.
+    searches: list = field(default_factory=list)
 
 
 @dataclass
@@ -2493,6 +2507,151 @@ class Trades:
     positions_q: QueryResult | None = None
     n_open: int = 0
     n_closed: int = 0
+
+
+#: Where a filing can be read, by EDGAR accession number. Built rather
+#: than stored: the accession is in the payload and the URL shape is
+#: stable, so deriving it cannot go stale the way a cached link can.
+EDGAR_FILING_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{acc}.txt"
+
+
+def _source_link(source: str, payload: dict) -> str:
+    """A URL a person can open, or "" if this source has none.
+
+    News carries its own url. EDGAR carries an accession number, from
+    which the archive path is derived. Anything else contributes no
+    link, and the row still shows what the source said.
+    """
+    url = str(payload.get("url") or "").strip()
+    if url.startswith(("http://", "https://")):
+        return url
+    acc = str(payload.get("accession") or payload.get("accession_no")
+              or payload.get("accessionNumber") or "").strip()
+    cik = str(payload.get("cik") or payload.get("issuer_cik") or "").strip()
+    if acc and cik:
+        return EDGAR_FILING_URL.format(cik=cik.lstrip("0") or cik,
+                                       acc=acc.replace("-", ""))
+    return ""
+
+
+def _describe_source(payload: dict) -> str:
+    """What this source SAID, in a line a person can read.
+
+    A source_id is not a description. Rendering "f4-001" told the reader
+    nothing, when the same payload already held "the CEO bought 141,000
+    shares at $70.96" - which is the entire reason the candidate exists.
+
+    Classified by the SHAPE OF THE PAYLOAD rather than by a list of
+    source names (house rule 7), so a feed added later that carries a
+    headline, or a parsed Form 4, is described without this function
+    being edited.
+    """
+    for key in ("headline", "title", "matched_phrase"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    parsed = payload.get("parsed")
+    if isinstance(parsed, dict):
+        owners = parsed.get("owners") or []
+        who = ""
+        if owners and isinstance(owners[0], dict):
+            name = str(owners[0].get("name") or "").strip()
+            role = str(owners[0].get("officer_title")
+                       or owners[0].get("role") or "").strip()
+            who = name + (f" ({role})" if name and role else role)
+        # Open-market PURCHASES only: code "P" acquiring. A sale in the
+        # same filing is a different fact and must not be described as a
+        # buy.
+        bought = shares = None
+        for t in parsed.get("transactions") or ():
+            if not isinstance(t, dict):
+                continue
+            if str(t.get("code") or "") == "P" and \
+                    str(t.get("acquired_disposed") or "") == "A":
+                try:
+                    n = Decimal(str(t.get("shares")))
+                    px = Decimal(str(t.get("price_per_share")))
+                except (ArithmeticError, TypeError, ValueError):
+                    continue
+                shares = (shares or Decimal(0)) + n
+                bought = px
+        if who and shares and bought:
+            return (f"{who} bought {shares:,.0f} shares at "
+                    f"${bought:,.2f}")
+        if who:
+            return f"Form 4 filed by {who}"
+        issuer = str(parsed.get("issuer_name") or "").strip()
+        if issuer:
+            return f"Form 4 for {issuer}"
+    return ""
+
+
+def _candidate_sources(db: Db, candidate_id: str) -> list:
+    """(source, source_id, when, headline, publisher, url) per raw event.
+
+    Ordered newest first, because the most recent piece of evidence is
+    usually the one that made the candidate.
+    """
+    try:
+        crow = db.q("SELECT source_event_ids FROM candidates WHERE id = ?",
+                    (candidate_id,))
+        if not crow.rows:
+            return []
+        ids = jload(crow.rows[0]["source_event_ids"], []) or []
+        if not ids:
+            return []
+        marks = ",".join("?" * len(ids))
+        rows = db.q(
+            "SELECT source, source_id, fetched_at, payload_raw FROM "
+            f"raw_events WHERE source_id IN ({marks}) ORDER BY fetched_at DESC",
+            tuple(str(i) for i in ids)).rows
+    except Exception:            # noqa: BLE001 - provenance is not worth a page
+        return []
+    out = []
+    for row in rows:
+        r = dict(row)
+        payload = jload(r.get("payload_raw"), {}) or {}
+        if not isinstance(payload, dict):
+            payload = {}
+        out.append((
+            str(r.get("source") or ""),
+            str(r.get("source_id") or ""),
+            str(r.get("fetched_at") or "")[:10],
+            _describe_source(payload),
+            str(payload.get("source") or payload.get("publisher") or ""),
+            _source_link(str(r.get("source") or ""), payload),
+        ))
+    return out
+
+
+def _candidate_searches(db: Db, candidate_id: str) -> list:
+    """The web searches the research call actually billed, and for what.
+
+    Read from the turns already stored verbatim. What the model went
+    looking for is part of why it concluded what it did, and it was
+    recorded from the start without ever being shown.
+    """
+    try:
+        rows = db.q(
+            "SELECT t.raw_response FROM research_call_turns t "
+            "JOIN research_calls c ON c.id = t.call_id "
+            "WHERE c.candidate_id = ? ORDER BY t.turn_index",
+            (candidate_id,)).rows
+    except Exception:            # noqa: BLE001
+        return []
+    found: list = []
+    for row in rows:
+        blocks = (jload(dict(row).get("raw_response"), {}) or {})
+        if not isinstance(blocks, dict):
+            continue
+        for block in blocks.get("content") or ():
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "server_tool_use":
+                q = str((block.get("input") or {}).get("query") or "").strip()
+                if q and q not in found:
+                    found.append(q)
+    return found
 
 
 def trades(db: Db, position_id: str | None = None) -> Trades:
@@ -2540,6 +2699,23 @@ def trades(db: Db, position_id: str | None = None) -> Trades:
                 st.candidate_id = str(r.get("decision_id") or "")
                 st.catalyst_type = str(r.get("catalyst_type") or "")
                 st.catalyst_date = str(r.get("catalyst_date") or "")
+
+        # THE EVIDENCE THE CANDIDATE WAS BUILT FROM, with its links.
+        #
+        # OWNER-ASKED 2026-09-11: "link the different articles from the
+        # news". The card carried Claude's reading of the evidence and
+        # never the evidence, so a reader could not check the reasoning
+        # against what was actually published. The rows already exist -
+        # the decision page has read them since August - they had just
+        # never reached the trade card.
+        #
+        # Never raises and never invents: a payload that will not parse
+        # contributes a row with an empty headline rather than dropping
+        # the source, because "we read something here and cannot show it"
+        # and "there was nothing here" are different facts.
+        if st.candidate_id:
+            st.sources = _candidate_sources(db, st.candidate_id)
+            st.searches = _candidate_searches(db, st.candidate_id)
 
         if st.candidate_id:
             v = db.q("SELECT * FROM research_views WHERE candidate_id = ?",
@@ -2692,6 +2868,29 @@ def origin_split(db: Db) -> OriginSplit:
             d.n_hunted = int(r.get("candidates") or 0)
         elif r.get("origin") == "screen":
             d.n_screened = int(r.get("candidates") or 0)
+
+    # WHAT EACH ARM COST, beside what it produced.
+    #
+    # OWNER-ASKED 2026-09-11: "is it mainly looking at insider trades or
+    # can we get it to do even more agentic research". The panel could
+    # show how far each arm's candidates got and not what any of it
+    # cost, so "which arm is worth the money" was unanswerable on the
+    # page that exists to answer it.
+    #
+    # Only PAID calls count: a row the governor skipped, or one deferred
+    # past the per-cycle belt, spent nothing and must not be charged to
+    # the arm.
+    d.spend_q = db.q(
+        "SELECT o.origin, COUNT(*) AS calls, "
+        "       SUM(CAST(c.cost_cents AS REAL)) AS cents "
+        "FROM research_calls c "
+        "JOIN candidate_origin o ON o.candidate_id = c.candidate_id "
+        "WHERE c.skipped_reason IS NULL "
+        "GROUP BY o.origin ORDER BY o.origin")
+    for row in d.spend_q.rows:
+        r = dict(row)
+        d.spend[str(r.get("origin") or "")] = (
+            int(r.get("calls") or 0), float(r.get("cents") or 0.0))
 
     d.recent_q = db.q(
         "SELECT o.nominated_at, c.ticker, c.catalyst_type, c.catalyst_date, "

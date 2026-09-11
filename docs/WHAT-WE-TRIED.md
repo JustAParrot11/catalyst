@@ -226,6 +226,8 @@ owner's time on a fix that was never applied or a test that never ran.
 | **Sabotage that is a syntax error** | proves the file is broken, not that the test catches the behaviour | verify the sabotaged build still imports |
 | **Reporting a fix that never landed on `main`** | six commits of green work sat on a branch while the owner ran the upgrade and saw no change | `git log --oneline origin/main -1` and an empty `git log origin/main..HEAD` |
 | **Believing a month-to-date number is a run rate** | see §5 | divide by *active* days |
+| **A vacuously true assertion** | `nums == sorted(nums)` and `nums == range(1, len+1)` are BOTH true for an empty list, so removing the numbering entirely passed the test that existed to check it | assert the collection is non-empty *before* asserting anything about its contents |
+| **A hand-numbered sequence across conditional sections** | headings hard-coded "6." while the orders section only renders when orders exist, so a card showed 1,2,3,4,5,7 | number at render time from a counter |
 
 ---
 
@@ -390,6 +392,58 @@ is not a distinction a reader can rely on. The outcome is carried by the
 dot's **position** against the entry rule, by its own price label, and by
 the sentence above the chart. A test asserts the exit dot does not change
 colour with the outcome.
+
+### The 09-11 second pass, same day
+
+Owner, on the rebuilt card: *"more detail, link the different articles
+from the news, i feel we're heavily looking at insider trades not just
+claude spotting potential. Edit this page more to be more fluid and read
+in order of process. Also touch on the is it mainly looking at insider
+trades or can we get it to do even more agentic research."*
+
+- **The evidence is linked now.** The card carried the thesis, the
+  invalidation and the priced-in call — all of them Claude's *reading*
+  of the sources — and not one link to a source. The rows existed the
+  whole time: `raw_events.payload_raw` has carried the news `url` since
+  the feed was written, and the decision page has read them since
+  August. A Form 4 is now described from its own payload ("Bern Richard
+  (CEO) bought 141,000 shares at $70.96") rather than by its accession,
+  filings link to the SEC archive, and the web searches Claude chose are
+  listed. Only `http(s)` URLs are accepted and every link carries
+  `rel="noopener noreferrer"` — a payload is upstream data, and the
+  dashboard holds an access code.
+- **Seven numbered steps, in the order the trade happened.** Numbered
+  **at render time from a counter**, not in the heading strings: the
+  first attempt hard-coded them, and the orders section is conditional,
+  so a position with no recorded orders rendered 1, 2, 3, 4, 5, **7**.
+- **The origin panel answers the concentration question with a table.**
+  Candidates, paid calls, spend, cost per call, directional views and
+  orders per arm, then the plain reading: *23 of 25 directional views
+  came from insider clusters — so yes, on the record this is close to a
+  single-arm system.* It also distinguishes an arm that spent 40+ calls
+  producing nothing from one that is merely new.
+
+### TRIED AND REJECTED the same day: halving the hunt divisor
+
+To answer "can we get it to do even more agentic research", I halved
+`hunts_per_day`'s divisor to take the hunt from 2/day to 4/day at the
+$100 cap. **A test caught it and it was reverted.**
+
+That `2x` is not a rate dial — it is the **reserve for researching what
+a hunt finds**, which is what "a hunt plus the candidates it produces"
+means. At `1x` a $20/month cap returns one hunt a day costing 60c of a
+67c daily allowance, leaving nothing to judge the nominations with:
+exactly the failure the function's own docstring warns about. Halving it
+did not buy more discovery, it bought nominations nobody could afford to
+research.
+
+**So the hunt rate is not the lever.** The honest answer is arithmetic:
+at $100 the budget supports two hunts a day *and* researching what they
+find; more agentic discovery costs more money and the cap is the dial.
+What actually moved on that date was **where research slots go** — the
+conjunction arm's 48% share went to the arms that convert, the hunt
+among them. And the hunt is self-limiting either way: no directional
+view in 40+ paid calls demotes it to a probe share like any other arm.
 
 **The lesson that generalises, and it has now cost four reports:** a
 number being present is not the same as a question being answered. When

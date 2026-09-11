@@ -557,7 +557,7 @@ class TestEachTradeFoldsShut:
         html = _page(_seed_two(tmp_path))
         for phrase in (THESIS[:50], INVALIDATION[:30],
                        "Claude never chooses the amount",
-                       "Orders sent"):
+                       "The orders actually sent"):
             assert phrase in html
 
 
@@ -841,9 +841,27 @@ class TestIconsHelpAndNeverCarryMeaningAlone:
 
     def test_the_headings_still_read_without_them(self, tmp_path):
         html = _page(_seed(tmp_path))
-        for word in ("Why EMBC", "Claude&#x27;s view", "Size and stop",
-                     "Protection", "Orders sent"):
+        # THE HEADINGS ARE NUMBERED NOW. Owner-asked 2026-09-11: "Edit
+        # this page more to be more fluid and read in order of process."
+        # The words still have to survive without their icon, which is
+        # what this test is for; only the wording moved.
+        for word in ("1. How EMBC was found", "2. The evidence it read",
+                     "3. What Claude concluded",
+                     "4. What the code then decided",
+                     "5. How the position was protected",
+                     "6. The orders actually sent",
+                     "7. Re-reads, and what happens next"):
             assert word in html, f"a heading lost its words: {word}"
+
+    def test_the_headings_run_in_process_order(self, tmp_path):
+        """A page that reads in the order the trade happened. The steps
+        used to run found -> concluded -> sized with the evidence that
+        started it all missing entirely."""
+        html = _page(_seed(tmp_path))
+        seen = [int(m) for m in re.findall(r"<h4>.*?(\d)\. ", html)]
+        assert seen == sorted(seen), f"the steps are out of order: {seen}"
+        assert seen == list(range(1, len(seen) + 1)), (
+            f"a step number is missing or repeated: {seen}")
 
 
 class TestTheHoldProgressBar:

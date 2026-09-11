@@ -237,7 +237,40 @@ def hunts_per_day(owner_monthly_cap_cents=None) -> int:
     # budget to judge them. A hunt is the one source that can widen
     # supply, and the budget cap, not this divisor, is what stops it
     # (owner-set: "i dont really need any hard limit except a hard stop
-    # to stop bot using all the budget"). Two a day at $100.
+    # to stop bot using all the budget").
+    #
+    # TRIED AND REJECTED 2026-09-11: halving this to 1x, to take the
+    # hunt to four a day.
+    #
+    # OWNER-ASKED: "i feel we're heavily looking at insider trades not
+    # just claude spotting potential... can we get it to do even more
+    # agentic research to find very lucrative trades". The feeling is
+    # correct and the record is blunt: ALL 23 directional views this
+    # system has ever produced came from insider clusters, and the hunt
+    # has had TWO paid research calls in its life.
+    #
+    # SO I HALVED THE DIVISOR, AND A TEST CAUGHT IT. This 2x is not a
+    # rate dial - it is the RESERVE FOR RESEARCHING WHAT A HUNT FINDS,
+    # which is what the line above it means by "a hunt plus the
+    # candidates it produces". At 1x, a $20/month cap returns one hunt a
+    # day costing 60c of a 67c daily allowance, leaving nothing to judge
+    # the nominations with - the exact failure the docstring warns
+    # about. Halving it did not buy more discovery, it bought
+    # nominations nobody could afford to research.
+    #
+    # SO THE HUNT RATE IS NOT THE LEVER, and the honest answer to the
+    # owner's question is arithmetic rather than a constant: at $100 the
+    # budget supports two hunts a day AND researching what they find;
+    # more agentic discovery costs more money, and the cap is the dial.
+    # What DID change on the same day is where research slots go - the
+    # conjunction arm was taking 48% of paid calls at the highest price
+    # each for zero directional views, and the rotation plus its probe
+    # share moved that to the arms that convert, the hunt among them.
+    #
+    # AND THE HUNT IS ALREADY SELF-LIMITING either way: the same rule
+    # that demoted conjunctions applies to every arm, so no directional
+    # view in 40+ paid calls drops the hunt to a probe share too,
+    # recomputed from the record every cycle.
     need = HUNT_ESTIMATE_CENTS * 2
     return min(4, int(per_day // need))
 
