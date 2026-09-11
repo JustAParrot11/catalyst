@@ -308,6 +308,108 @@ floor can only start mattering again by being *raised* above 0.50 on
 scored evidence. Treat a zero count of `below conviction floor` as the
 expected reading, not as good news.
 
+### Where the research budget goes, measured 2026-09-11
+
+The owner asked for more trades. The funnel says the budget was being
+spent on arms that have never produced one. Per arm, from the 7-day
+window joined to the pricing bundle:
+
+| arm | paid calls | spend | $/call | directional views, lifetime |
+|---|---|---|---|---|
+| conjunction | 33 (48%) | $9.15 (58%) | $0.277 | **0 of 89** |
+| insider (`screen`) | 23 (33%) | $4.10 | $0.178 | 23 of 189 |
+| earnings_drift | 13 (19%) | $2.45 | $0.189 | 0 of 13 (2 shorts) |
+| hunt | 0 | — | — | 0 of 2 |
+
+**There was no judgement behind that split.** `fresh[:max_research]`
+took the first six of a list built insider → conjunctions → drift →
+hunt, so allocation was by **list position**, and conjunctions emit
+across fifteen catalyst types. The most prolific builder wins the
+budget. So the dearest arm per call took nearly half the calls for a
+lifetime record of zero tradeable views, while the best-graded arm got
+thirteen and the hunt got none.
+
+- **Research slots rotate across arms**, one per arm per round, ordered
+  `earnings_drift → hunt → screen → conjunction`. Nothing is discarded:
+  a candidate pushed past the belt returns next cycle exactly as before.
+- **An arm with no directional view in 40+ paid calls gets a probe
+  share** — one round in four, never zero, so it keeps generating the
+  evidence that would restore it. 40 is the stated minimum: at the
+  insider arm's measured 12.2% conversion, zero views in 40 calls has
+  probability 0.878⁴⁰ ≈ 0.6%. The hunt at 2 calls is **not** demoted;
+  it is new, not proven bad. The demotion is a reading of the record
+  every cycle, never a stored flag.
+- **`CONJUNCTION_SEARCHES` 10 → 3**, the base allowance. The extra
+  seven were justified by "the answer lives in reporting the feeds do
+  not carry". After 89 calls at the larger allowance and no view, they
+  are not the missing ingredient, and `searches_for` already states the
+  rule: evidence buys budget, never hope.
+- **Conjunctions are stamped as their own origin.** They shared
+  `screen` with insider clusters, so no arm could be held to its own
+  record — which is why this was never visible before.
+
+**Next decision, gated on evidence:** if conjunctions produce no
+directional view over the next measured window, unwire the arm as
+`etf_rotation` already is.
+
+### The budget is fully committed — corrected 2026-09-11
+
+$21.25 of $100 month-to-date reads like headroom and is not. Four of
+the month's first days were the pause. On the four days the bot was
+actually active it spent **$13.98, or $3.50/day, against the $3.33/day
+the $100 cap sustains** — 105% of the rate, projecting to $105/month.
+
+So raising `research_per_cycle` was considered and **rejected**: it
+would front-load the month and then go dark, which is the exact failure
+`DAILY_BURST_DAYS` exists to prevent, and it would make the live record
+incomparable to a backtest that trades every day. The 137 deferrals in
+the window are the belt spreading a day's affordable calls across
+cycles, which is its job.
+
+**The consequence is what matters: there is no spare money to grow
+into.** Every call on an arm that does not convert displaces one that
+might, so allocation and cost per call are the only levers left. Both
+were pulled above; the same $15.70 buys roughly 88 calls at the insider
+price instead of 69 at the old blend.
+
+### Conviction was two scales sharing one column
+
+Measured across all 293 research views:
+
+- **268 no_trade** — conviction median 0.68, 97 of them at 0.80 or
+  above, max 0.85.
+- **25 directional, ever** — every single one between 0.30 and 0.62.
+
+The tool asked for one field and said that on a `no_trade` it is "your
+confidence that NOT trading is correct, **judged the same way**". It is
+not the same way. A directional conviction is a frequency over market
+outcomes, where 57% out of sample is the best this project has ever
+measured. A `no_trade` conviction is self-certainty about an
+abstention, which is nearly free to feel strongly about. Sharing a name
+and a column, the scale read as though declining were the confident
+answer and committing the weak one — so an honest 0.56 long looked
+like a shrug beside a 0.85 `no_trade`, and **91.5% of every paid call
+went the comfortable way.**
+
+This is the 2026-08-17 defect surviving in the other branch: that date
+defined the directional scale as a frequency and said nothing about
+what the number means when there is no direction to be a frequency of.
+
+- **The tool says the two are different quantities and not
+  comparable**, that being sure there is nothing here is cheap, and not
+  to reach for `no_trade` because it is the branch where you can score
+  highly. It still forbids inflation in the other direction.
+- **The prompt anchors the scale on this project's own out-of-sample
+  hit rates** (57% and 49%) and says plainly that whether a number is
+  big enough is computed downstream by code the model cannot see.
+- **The record labels each remembered number** as a directional
+  frequency or a confidence in declining. Once refusals start scoring
+  it would otherwise have shown the model a track record in which
+  declining always scored higher than committing.
+
+**The floor is still never named**, and the test that holds that still
+stands. Calibration evidence is allowed; the bar is not.
+
 ---
 
 ## What is not proven
@@ -333,6 +435,18 @@ how a bot ends up looking finished while doing nothing.
   shown a record improves the next call is itself unmeasured.
 - **The conviction scale is newly defined and uncalibrated.** Whether a
   0.6 call really resolves six in ten is unknown.
+- **Two of the three candidate arms have never produced a tradeable
+  view.** Conjunctions: 0 directional views in 89 paid calls, and never
+  backtested at all. Earnings drift: 0 in 13, and its only two
+  directional views were shorts a cash account cannot take — so the
+  best-GRADED arm has produced nothing this account could act on. Every
+  order the bot has ever considered came from insider clusters, the arm
+  that graded worst out of sample (49.3%, 41.2% max drawdown).
+- **Whether the conviction anchor helps is unmeasured.** Telling the
+  model what 57% means in this domain is meant to stop it retreating
+  from an honest modest edge. It could equally teach it to cluster
+  around the number it was shown. The refusal tracker is what would
+  tell the difference, and it has scored nothing yet.
 - **The main feedback loop has produced no evidence yet.** 291 refusals
   on record and essentially none scored as of 2026-09-11. Since the
   brief calls the refusal tracker "the single most important feedback
