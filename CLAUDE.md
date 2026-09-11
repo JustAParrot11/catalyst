@@ -9,6 +9,14 @@ Where this file and the brief disagree, **this file is what the code
 does**; the brief is the goal it was built toward.
 Facts that cost real money to learn: @docs/TRAPS.md — read before
 writing any cost tracking, data feed, or broker code.
+**What has already been tried: @docs/WHAT-WE-TRIED.md** — the project's
+memory. Every blocker found and fixed with its evidence, the strategy
+bake-off results, the per-arm production record, the measurements that
+were wrong, and the failure patterns that keep recurring in this work.
+**Read it before diagnosing why the bot is not trading**, before
+re-tuning a threshold, and before adding an arm or a gate — the reason
+for zero trades has moved fourteen times and eleven of those were
+plumbing, not strategy.
 
 ---
 
@@ -571,6 +579,8 @@ hash** are what move, and `upgrade.sh` prints both.
      watch it go red (house rule 4).
    - the full suite green, offline.
    - the commit message saying what the evidence was.
+   - **a row in @docs/WHAT-WE-TRIED.md** (house rule 8), in the same
+     commit, carrying the measurement rather than the argument.
 
    **Owner-set 2026-08-31**, replacing "changes to risk, execution or
    broker code need human review": *"merge all, change rules so you
@@ -593,3 +603,29 @@ hash** are what move, and `upgrade.sh` prints both.
 7. **Classify by the rule, not by enumeration.** A hand-written list of
    known cases mislabels the first case nobody thought of — three
    separate owner reports came from exactly that.
+8. **Every change that lands appends to @docs/WHAT-WE-TRIED.md.**
+
+   Owner-set 2026-09-11: *"i want a massive sheet so you can reflect
+   back on it and slowly understand actions we've taken and build from
+   it. A doc you can reference so it can help you with your memory"*.
+
+   A session has no memory of the last one, so "I will remember to
+   record this" is the one promise that cannot be kept by intending it.
+   The doc is the memory, and it is only worth anything if it is
+   current. So the row goes in **as part of landing the change**, in the
+   same commit, not afterwards:
+
+   - what was tried, and **what the evidence was** — the measurement,
+     not the reasoning.
+   - what happened. **A thing that did not work is the more valuable
+     row**, because it stops the next session spending money to learn it
+     again.
+   - if it overturns something the doc already claims, mark the old
+     entry `SUPERSEDED` and say by what. Never delete it — losing the
+     fact that we once believed it is how a wrong belief comes back.
+
+   This is also the fourth item on house rule 5's gate. `tests/
+   test_the_memory_doc_survives.py` holds that the doc exists, that this
+   file still references it and that its sections are intact — it
+   **cannot** detect that the doc is stale, which is why this is a rule
+   and not only a test.
