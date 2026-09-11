@@ -26,6 +26,17 @@ from catalyst.storage import init_db
 FLOOR = float(DEFAULT_PARAMS["conviction_floor"])
 RAISED = FLOOR + float(PRICED_IN_CONVICTION_PREMIUM)
 
+#: A score strictly BETWEEN the two bars: it clears the base floor and
+#: misses the priced-in one, whatever the premium happens to be.
+#:
+#: Derived, not written down, and that is the point. This file used to
+#: seed the literal `FLOOR + 0.05` as "a miss against the raised bar" -
+#: true while the premium was 0.15, and silently a CLEAR the day the
+#: premium was measured and set to 0.05 on 2026-09-11. A fixture that
+#: hardcodes one side of a comparison stops testing the comparison the
+#: moment the other side moves.
+BETWEEN_THE_BARS = FLOOR + float(PRICED_IN_CONVICTION_PREMIUM) / 2
+
 
 @pytest.fixture
 def db_path(tmp_path):
@@ -90,13 +101,17 @@ class TestItUsesTheBarEachCandidateActuallyFaced:
     def test_a_priced_in_candidate_is_measured_against_the_RAISED_bar(self, db_path):
         """Scoring above the base floor but below floor+premium is a
         miss, and averaging against the base floor would flatter the
-        model by fifteen points on most of the sample."""
-        seed(db_path, [(FLOOR + 0.05, True, "long")])     # 0.65 vs a 0.75 bar
+        model by the whole premium on most of the sample - `priced_in`
+        was set on 62 of the owner's 65 no_trades."""
+        assert FLOOR < BETWEEN_THE_BARS < RAISED, "fixture sanity"
+        seed(db_path, [(BETWEEN_THE_BARS, True, "long")])
         html = panels.conviction_panel(Db(db_path))
         assert "0 cleared the bar" in html or "<b>0</b> cleared" in html
 
     def test_the_same_score_clears_when_not_priced_in(self, db_path):
-        seed(db_path, [(FLOOR + 0.05, False, "long")])    # 0.65 vs a 0.60 bar
+        """Same number, same panel, opposite verdict. The premium is the
+        only difference between this test and the one above it."""
+        seed(db_path, [(BETWEEN_THE_BARS, False, "long")])
         html = panels.conviction_panel(Db(db_path))
         assert "It is trading" in html
 

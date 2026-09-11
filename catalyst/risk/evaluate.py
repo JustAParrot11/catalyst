@@ -29,15 +29,37 @@ _SHORT_SKIP = "short_unavailable_cash_account"
 #: measured what the priced-in call is worth, which is exactly why it is
 #: no longer allowed to veto outright.
 #:
-#: 0.15 on a 0.60 floor puts the bar at 0.75. Against the owner's live
-#: conviction distribution (min 0.08, median 0.20, max 0.85, n=30) that
-#: admits only the strongest priced-in candidates rather than none of
-#: them. It is deliberately the smallest change that reopens the gate.
+#: 0.15 ON A 0.50 FLOOR IS A 0.65 BAR, AND IT COST THE ONLY TRADE.
 #:
-#: This is the number to move once the refusal tracker can score
-#: priced_in refusals: if they go on to earn nothing, raise it back
-#: toward a veto; if they earn as much as the rest, take it to zero.
-PRICED_IN_CONVICTION_PREMIUM = Decimal("0.15")
+#: OWNER'S 7-DAY LOGIC BUNDLE, 2026-09-11. 69 research calls over four
+#: trading days produced exactly four directional views, and every one
+#: died:
+#:
+#:   CASY   short 0.58            cash account cannot short
+#:   COO    short 0.60            cash account cannot short
+#:   BWFG   long  0.55            spread gate: half-spread 99.2bp vs 20
+#:   UBER   long  0.62 priced_in  needed 0.65  <- THIS ONE
+#:
+#: UBER was a $10.0M open-market buy by the CEO (141,000 shares at
+#: ~$70.96) plus $5.3M by the COO, in a mega-cap where the spread gate
+#: is nowhere near binding. The model wanted it long at 0.62. The
+#: premium asked for 0.65.
+#:
+#: WHY 0.15 WAS TOO MUCH. `priced_in` is set on nearly everything the
+#: model sees - 62 of 65 no_trades and 1 of 2 longs in that window -
+#: because for a filing that is days old and public the honest answer
+#: usually is "partly". But conviction is DEFINED as a frequency: how
+#: often this call would be right. A model that thinks the move is
+#: half consumed already says so by scoring 0.62 instead of 0.80.
+#: Charging a second 0.15 for the same judgement is double-counting it,
+#: and the note here said to move this number once refusals could be
+#: scored - which, with ~0 of 291 refusals scored, means never.
+#:
+#: 0.05 IS NOT ZERO, DELIBERATELY. Priced-in-and-long is a genuinely
+#: worse setup than not-priced-in-and-long, so it keeps a thumb on the
+#: scale: on the live 0.50 floor a priced-in long needs 0.55. UBER at
+#: 0.62 trades; a 0.52 priced-in long still does not.
+PRICED_IN_CONVICTION_PREMIUM = Decimal("0.05")
 
 
 def _hold_days(view: ResearchView, params: dict,
