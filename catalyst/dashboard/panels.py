@@ -4551,9 +4551,33 @@ _STEP_ICON = {
 }
 
 
-def _step(key: str, title: str) -> str:
+def _step(key: str, title: str, n=None) -> str:
+    """One step of the process, headed and optionally numbered.
+
+    NUMBERED AT RENDER TIME, NOT IN THE STRING. The first version of
+    this wrote "6. The orders actually sent" into the literal, and the
+    orders section is CONDITIONAL - a position whose orders were never
+    recorded rendered 1, 2, 3, 4, 5, 7 with a visible hole in it. A
+    hand-written sequence is only correct for the one path the author
+    happened to be looking at (house rule 7 in the small).
+
+    Callers pass a _Steps counter, which hands out the next number only
+    when a section actually renders.
+    """
+    label = f"{n.next()}. {title}" if n is not None else title
     return (f'<h4><span class="step-ico" aria-hidden="true">'
-            f'{_STEP_ICON[key]}</span>{esc(title)}</h4>')
+            f'{_STEP_ICON[key]}</span>{esc(label)}</h4>')
+
+
+class _Steps:
+    """Hands out 1, 2, 3... in the order sections are actually drawn."""
+
+    def __init__(self):
+        self._n = 0
+
+    def next(self) -> int:
+        self._n += 1
+        return self._n
 
 
 def _fold(fid: str, summary: str, body: str, open_: bool = False) -> str:
@@ -4753,6 +4777,85 @@ def _pct_of(part, whole) -> str:
         return f"{p / w * 100:.1f}%"
     except (ArithmeticError, TypeError, ValueError):
         return ""
+
+
+#: How raw_events.source reads to a person. Classified by the rule the
+#: feeds themselves use, so a source added later shows its own name
+#: rather than being silently mislabelled (house rule 7).
+_SOURCE_NAMES = {
+    "alpaca_news": "news",
+    "edgar_form4": "SEC Form 4 (insider purchase)",
+    "edgar_fts": "SEC full-text search",
+    "edgar_xbrl": "SEC XBRL (earnings figures)",
+    "federal_register": "Federal Register",
+    "clinicaltrials": "ClinicalTrials.gov",
+}
+
+
+def _evidence(st, p: str, index: int, steps=None) -> str:
+    """WHAT THE BOT ACTUALLY READ, with links to it.
+
+    OWNER-ASKED 2026-09-11: "more detail, link the different articles
+    from the news".
+
+    The card quoted Claude's READING of the evidence - the thesis, the
+    invalidation, the priced-in call - and never the evidence. So the
+    brief's own test ("someone who was not there can read a single trade
+    and understand why it was made") could be met only on trust: there
+    was no way to check the reasoning against what was published.
+
+    Two lists, because they answer different questions:
+
+      - the raw events the candidate was BUILT from, which is what the
+        mechanical screen saw;
+      - the web searches the research call BILLED, which is what Claude
+        went looking for afterwards.
+
+    Every row is a row already on the record. Where a source carries no
+    link the row still shows what it said, because "we read this and
+    cannot link it" is not the same as "there was nothing".
+    """
+    rows = []
+    for source, sid, when, headline, publisher, url in (st.sources or []):
+        name = _SOURCE_NAMES.get(source, source.replace("_", " ") or "source")
+        what = headline or sid or "(no headline in the payload)"
+        # rel=noopener on every outbound link: the dashboard holds an
+        # access code and must not hand a window handle to a news site.
+        label = (f'<a href="{esc(url)}" target="_blank" '
+                 f'rel="noopener noreferrer">{esc(what)}</a>'
+                 if url else esc(what))
+        extra = " &middot; ".join(x for x in (esc(publisher), esc(when)) if x)
+        rows.append(f"<li><span class=\"src-kind\">{esc(name)}</span> "
+                    f"{label}" + (f' <span class="src-meta">{extra}</span>'
+                                  if extra else "") + "</li>")
+    out = [_step("why", "The evidence it read", steps)]
+    if rows:
+        linked = len([1 for r in (st.sources or []) if r[5]])
+        out.append(f'<ul class="sources">{"".join(rows)}</ul>')
+        out.append(figcap(
+            f"{len(rows)} source(s) this candidate was built from, "
+            f"{linked} with a link that opens. These are the rows the "
+            "screen matched on - not a summary of them."))
+    else:
+        out.append(caveat(
+            "No raw source rows are on record for this candidate. That "
+            "happens when the events aged out of the feed cache before "
+            "the position was opened; the candidate still names them by "
+            "id in the audit trail."))
+    if st.searches:
+        out.append(_fold(
+            f"{p}-t{index}-searches",
+            f"What Claude searched for ({len(st.searches)})",
+            '<ul class="sources">'
+            + "".join(f"<li>&ldquo;{esc(q)}&rdquo;</li>"
+                      for q in st.searches)
+            + "</ul>"
+            + figcap("The queries the model chose itself, billed on this "
+                     "candidate. Web search results are NOT validated by "
+                     "any tool - they can move the direction and the "
+                     "conviction, so a wrong source can cause a wrong "
+                     "trade, though never a wrongly sized one.")))
+    return "".join(out)
 
 
 def _trade_summary(st) -> str:
@@ -5000,10 +5103,26 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
             + figcap("Unrounded, as recorded. The tiles above are rounded "
                      "for reading; these are the figures to check.")))
 
-    # ---- 2. why this company at all. The provenance chips stay on the
-    # card - they are three words and they answer "who chose this" - and
-    # the paragraph behind them folds.
-    out.append(_step("why", f"Why {st.ticker}"))
+    # ======================================================================
+    # THE PROCESS, IN THE ORDER IT HAPPENED.
+    #
+    # OWNER-ASKED 2026-09-11: "Edit this page more to be more fluid and
+    # read in order of process."
+    #
+    # It did not. The card went summary -> numbers -> chart -> why ->
+    # Claude's view -> size, which is roughly the order the code was
+    # written in rather than the order the trade happened in, and the
+    # evidence that started the whole thing was never shown at all.
+    # Five steps now, numbered, each picking up where the last left off:
+    #
+    #   1. how it was found, and WHAT THE EVIDENCE SAID
+    #   2. what Claude went and read about it
+    #   3. what Claude concluded
+    #   4. what deterministic code then decided
+    #   5. what actually happened, and what happens next
+    # ======================================================================
+    steps = _Steps()
+    out.append(_step("why", f"How {st.ticker} was found", steps))
     if st.origin == "hunt":
         who = pill("good", "Claude found it") + (
             f' &ldquo;{esc(st.nomination_why)}&rdquo;'
@@ -5032,6 +5151,9 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
             "than a slow re-rating.</p>",
             label="what this origin means for the edge"))
 
+    # ---- 2. THE EVIDENCE ITSELF, LINKED.
+    out.append(_evidence(st, p, index, steps))
+
     # ---- 3. what Claude concluded, in its own words.
     #
     # THE VERDICT AND THE GAUGE STAY ON THE CARD; THE PROSE FOLDS. The
@@ -5039,7 +5161,7 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
     # summary of a thesis is just another opinion" - and it is also
     # three paragraphs. Visible: what it decided and how sure it was.
     # One click away: why, in its own words.
-    out.append(_step("view", "Claude's view"))
+    out.append(_step("view", "What Claude concluded", steps))
     if not st.thesis:
         out.append(caveat("No research view is on record for this position."))
     else:
@@ -5089,7 +5211,7 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
                          "".join(said)))
 
     # ---- 4. what the code then did with that
-    out.append(_step("size", "Size and stop"))
+    out.append(_step("size", "What the code then decided", steps))
     out.append("<p><b>Claude never chooses the amount.</b></p>")
     out.append(_why_fold(
         f"{p}-t{index}-sizefold",
@@ -5178,7 +5300,7 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
         label="why a modelled cost sits beside the real one"))
 
     # ---- 5. protection, told as a timeline
-    out.append(_step("guard", "Protection"))
+    out.append(_step("guard", "How the position was protected", steps))
     if not st.stop_events:
         out.append(caveat(
             "No stop check has run yet. Checks run every cycle, so this "
@@ -5216,7 +5338,7 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
     # underneath - house rule 3 asks for the raw response BESIDE the
     # answer, not instead of it.
     if st.orders:
-        out.append(_step("orders", "Orders sent"))
+        out.append(_step("orders", "The orders actually sent", steps))
         out.append(
             "<p class='prov'>Rejections included &mdash; hiding one is how "
             "a gap goes unnoticed.</p>")
@@ -5240,7 +5362,7 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
                           "what that meant"], rows))
 
     # ---- 7. re-reads, and what it will do next
-    out.append(_step("next", "Re-reads, and what happens next"))
+    out.append(_step("next", "Re-reads, and what happens next", steps))
     if not st.reviews:
         out.append(
             "<p class='prov'>Nothing re-read yet. Claude re-reads each open "
@@ -5339,6 +5461,97 @@ def trades_panel(db: Db, params: dict | None = None, p: str = "tr") -> str:
                    "".join(out))
 
 
+#: How an origin reads to a person, and in the order a reader wants
+#: them: the graded arms first, then Claude's own, then the ungraded one.
+_ORIGIN_NAMES = {
+    "screen": "Insider clusters (graded)",
+    "earnings_drift": "Earnings drift (graded, best)",
+    "hunt": "Claude's own hunt",
+    "conjunction": "Cross-feed conjunctions (never graded)",
+}
+_ORIGIN_ORDER = ("earnings_drift", "screen", "hunt", "conjunction")
+
+
+def _arm_concentration(d) -> str:
+    """Which arm the money and the results actually came from.
+
+    Answers one question and no other: is this system mainly trading
+    insider clusters? Every figure is counted from rows on the record -
+    candidates, paid research calls, cents, directional views, orders -
+    and where a count is zero it is printed as zero rather than omitted.
+    """
+    if not d.rows:
+        return ""
+    by = {str(o or ""): (c, r, dr, t) for o, c, r, dr, t in d.rows}
+    keys = [k for k in _ORIGIN_ORDER if k in by] + \
+        sorted(k for k in by if k not in _ORIGIN_ORDER)
+    total_dir = sum(by[k][2] for k in keys)
+    total_cents = sum(d.spend.get(k, (0, 0.0))[1] for k in keys)
+    head = ("<tr><th>arm</th><th class=\"num\">candidates</th>"
+            "<th class=\"num\">paid calls</th><th class=\"num\">spent</th>"
+            "<th class=\"num\">per call</th>"
+            "<th class=\"num\">directional views</th>"
+            "<th class=\"num\">orders</th></tr>")
+    body = []
+    for k in keys:
+        cands, _res, directional, traded = by[k]
+        calls, cents = d.spend.get(k, (0, 0.0))
+        body.append(
+            f"<tr><th>{esc(_ORIGIN_NAMES.get(k, k.replace('_', ' ')))}</th>"
+            f'<td class="num">{cands}</td>'
+            f'<td class="num">{calls}</td>'
+            f'<td class="num">${cents / 100:,.2f}</td>'
+            f'<td class="num">'
+            + (f"${cents / 100 / calls:.3f}" if calls else DASH)
+            + f'</td><td class="num">{directional}</td>'
+            f'<td class="num">{traded}</td></tr>')
+    out = [f'<table class="kv arm-table"><thead>{head}</thead>'
+           f'<tbody>{"".join(body)}</tbody></table>']
+
+    # THE PLAIN READING, so the owner does not have to do the division.
+    said = []
+    if total_dir:
+        top = max(keys, key=lambda k: by[k][2])
+        share = by[top][2] / total_dir * 100
+        said.append(
+            f"<b>{by[top][2]} of {total_dir}</b> directional views ever "
+            f"produced came from <b>{esc(_ORIGIN_NAMES.get(top, top))}</b>"
+            + (f" - {share:.0f}% of them. " if share < 100 else
+               ", which is all of them. "))
+        if share >= 90:
+            said.append(
+                "So yes: on the record so far this is close to a "
+                "single-arm system, whatever the other three cost. ")
+    else:
+        said.append("<b>No arm has produced a directional view yet</b>, so "
+                    "there is nothing to concentrate. ")
+    dead = [k for k in keys if d.spend.get(k, (0, 0.0))[0] >= 40
+            and by[k][2] == 0]
+    if dead:
+        names = ", ".join(esc(_ORIGIN_NAMES.get(k, k)) for k in dead)
+        spent = sum(d.spend.get(k, (0, 0.0))[1] for k in dead) / 100
+        said.append(
+            f"<b>{names}</b> has spent <b>${spent:,.2f}</b> across 40+ paid "
+            "calls without once producing a view a risk engine could act "
+            "on, so it is on a probe share - one research slot in four - "
+            "until it does. ")
+    hunt_calls = d.spend.get("hunt", (0, 0.0))[0]
+    if hunt_calls < 40:
+        said.append(
+            f"The hunt has had <b>{hunt_calls}</b> paid research call(s), "
+            "which is far too few to judge it either way - it is new, not "
+            "proven bad, and it is the only arm that can find a reason to "
+            "trade that no screen has a rule for.")
+    out.append(figcap("".join(said)))
+    if total_cents:
+        out.append(figcap(
+            f"${total_cents / 100:,.2f} of research spend in total. Every "
+            "call on an arm that does not convert is a call not spent on "
+            "one that might: the monthly budget is fully committed, so "
+            "this table is a zero-sum split rather than a scoreboard."))
+    return "".join(out)
+
+
 def origin_panel(db: Db, p: str = "origin") -> str:
     """Where candidates came from, and whether the model's own picks
     are any better than the screen's.
@@ -5358,15 +5571,30 @@ def origin_panel(db: Db, p: str = "origin") -> str:
     out: list[str] = []
 
     out.append(note(
-        "<b>Two things now produce candidates.</b> The <b>screen</b> is "
-        "mechanical - Form 4 clusters and cross-feed agreement - and is "
-        "line-for-line the arm that was backtested, so its measured edge "
-        "means something. The <b>hunt</b> is Claude reading the raw feed "
-        "once a day and nominating what the screen has no rule for. Both "
-        "go through the identical research, pricing and risk path; "
-        "nothing downstream knows which is which. They are counted "
-        f"separately here so the record can eventually say which is "
-        "worth the money."))
+        "<b>Four things produce candidates.</b> <b>Insider clusters</b> "
+        "(Form 4) and <b>earnings drift</b> (XBRL) are line-for-line the "
+        "arms the backtest graded, so their measured edge means "
+        "something. <b>Conjunctions</b> are cross-feed agreement and were "
+        "never backtested. The <b>hunt</b> is Claude reading the raw feed "
+        "and going looking - its own filing searches, filings opened and "
+        "read, news checks and, since 2026-09-11, web searches for "
+        "second-order chains no screen has a rule for. All four go "
+        "through the identical research, pricing and risk path; nothing "
+        "downstream knows which found a candidate."))
+    # THE ANSWER TO "IS IT MAINLY INSIDER TRADES", AS A NUMBER.
+    #
+    # OWNER-ASKED 2026-09-11: "i feel we're heavily looking at insider
+    # trades not just claude spotting potential... is it mainly looking
+    # at insider trades or can we get it to do even more agentic
+    # research to find very lucrative trades".
+    #
+    # It was a fair feeling and the page could not confirm or deny it:
+    # it showed how far each arm's candidates got, and nothing about
+    # which arm the money and the results actually came from. This
+    # states it from the rows, and says so plainly when one arm accounts
+    # for everything - because a concentration nobody chose is exactly
+    # the shape that goes unnoticed.
+    out.append(_arm_concentration(d))
 
     if not d.rows:
         out.append(zero_block(
