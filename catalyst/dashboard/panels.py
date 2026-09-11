@@ -4556,7 +4556,24 @@ def _step(key: str, title: str) -> str:
             f'{_STEP_ICON[key]}</span>{esc(title)}</h4>')
 
 
-def _why_fold(fid: str, text: str) -> str:
+def _fold(fid: str, summary: str, body: str, open_: bool = False) -> str:
+    """A named dropdown.
+
+    OWNER-ASKED 2026-09-11: "drop downs if I want more detail". The card
+    had exactly one fold ("why this matters") and everything else was
+    laid out flat, so opening a trade unrolled a chart, a second chart,
+    three headings, two block quotes and a table at once.
+
+    Kept as a plain <details>: it needs no JavaScript, it is keyboard
+    operable and screen-reader announced for free, and it still prints
+    and Ctrl-F's open in browsers that expand details on find.
+    """
+    return (f'<details class="fold"{" open" if open_ else ""} id="{fid}">'
+            f"<summary>{esc(summary)}</summary>"
+            f"<div>{body}</div></details>")
+
+
+def _why_fold(fid: str, text: str, label: str = "why this matters") -> str:
     """The explanation, available but out of the way.
 
     The owner reported the page "text heavy" twice. None of this prose
@@ -4564,9 +4581,16 @@ def _why_fold(fid: str, text: str) -> str:
     - so it is folded rather than deleted. Someone who wants to know why
     a number is what it is can still find out in one click; someone
     reading the page to see how a trade went is no longer wading.
+
+    EACH ONE SAYS WHAT IT EXPLAINS. Rendering the card on 2026-09-11
+    produced FIVE dropdowns all labelled "why this matters", which is
+    no better than five unlabelled buttons: the reader cannot tell
+    which one holds the answer they want, so they open all of them or
+    none. The label is a parameter now and every call site names its
+    own subject.
     """
     return (f'<details class="why-fold" id="{fid}">'
-            "<summary>why this matters</summary>"
+            f"<summary>{esc(label)}</summary>"
             f"<div>{text}</div></details>")
 
 
@@ -4691,21 +4715,178 @@ def _trade_headline(st) -> str:
     the four facts that decide that: which stock, is it live, how much,
     and how it went.
     """
+    size = _num(st.notional_usd)
     bits = [f"<b>{esc(st.ticker)}</b>"]
     if st.status == "open":
-        bits.append("open")
+        bits.append("still open")
     elif st.realized_pnl_cents is not None:
+        share = _pct_of(abs(st.realized_pnl_cents) / 100, size) if size else ""
         bits.append(("made " if st.realized_pnl_cents >= 0 else "lost ")
-                    + _money(abs(st.realized_pnl_cents)))
+                    + _money(abs(st.realized_pnl_cents))
+                    + (f" ({share})" if share else ""))
     else:
         bits.append("closed")
-    if st.notional_usd:
-        bits.append(f"${esc(st.notional_usd)}")
+    if size:
+        bits.append(f"${size:,.0f}")
     if st.opened_at:
-        bits.append(esc(str(st.opened_at)[:10]))
+        # "18 Jun" rather than "2026-06-18". This is the single most
+        # glanced line on the tab - it is what shows before anything is
+        # opened - so it carries no value a reader has to parse.
+        bits.append(_pretty_date(st.opened_at))
     if st.conviction is not None:
-        bits.append(f"conviction {float(st.conviction):.2f}")
+        bits.append(f"{float(st.conviction):.2f} conviction")
     return " &middot; ".join(bits)
+
+
+def _pretty_date(text) -> str:
+    """"18 Jun" rather than "2026-06-18". Read at a glance, and the year
+    is almost never the question on a days-to-weeks position."""
+    day = _as_date(text)
+    return day.strftime("%-d %b") if day else esc(str(text or "?"))
+
+
+def _pct_of(part, whole) -> str:
+    try:
+        p, w = Decimal(str(part)), Decimal(str(whole))
+        if w <= 0:
+            return ""
+        return f"{p / w * 100:.1f}%"
+    except (ArithmeticError, TypeError, ValueError):
+        return ""
+
+
+def _trade_summary(st) -> str:
+    """WHAT HAPPENED, IN ONE PARAGRAPH A PERSON CAN READ.
+
+    OWNER-ASKED 2026-09-11, with a screenshot of this card: "i want easy
+    summaries of what happened and decisions and drop downs if I want
+    more detail. Make it more user firnedly to glance and understand
+    what happened easily."
+
+    The card already carried every fact, spread across four tiles, a
+    chart, three headings and two block quotes - so the reader had to
+    assemble the story themselves from a dozen figures. This is that
+    assembly done once, in words, as the FIRST thing on the card.
+
+    EVERY NUMBER HERE IS ONE THE CARD ALREADY HOLDS. Nothing is computed
+    that is not already on the record, nothing is projected, and where a
+    fact is missing the sentence says so rather than rounding past it.
+    """
+    entry, stop = _num(st.entry_price), _num(st.stop_price)
+    exit_p = _num(st.exit_price)
+    size = _num(st.notional_usd)
+    bits: list[str] = []
+
+    # ---- the open: what was bought, how much, when, and on what
+    what = f"<b>{esc(st.ticker)}</b>"
+    if size and entry:
+        bits.append(f"Put <b>${size:,.0f}</b> into {what} at "
+                    f"<b>${entry:.2f}</b> on {_pretty_date(st.opened_at)}")
+    elif entry:
+        bits.append(f"Bought {what} at <b>${entry:.2f}</b> on "
+                    f"{_pretty_date(st.opened_at)}")
+    else:
+        bits.append(f"Ordered {what}, but the fill is not reconciled yet, "
+                    "so the price paid is not on record")
+    because = {"insider_cluster": "several insiders were buying it",
+               "earnings_drift": "it beat on earnings and kept drifting",
+               }.get(str(st.catalyst_type), None)
+    if because:
+        bits.append(f", because {because}")
+    elif st.catalyst_type:
+        bits.append(f", on a {esc(str(st.catalyst_type)).replace('_', ' ')}")
+    if st.conviction is not None:
+        bits.append(f". Claude rated the call <b>{float(st.conviction):.2f}</b>"
+                    " - roughly how often it expected to be right on setups "
+                    "like this")
+    bits.append(". ")
+
+    # ---- the close, or where it stands
+    if st.realized_pnl_cents is not None:
+        won = st.realized_pnl_cents >= 0
+        why_out = {
+            "hard_exit": "The clock ran out",
+            "hard_exit_date": "The clock ran out",
+            "stop": "The stop was hit",
+            "stop_filled": "The stop was hit",
+            "thesis_invalidated": "Claude decided the thesis had broken",
+        }.get(str(st.exit_reason), f"It exited ({esc(str(st.exit_reason))})")
+        bits.append(f"<b>{why_out}</b>")
+        if st.actual_holding_days is not None:
+            bits.append(f" after <b>{st.actual_holding_days} days</b>")
+            if st.expected_holding_days:
+                bits.append(f" against the {st.expected_holding_days} planned")
+        if exit_p:
+            bits.append(f", selling at <b>${exit_p:.2f}</b>")
+        pnl = _money(abs(st.realized_pnl_cents))
+        share = _pct_of(abs(st.realized_pnl_cents) / 100, size) if size else ""
+        bits.append(f" - a <b>{pnl} {'profit' if won else 'loss'}</b>"
+                    + (f", {share} of the position" if share else "") + ". ")
+        # THE STOP THAT DID NOT FIRE IS PART OF THE STORY. On the owner's
+        # own EMBC card the exit landed at $4.97 against a $4.55 stop,
+        # which is the difference between "the trade was stopped out" and
+        # "it drifted and time beat it" - opposite lessons, and the card
+        # said neither.
+        if stop and exit_p and "stop" not in str(st.exit_reason):
+            bits.append(f"The stop at <b>${stop:.2f}</b> was never reached")
+            if exit_p > stop:
+                bits.append(
+                    f" - the sale was still {_pct_of(exit_p - stop, stop)} "
+                    "above it - so what ended this trade was the calendar, "
+                    "not the risk engine. ")
+            else:
+                bits.append(". ")
+    elif st.status == "open":
+        bits.append("It is <b>still open</b>. ")
+        end = _as_date(st.planned_exit_date)
+        if end:
+            left = (end - datetime.now(timezone.utc).date()).days
+            bits.append(
+                f"It closes on {_pretty_date(st.planned_exit_date)} whatever "
+                + (f"happens, <b>{left} day(s)</b> from now. " if left >= 0
+                   else "happens - and that date has <b>passed</b>. "))
+        if stop and entry:
+            bits.append(
+                f"If it falls to <b>${stop:.2f}</b> the stop sells it, "
+                f"which is {_pct_of(entry - stop, entry)} below the fill. ")
+    else:
+        bits.append("It is closed, but no result is on record yet. ")
+    return f'<p class="trade-sum">{"".join(bits).strip()}</p>'
+
+
+def _trade_decision(st, p: str, index: int) -> str:
+    """WHAT THE CODE DECIDED, AND WHICH RULE DECIDED IT.
+
+    The brief requires that "where the code overruled the model, that
+    must be visible and explained". It was - in a table of every limit
+    checked, further down the page. This is the one line of it that
+    answers "why is this position this big", with the table still behind
+    the fold for anyone who wants the rest.
+    """
+    size, entry, stop = (_num(st.notional_usd), _num(st.entry_price),
+                         _num(st.stop_price))
+    if not size:
+        return ""
+    said = [f"Code sized it at <b>${size:,.0f}</b>"]
+    eq = _num(st.equity_at_entry)
+    if eq:
+        said.append(f", {_pct_of(size, eq)} of the account at the time")
+    binding = [row for row in (st.limits or []) if row and len(row) > 4
+               and row[4]]
+    if binding:
+        names = ", ".join(
+            esc(str(r[0])).replace("_", " ") for r in binding[:2])
+        said.append(f". The bound that decided it: <b>{names}</b>")
+    if entry and stop and size:
+        try:
+            risk = size * (entry - stop) / entry
+            said.append(f". Most it can lose if the stop fills: "
+                        f"<b>${risk:,.0f}</b>")
+        except (ArithmeticError, TypeError, ValueError):
+            pass
+    said.append(
+        ". Claude never sees these numbers and cannot change them.")
+    return f'<p class="trade-dec">{"".join(said)}</p>'
 
 
 def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
@@ -4729,29 +4910,48 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
     pid = esc(st.position_id[:8])
     out: list[str] = []
 
-    # THE FOUR NUMBERS FIRST, in a row, before any sentence. They used
-    # to be a paragraph; a paragraph is not scannable and there will be
-    # dozens of these.
+    # THE STORY FIRST, THEN THE NUMBERS. Owner-asked 2026-09-11: "i
+    # want easy summaries of what happened and decisions". The tiles
+    # were the first thing on the card, which meant the reader assembled
+    # the narrative themselves out of four figures every time.
+    out.append(_trade_summary(st))
+    out.append(_trade_decision(st, p, index))
+
+    # THEN THE NUMBERS, in a row, rounded to what a glance can use.
+    _entry, _qty, _size = (_num(st.entry_price), _num(st.qty),
+                           _num(st.notional_usd))
     facts = [
-        ("Bought", (f"{esc(st.qty)} @ ${esc(st.entry_price)}"
-                    if st.entry_price and st.qty else "not filled yet"),
-         (f"{esc(st.notional_usd)} dollars committed"
-          if st.notional_usd else "no size on record")),
-        ("Stop", f"${esc(st.stop_price)}" if st.stop_price else DASH,
-         "sells automatically if reached"),
-        ("Closes", esc(st.planned_exit_date or "?"),
+        ("Bought", (f"${_entry:.2f}" if _entry else "not filled yet"),
+         (f"${_size:,.0f} in {_qty:,.2f} shares"
+          if _size and _qty else
+          (f"${_size:,.0f} committed" if _size else "no size on record"))),
+        ("Stop", f"${_num(st.stop_price):.2f}" if _num(st.stop_price)
+         else DASH, "sells automatically if reached"),
+        ("Closes", _pretty_date(st.planned_exit_date),
          "hard exit date, set at entry"),
     ]
     if st.realized_pnl_cents is not None:
         won = st.realized_pnl_cents >= 0
+        # ROUNDED FOR A GLANCE. The owner's card read "$4.9736" and
+        # "79.1295 @ $5.06": four decimal places on a tile whose whole
+        # job is to be read without stopping. The exact figures are not
+        # lost - they are in "the exact numbers" fold below, which is
+        # where a number you intend to check belongs.
+        size = _num(st.notional_usd)
+        share = _pct_of(abs(st.realized_pnl_cents) / 100, size) if size \
+            else ""
+        exit_p = _num(st.exit_price)
+        why_out = str(st.exit_reason or "").replace("_", " ") \
+            or "no reason recorded"
         facts = [
-            ("Result", _money(st.realized_pnl_cents),
-             ("a profit" if won else "a loss") + " after the exit"),
-            ("Sold", f"${esc(st.exit_price or '?')}",
-             esc(st.exit_reason or "no reason recorded")),
+            ("Result",
+             ("+" if won else "&minus;") + _money(abs(st.realized_pnl_cents)),
+             (("a profit" if won else "a loss")
+              + (f", {share} of the position" if share else " after the exit"))),
+            ("Sold", f"${exit_p:.2f}" if exit_p else DASH, esc(why_out)),
             ("Held", f"{st.actual_holding_days}d"
              if st.actual_holding_days is not None else DASH,
-             f"expected {st.expected_holding_days}d"
+             f"planned {st.expected_holding_days}d"
              if st.expected_holding_days else "no expectation recorded"),
         ] + facts[:1]
     out.append(tiles(f"{p}-t{index}-tiles", facts))
@@ -4762,7 +4962,6 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
     # remain as the FALLBACK for a position the full chart cannot draw.
     chart = _position_chart(st, p, index)
     out.append(chart)
-    out.append(_technicals(st, p, index))
     if not chart:
         out.append(_hold_progress(st, p, index))
         out.append(_price_rail(st, p, index))
@@ -4770,8 +4969,40 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
         out.append(caveat(
             "The fill has not been reconciled yet, so the price paid is "
             "not on record. Reconciliation runs every cycle."))
+    # THE TAPE READ, BEHIND A FOLD. It is a second chart and a table of
+    # figures, and it answers "what was the stock doing" rather than
+    # "what happened to this trade" - useful, and not what the reader
+    # opened the card for.
+    tech = _technicals(st, p, index)
+    if tech:
+        out.append(_fold(f"{p}-t{index}-tech",
+                         "How the stock itself was trading", tech))
+    # THE EXACT FIGURES, BEHIND A FOLD. The tiles above are rounded so
+    # they can be read at a glance; anything the owner intends to CHECK
+    # belongs here, unrounded, with its units named.
+    exact = []
+    for label, value in (("Fill price", st.entry_price),
+                         ("Intended price", st.entry_intended),
+                         ("Modelled slippage", st.modeled_slippage),
+                         ("Shares", st.qty),
+                         ("Dollars committed", st.notional_usd),
+                         ("Stop price", st.stop_price),
+                         ("Sale price", st.exit_price),
+                         ("Account equity at entry", st.equity_at_entry)):
+        if value not in (None, ""):
+            exact.append(f"<tr><th>{esc(label)}</th>"
+                         f"<td class=\"num\">{esc(str(value))}</td></tr>")
+    if exact:
+        out.append(_fold(
+            f"{p}-t{index}-exact", "The exact numbers",
+            '<table class="kv"><tbody>' + "".join(exact)
+            + "</tbody></table>"
+            + figcap("Unrounded, as recorded. The tiles above are rounded "
+                     "for reading; these are the figures to check.")))
 
-    # ---- 2. why this company at all
+    # ---- 2. why this company at all. The provenance chips stay on the
+    # card - they are three words and they answer "who chose this" - and
+    # the paragraph behind them folds.
     out.append(_step("why", f"Why {st.ticker}"))
     if st.origin == "hunt":
         who = pill("good", "Claude found it") + (
@@ -4798,13 +5029,21 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
             f"{p}-t{index}-whyfold",
             f"<p>{why_more}</p><p>The catalyst type also sets how hard the "
             "risk engine sizes it: a binary event gets a smaller position "
-            "than a slow re-rating.</p>"))
+            "than a slow re-rating.</p>",
+            label="what this origin means for the edge"))
 
-    # ---- 3. what Claude concluded, in its own words
+    # ---- 3. what Claude concluded, in its own words.
+    #
+    # THE VERDICT AND THE GAUGE STAY ON THE CARD; THE PROSE FOLDS. The
+    # reasoning is the part the brief insists on keeping verbatim - "a
+    # summary of a thesis is just another opinion" - and it is also
+    # three paragraphs. Visible: what it decided and how sure it was.
+    # One click away: why, in its own words.
     out.append(_step("view", "Claude's view"))
     if not st.thesis:
         out.append(caveat("No research view is on record for this position."))
     else:
+        said: list[str] = []
         verdict = {"long": "buy it", "short": "short it",
                    "no_trade": "leave it alone"}.get(st.direction,
                                                      st.direction or "?")
@@ -4820,29 +5059,34 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
             out.append(_conviction_gauge(float(st.conviction),
                                          f"{p}-t{index}"))
             out.append(figcap(_plain_conviction(st.conviction)))
-        out.append(
+        said.append(
             '<blockquote class="said"><b>Its reasoning:</b><br>'
             f"{esc(st.thesis)}</blockquote>")
-        out.append(
+        said.append(
             '<blockquote class="said"><b>What would prove it wrong:</b><br>'
             f"{esc(st.invalidation)}</blockquote>")
         if st.priced_in_reasoning:
             already = ("already priced in" if st.priced_in
                        else "not yet priced in")
-            out.append(
+            said.append(
                 f'<blockquote class="said"><b>Move {esc(already)}:</b><br>'
                 f"{esc(st.priced_in_reasoning)}</blockquote>")
             # "Priced in" is jargon. The gloss is folded rather than cut:
             # a reader who knows the term never has to read it, and one
             # who does not is still one click from the answer.
-            out.append(_why_fold(
+            said.append(_why_fold(
                 f"{p}-t{index}-pricedfold",
                 "<p>&ldquo;Priced in&rdquo; is whether the market had "
                 "already reacted to this news before the bot could. If it "
                 "had, the move is gone and there is nothing left to "
-                "trade.</p>"))
+                "trade.</p>",
+                label="what 'priced in' means"))
         if st.expected_holding_days:
-            out.append(f"<p>{pill('idle', f'expected {st.expected_holding_days} trading days')}</p>")
+            said.append(
+                f"<p>{pill('idle', f'expected {st.expected_holding_days} trading days')}</p>")
+        out.append(_fold(f"{p}-t{index}-said",
+                         f"What Claude said about {st.ticker}, in its own words",
+                         "".join(said)))
 
     # ---- 4. what the code then did with that
     out.append(_step("size", "Size and stop"))
@@ -4855,7 +5099,8 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
         "through which a number of its own could arrive, and a test holds "
         "that shape. A persuasive thesis and a correct one are different "
         "properties, and a model that sizes its own positions converts "
-        "the first into money.</p>"))
+        "the first into money.</p>",
+        label="how the size was worked out"))
     if not st.notional_usd:
         out.append(caveat("No risk decision is on record for this position."))
     # WHY THAT AMOUNT AND NOT MORE. Owner-asked: "will the dashboard
@@ -4887,7 +5132,8 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
             "rescues it</b>. A stop that must sit far away gets a SMALLER "
             "position, because the same dollars of risk buy fewer shares. "
             "Widen the stop and this number falls; a bigger account raises "
-            "it proportionally.</p>"))
+            "it proportionally.</p>",
+        label="the sum behind the size"))
         rows = []
         # `why` not `note`: `note` is the module-level renderer, and
         # binding it as a loop variable shadowed the function for the
@@ -4928,7 +5174,8 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
             f"{p}-t{index}-fillfold",
             "<p>Paper fills pay no spread, so the modelled cost is recorded "
             "BESIDE the broker's price and never instead of it &mdash; "
-            "reconciliation still compares against the real fill.</p>"))
+            "reconciliation still compares against the real fill.</p>",
+        label="why a modelled cost sits beside the real one"))
 
     # ---- 5. protection, told as a timeline
     out.append(_step("guard", "Protection"))
@@ -5956,6 +6203,85 @@ def _load_position_bars(ticker: str):
         return ()
 
 
+def _reviews_sentence(st) -> str:
+    """How many times Claude was paid to re-read this thesis.
+
+    Shared by both chart kinds. It used to live only in the time
+    chart's caption, so a position with no cached bars - which is the
+    case the owner screenshotted - reported the number nowhere at all.
+    A skipped review is not counted: it cost nothing and decided
+    nothing.
+    """
+    n = len([r for r in (st.reviews or []) if not r[5]])
+    return f"Claude has re-read the thesis <b>{n}</b> time(s). "
+
+
+def _price_ladder(st, p: str, index: int) -> str:
+    """The three prices that matter, on one vertical scale, WITHOUT a
+    time axis - for a position whose price history is not cached.
+
+    OWNER-REPORTED 2026-09-11 with a screenshot: "This graph feels a bit
+    dumb also, re-create this but the idea is there."
+
+    It was dumb for a specific reason. With no cached bars the old chart
+    still drew the whole apparatus - a 60-day run-up window, a full
+    width axis, date labels at both ends and a full-width risk block -
+    around a plot containing no price line at all. More than half the
+    picture was empty, and the empty part was the part that mattered.
+
+    A chart with no series is not a chart. So when there are no bars
+    this draws what IS known and nothing else: entry, stop and (once it
+    is closed) the exit, as labelled levels on a real price scale, with
+    the gaps between them measured. Every mark is a price on the record.
+    """
+    entry, stop = _num(st.entry_price), _num(st.stop_price)
+    if not (entry and stop and entry > stop):
+        return ""
+    exit_p = _num(st.exit_price)
+    levels = [(entry, "bought", f"${entry:.2f}", "lad-entry"),
+              (stop, "stop", f"${stop:.2f}", "lad-stop")]
+    if exit_p:
+        levels.append((exit_p, "sold", f"${exit_p:.2f}", "lad-exit"))
+    lo = min(float(v) for v, *_ in levels)
+    hi = max(float(v) for v, *_ in levels)
+    pad = (hi - lo) * 0.25 or hi * 0.02
+    lo, hi = lo - pad, hi + pad
+    W, H, L, R, T, B = 660, 132, 92, 150, 16, 16
+
+    def y(v):
+        return T + (hi - float(v)) / (hi - lo) * (H - T - B)
+
+    out = [f'<svg id="{p}-t{index}-ladder" class="pos-chart" '
+           f'viewBox="0 0 {W} {H}" role="img" aria-label='
+           f'"entry, stop and exit prices for {esc(st.ticker)}">']
+    # The band between entry and stop is the money that was at risk.
+    # Recessive by design: a large saturated block is the loudest thing
+    # on a card and it is only context.
+    out.append(f'<rect x="{L}" y="{y(entry):.1f}" width="{W - L - R}" '
+               f'height="{abs(y(stop) - y(entry)):.1f}" class="pos-risk"/>')
+    for value, name, price, cls in levels:
+        yy = y(value)
+        out.append(f'<line x1="{L}" y1="{yy:.1f}" x2="{W - R}" '
+                   f'y2="{yy:.1f}" class="{cls}"/>')
+        out.append(f'<text x="{L - 8}" y="{yy + 3.5:.1f}" text-anchor="end" '
+                   f'class="pos-key">{esc(name)}</text>')
+        out.append(f'<text x="{W - R + 8}" y="{yy + 3.5:.1f}" '
+                   f'class="pos-val">{esc(price)}</text>')
+    # THE GAPS, MEASURED, because the distance between two rules is the
+    # whole point of drawing them on one scale.
+    gap = _pct_of(entry - stop, entry)
+    if gap:
+        out.append(f'<text x="{(L + W - R) / 2:.0f}" '
+                   f'y="{(y(entry) + y(stop)) / 2 + 3.5:.1f}" '
+                   f'text-anchor="middle" class="pos-key">'
+                   f'{esc(gap)} of the fill was at risk</text>')
+    out.append("</svg>")
+    words = ("No daily closes are cached for this ticker, so the price "
+             "line is empty rather than guessed - these are the prices on "
+             "the record. " + _reviews_sentence(st))
+    return "".join(out) + figcap(words)
+
+
 def _position_chart(st, p: str, index: int) -> str:
     """One position, everything that has happened to it, on one axis.
 
@@ -5971,13 +6297,43 @@ def _position_chart(st, p: str, index: int) -> str:
       - what it cost to buy and what it sells for if the thesis fails,
         as horizontal rules, because the gap between them is the money
         at stake;
-      - a marker every time Claude was called to re-check the thesis,
-        and what it said;
+      - WHERE IT ACTUALLY SOLD, for a closed trade;
+      - a tick every time Claude was called to re-check the thesis;
       - today, and the hard exit date where it closes regardless.
 
     NOTHING IS PROJECTED. The price line stops where the data stops. The
     only marks in the future are DATES the bot has already committed to,
     never a price it might reach.
+
+    REBUILT 2026-09-11 on the owner's screenshot. Four things were wrong
+    and each is fixed here:
+
+    1. IT NEVER DREW THE EXIT. On a closed trade the single most
+       important mark is where it actually sold, and the chart showed
+       entry, stop and a price line while the sale price lived only in a
+       tile. On the owner's own card that hid the whole lesson: EMBC
+       sold at $4.97 against a $4.55 stop, so time beat it rather than
+       the stop - and the picture could not say which.
+    2. DEAD SPACE. chart_start was always entry minus 60 days, whether
+       or not a single bar existed back there, so the plot opened with a
+       wide blank and the trade itself was squeezed into the right half.
+       The window now starts at the first bar it actually has.
+    3. A PICKET FENCE OF REVIEW LINES. Each review drew a full-height
+       dashed rule; five of them on a 14-day hold is a striped chart
+       with "held" printed over itself. They are now short ticks in
+       their own lane under the plot, with one count label.
+    4. NO SERIES AT ALL, DRAWN ANYWAY. With no cached bars this returned
+       a full chart containing no price line. It now hands off to
+       _price_ladder, which draws only prices that exist.
+
+    COLOUR, CHECKED RATHER THAN CHOSEN. Two hues carry meaning: the
+    price line and the stop. Both were run through the palette validator
+    against this dashboard's own light and dark surfaces and pass every
+    check in both. Profit and loss are NOT encoded as green against
+    red - that pair measures deltaE 4.1 under deuteranopia in the light
+    theme, which is not distinguishable - so the outcome is carried by
+    POSITION against the entry rule, by direct labels, and by the
+    sentence above the chart.
     """
     entry = _num(st.entry_price)
     stop = _num(st.stop_price)
@@ -5985,24 +6341,30 @@ def _position_chart(st, p: str, index: int) -> str:
     end = _as_date(st.planned_exit_date)
     if not (entry and stop and start and end and end > start):
         return ""
-    # THE RUN-UP INTO THE TRADE, not just the hold. A days-to-weeks
-    # position is too short to read on its own - and a 20-day average
-    # over a 12-day hold does not exist at all, so the trend line never
-    # drew. Starting the window before the entry gives both: whether the
-    # stock was already extended when it was bought, and enough bars for
-    # the average to mean something.
-    chart_start = start - timedelta(days=CONTEXT_DAYS_BEFORE_ENTRY)
+    # THE RUN-UP INTO THE TRADE, but only as far as there is data for
+    # it. Asking for 60 days and getting none is what produced a chart
+    # that was half empty; clamping to the first real bar means the
+    # picture is never wider than the evidence in it.
+    want_from = start - timedelta(days=CONTEXT_DAYS_BEFORE_ENTRY)
     bars = [b for b in _load_position_bars(st.ticker)
-            if chart_start <= b.day <= end]
+            if want_from <= b.day <= end]
+    if not bars:
+        return _price_ladder(st, p, index)
+    chart_start = min(min(b.day for b in bars), start)
     today = datetime.now(timezone.utc).date()
+    exit_p, exit_day = _num(st.exit_price), _as_date(st.closed_at)
 
-    lo_p = min([float(stop), float(entry)] + [float(b.low) for b in bars])
-    hi_p = max([float(stop), float(entry)] + [float(b.high) for b in bars])
+    prices = ([float(stop), float(entry)]
+              + [float(b.low) for b in bars] + [float(b.high) for b in bars]
+              + ([float(exit_p)] if exit_p else []))
+    lo_p, hi_p = min(prices), max(prices)
     pad = (hi_p - lo_p) * 0.12 or hi_p * 0.02
     lo_p, hi_p = lo_p - pad, hi_p + pad
     span_d = max((end - chart_start).days, 1)
 
-    W, H, L, R, T, B = 660, 210, 88, 16, 18, 40
+    # The lane at the foot of the plot holds the review ticks, so they
+    # can never cross the price line again.
+    W, H, L, R, T, B, LANE = 660, 210, 88, 58, 18, 46, 16
 
     def x(d):
         return L + (d - chart_start).days / span_d * (W - L - R)
@@ -6010,10 +6372,17 @@ def _position_chart(st, p: str, index: int) -> str:
     def y(v):
         return T + (hi_p - float(v)) / (hi_p - lo_p) * (H - T - B)
 
+    plot_bottom = H - B
     out = [f'<svg id="{p}-t{index}-pos" class="pos-chart" '
            f'viewBox="0 0 {W} {H}" role="img" '
-           f'aria-label="price, stop and every review for {esc(st.ticker)}">']
-    out.append(f'<rect x="{L}" y="{y(entry):.1f}" width="{W - L - R}" '
+           f'aria-label="price, stop, exit and every review for '
+           f'{esc(st.ticker)}">']
+    # Money at risk: entry down to stop, and only across the days the
+    # position actually existed.
+    risk_from = x(start)
+    risk_to = x(exit_day) if exit_day and exit_day <= end else W - R
+    out.append(f'<rect x="{risk_from:.1f}" y="{y(entry):.1f}" '
+               f'width="{max(risk_to - risk_from, 1):.1f}" '
                f'height="{abs(y(stop) - y(entry)):.1f}" class="pos-risk"/>')
     for value, cls, label in ((entry, "pos-entry", f"bought ${entry:.2f}"),
                               (stop, "pos-stop", f"stop ${stop:.2f}")):
@@ -6021,34 +6390,33 @@ def _position_chart(st, p: str, index: int) -> str:
                    f'y2="{y(value):.1f}" class="{cls}"/>')
         out.append(f'<text x="{L - 6}" y="{y(value) + 3:.1f}" '
                    f'text-anchor="end" class="pos-label">{esc(label)}</text>')
-    if bars:
-        pts = " ".join(f"{x(b.day):.1f},{y(b.close):.1f}" for b in bars)
-        out.append(f'<polyline points="{pts}" class="pos-price"/>')
-        # THE TREND UNDER THE PRICE. A 20-day average is the plainest
-        # technical read there is: above it the stock has been rising
-        # into this, below it falling. Drawn only where it EXISTS - the
-        # first nineteen days have no twenty-day average, and drawing
-        # one for them would be inventing the very thing being read.
-        closes = [float(b.close) for b in bars]
-        sma = _sma(closes, 20)
-        if len(sma) >= 2:
-            line = " ".join(f"{x(bars[i].day):.1f},{y(v):.1f}"
-                            for i, v in sma)
-            out.append(f'<polyline points="{line}" class="pos-sma"/>')
+    pts = " ".join(f"{x(b.day):.1f},{y(b.close):.1f}" for b in bars)
+    out.append(f'<polyline points="{pts}" class="pos-price"/>')
+    # THE TREND UNDER THE PRICE, drawn only where it EXISTS - the first
+    # nineteen days have no twenty-day average, and drawing one for them
+    # would invent the very thing being read.
+    sma = _sma([float(b.close) for b in bars], 20)
+    if len(sma) >= 2:
+        line = " ".join(f"{x(bars[i].day):.1f},{y(v):.1f}" for i, v in sma)
+        out.append(f'<polyline points="{line}" class="pos-sma"/>')
+    # WHERE IT ACTUALLY SOLD. The mark this chart was missing.
+    if exit_p and exit_day and chart_start <= exit_day <= end:
+        ex, ey = x(exit_day), y(exit_p)
+        out.append(f'<circle cx="{ex:.1f}" cy="{ey:.1f}" r="4.5" '
+                   f'class="pos-exit"><title>sold {esc(str(exit_day))} at '
+                   f'${exit_p:.2f} ({esc(str(st.exit_reason or "?"))})'
+                   "</title></circle>")
+        out.append(f'<text x="{ex + 8:.1f}" y="{ey + 3.5:.1f}" '
+                   f'class="pos-val">sold ${exit_p:.2f}</text>')
+    elif st.status == "open":
         last = bars[-1]
-        out.append(f'<circle cx="{x(last.day):.1f}" cy="{y(last.close):.1f}" '
-                   f'r="3.5" class="pos-now"/>')
-        out.append(f'<text x="{x(last.day):.1f}" y="{y(last.close) - 8:.1f}" '
-                   f'text-anchor="middle" class="pos-label">'
+        out.append(f'<circle cx="{x(last.day):.1f}" '
+                   f'cy="{y(last.close):.1f}" r="4" class="pos-now"/>')
+        out.append(f'<text x="{x(last.day) + 8:.1f}" '
+                   f'y="{y(last.close) + 3.5:.1f}" class="pos-val">'
                    f"now ${float(last.close):.2f}</text>")
-    # ONE MARKER PER DAY, and only for reviews that DECIDED something.
-    #
-    # OWNER-REPORTED with a screenshot: several rules landed on the same
-    # pixel and their labels overprinted into "skipp/jjjgted". Two
-    # causes, both fixed here - same-day reviews are collapsed, and
-    # skipped ones are not drawn at all, because a skipped review cost
-    # nothing and decided nothing. It is still counted in the caption
-    # and still listed in full further down the page.
+    # REVIEWS AS TICKS IN THEIR OWN LANE. One per day, exits marked
+    # differently, and a single count instead of a repeated word.
     by_day = {}
     for when, action, _trig, _why, _changed, skipped in (st.reviews or []):
         day = _as_date(when)
@@ -6058,50 +6426,52 @@ def _position_chart(st, p: str, index: int) -> str:
         # that changed something is the one worth a mark.
         if by_day.get(day, "hold") == "hold":
             by_day[day] = str(action)
-    placed = []
     for day in sorted(by_day):
         px = x(day)
         word = {"hold": "held", "exit_now": "EXIT",
                 "no_opinion": "no view"}.get(by_day[day], by_day[day])
-        cls = "pos-review" if by_day[day] == "hold" else "pos-review-exit"
-        out.append(f'<line x1="{px:.1f}" y1="{T}" x2="{px:.1f}" '
-                   f'y2="{H - B}" class="{cls}">'
-                   f"<title>{esc(str(day))}: {esc(word)}</title></line>")
-        # Label only where one FITS. Below ~34px apart the words
-        # overprint, and an unreadable label is worse than none - the
-        # rule and its tooltip still carry the fact.
-        if all(abs(px - q) > 34 for q in placed):
-            out.append(f'<text x="{px:.1f}" y="{T + 9:.0f}" '
-                       f'text-anchor="middle" class="pos-label">{esc(word)}'
-                       "</text>")
-            placed.append(px)
+        cls = "pos-tick" if by_day[day] == "hold" else "pos-tick-exit"
+        out.append(f'<line x1="{px:.1f}" y1="{plot_bottom:.1f}" '
+                   f'x2="{px:.1f}" y2="{plot_bottom + LANE - 6:.1f}" '
+                   f'class="{cls}"><title>{esc(str(day))}: {esc(word)}'
+                   "</title></line>")
+    if by_day:
+        n = len(by_day)
+        exits = [d for d in by_day if by_day[d] != "hold"]
+        out.append(f'<text x="{L - 6}" y="{plot_bottom + LANE - 7:.1f}" '
+                   f'text-anchor="end" class="pos-label">'
+                   f'{n} review{"s" if n != 1 else ""}'
+                   f'{" (1 said exit)" if exits else ""}</text>')
+    # Entry day and the hard exit date, as the only vertical rules left.
     out.append(f'<line x1="{x(start):.1f}" y1="{T}" x2="{x(start):.1f}" '
-               f'y2="{H - B}" class="pos-bought"/>')
-    out.append(f'<text x="{x(start):.1f}" y="{H - 20:.0f}" '
+               f'y2="{plot_bottom:.1f}" class="pos-bought"/>')
+    out.append(f'<text x="{x(start):.1f}" y="{T - 6:.0f}" '
                'text-anchor="middle" class="pos-label">bought</text>')
-    if chart_start <= today <= end:
+    if chart_start <= today <= end and st.status == "open":
         out.append(f'<line x1="{x(today):.1f}" y1="{T - 4}" '
-                   f'x2="{x(today):.1f}" y2="{H - B + 4}" class="pos-today"/>')
-    for day, label in ((chart_start, str(chart_start)),
-                       (end, f"closes {end}")):
-        out.append(f'<text x="{x(day):.1f}" y="{H - 8}" '
-                   f'text-anchor="{"start" if day == chart_start else "end"}" '
-                   f'class="pos-label">{esc(label)}</text>')
+                   f'x2="{x(today):.1f}" y2="{plot_bottom + 4:.1f}" '
+                   'class="pos-today"/>')
+    for day, label, anchor in (
+            (chart_start, _pretty_date(chart_start), "start"),
+            (end, f"closes {_pretty_date(end)}", "end")):
+        out.append(f'<text x="{x(day):.1f}" y="{H - 6}" '
+                   f'text-anchor="{anchor}" class="pos-label">'
+                   f"{esc(label)}</text>")
     out.append("</svg>")
 
-    left = (end - today).days
     words = f"Bought at <b>${entry:.2f}</b>, stop at <b>${stop:.2f}</b>. "
-    if bars:
-        move = (float(bars[-1].close) - float(entry)) / float(entry) * 100
-        words += (f"Last close <b>${float(bars[-1].close):.2f}</b>, "
-                  f"<b>{move:+.1f}%</b> against the fill. ")
+    if exit_p:
+        move = (float(exit_p) - float(entry)) / float(entry) * 100
+        words += (f"Sold at <b>${exit_p:.2f}</b>, <b>{move:+.1f}%</b> "
+                  "against the fill. ")
     else:
-        words += ("No cached daily closes for this ticker yet, so the price "
-                  "line is empty rather than guessed. ")
-    n_reviews = len([r for r in (st.reviews or []) if not r[5]])
-    words += (f"Claude has re-read the thesis <b>{n_reviews}</b> time(s); "
-              + (f"it closes in <b>{left}</b> day(s) whatever happens."
-                 if left >= 0 else "its exit date has passed."))
+        move = (float(bars[-1].close) - float(entry)) / float(entry) * 100
+        left = (end - today).days
+        words += (f"Last close <b>${float(bars[-1].close):.2f}</b>, "
+                  f"<b>{move:+.1f}%</b> against the fill. "
+                  + (f"It closes in <b>{left}</b> day(s) whatever happens. "
+                     if left >= 0 else "Its exit date has passed. "))
+    words += _reviews_sentence(st)
     return "".join(out) + figcap(words)
 
 
