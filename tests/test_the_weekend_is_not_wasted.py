@@ -63,8 +63,21 @@ QUOTE = {"quote": {"bp": 49.95, "ap": 50.05, "t": "2026-08-10T13:59:30Z"}}
 
 @pytest.fixture
 def db(tmp_path):
-    conn = sqlite3.connect(tmp_path / "t.db")
-    conn.executescript(open("catalyst/storage/schema.sql").read())
+    """PRODUCTION SETTINGS, DELIBERATELY. `init_db` turns on
+    PRAGMA foreign_keys, which a raw sqlite3.connect +
+    executescript does NOT - and 23 test files in this suite take the
+    raw route. `_record_view_context` swallows sqlite3.Error, so an FK
+    violation there would drop the row silently, the Monday gate would
+    never fire, and a weekend view would trade unchecked - passing
+    every test and failing on the owner's machine. Found while
+    checking the upgrade rather than by a test, which is exactly why
+    this fixture now matches production.
+    """
+    from catalyst.storage import init_db
+
+    conn = init_db(str(tmp_path / "t.db"))
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1, (
+        "this fixture exists to match production; foreign keys are off")
     yield conn
     conn.close()
 

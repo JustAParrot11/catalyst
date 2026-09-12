@@ -49,8 +49,17 @@ NOW = datetime.now(timezone.utc)
 
 @pytest.fixture
 def db(tmp_path):
-    conn = sqlite3.connect(tmp_path / "t.db")
-    conn.executescript(open("catalyst/storage/schema.sql").read())
+    """PRODUCTION SETTINGS: `init_db` enables PRAGMA foreign_keys, which a
+    raw connection does not. This file seeds a full
+    candidate -> decision -> order -> position -> closed_trade chain,
+    so a fixture that skipped a parent row would look fine with FKs
+    off and be impossible in production.
+    """
+    from catalyst.storage import init_db
+
+    conn = init_db(str(tmp_path / "t.db"))
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1, (
+        "this fixture exists to match production; foreign keys are off")
     yield conn
     conn.close()
 
@@ -105,7 +114,13 @@ def seed_closed_trade(conn, cid, pnl_cents, ticker="AAA"):
         (did, cid, "trade", "long", "400", "8", "45", "2026-09-25",
          json.dumps([]), json.dumps({}), NOW.isoformat()))
     cols = [r[1] for r in conn.execute("PRAGMA table_info(orders)")]
-    row = {"id": oid, "decision_id": did, "broker_order_id": "b1",
+    # decision_id CARRIES THE CANDIDATE ID. The column name lies; the
+    # foreign key on it is REFERENCES candidates(id), and
+    # execution/orders.py passes decision.candidate_id. With this fixture
+    # on production settings (init_db, foreign keys ON) seeding it any
+    # other way is impossible - which is what caught the arms query
+    # joining it as a decision id and matching nothing.
+    row = {"id": oid, "decision_id": cid, "broker_order_id": "b1",
            "client_order_id": "c1", "side": "buy", "qty": "8",
            "order_type": "market", "time_in_force": "day",
            "status": "filled", "submitted_at": NOW.isoformat(),
