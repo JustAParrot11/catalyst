@@ -1730,3 +1730,94 @@ eight were clean.
 - Nothing here can size, spend or trade: `grep` over `risk/`,
   `execution/` and `cost/` for the table name returns nothing, and a test
   holds that.
+
+---
+
+## 19. Can a stock added today be compared against the last ten days?
+
+Owner-asked 2026-09-12: *"Does it need to have been actively tracking a
+stock or can I get it enter the stock code and it predict or tell me what
+it would have done to measure against my current. Eg on day one I'm
+measuring my stock on day 10 I want to compare against VUAG for example,
+will it be able to recreate the last 10 days correctly?"*
+
+### Yes, and it is backfilled from real closes rather than predicted
+
+Verified by running it: a stock added today with a start date ten days ago
+indexes **from the date typed**, not from the day it was added.
+
+```
+added VOO, backdated to 2026-09-02
+  -> 17 closes, first drawn 2026-09-02, +1.94%
+  -> SPY over its own window: +3.56%
+```
+
+Two facts make that work, and both were already true:
+
+| what | value | why it matters |
+|---|---|---|
+| `SIP_START` | 2016-01-04 | a symbol with no cached file bootstraps from here, not from today, so **years** of history arrive on the first fetch and any recent window is inside it |
+| `ADJUSTMENT` | `"all"` | dividends and splits are both adjusted, so the series is **total return** — the right basis to compare against an accumulating fund |
+
+Nothing is modelled or predicted. It is the stock's own closes, bought
+with the money typed on the date typed.
+
+### THE DEFECT THE QUESTION FOUND: a stock added today waited until tomorrow
+
+`_refresh_tracked_comparisons` guarded on the **date alone**:
+
+```python
+if state.get("comparison_day") == today:
+    return
+...
+if not symbols:
+    state["comparison_day"] = today    # a quiet day marks itself
+    return
+```
+
+So on any day the owner had no extra stocks tracked, the first cycle set
+the marker and returned — and a stock added that afternoon **was not
+fetched until the next day.** The owner would have watched an empty row
+for up to 24 hours, which is indistinguishable from a mistyped ticker.
+
+**The marker now says what was DONE, not just when:** the date *and* the
+sorted tracked set. Adding or removing a stock stops it matching, so the
+very next cycle fetches it — minutes, not a day. It is read **after** the
+list, because the list is part of it.
+
+**Why this and not a wake signal from the web form.** The baseline change
+solved its equivalent with `force=True` pushed from the caller. This
+needs no cross-thread plumbing at all: the tracked set is already in the
+database the loop reads every pass, so the marker can simply be honest
+about what it covers. Less machinery, and it cannot get out of step.
+
+### VUAG specifically will not work, and the page will say so
+
+VUAG is the LSE-listed, GBP-denominated Vanguard S&P 500 UCITS
+accumulating ETF. Alpaca is a US broker serving US-listed symbols, so
+there are no bars to fetch. The ticker passes validation — it is checked
+by **shape**, deliberately, because a list of known symbols would reject
+the first new listing nobody thought of — and then the row shows a dash
+with the raw upstream response. **The US equivalent is `VOO`** (same
+index, same manager, distributing rather than accumulating, USD). Since
+the series is total return, `VOO` and an accumulating share class track
+the same thing for this comparison.
+
+Also worth stating: a GBP instrument compared against a USD account with
+no FX conversion would be wrong even if the bars existed, so "it does not
+work" is the correct outcome rather than a gap to close.
+
+### Verification
+
+- **3 sabotage breakages, all 3 caught red** — the date-only marker
+  restored, the quiet pass not marking itself, and the short-circuit
+  removed entirely — each verified to still import first.
+- The third came back **green on the first attempt**: the test made two
+  passes, and without the short-circuit the add still gets fetched, so
+  "it got fetched" does not prove the marker is read. A **third** pass
+  with nothing changed does, and it was added.
+- The behaviour is asserted by **calling the function twice with a real
+  state dict**, not by grepping the source — and the state dict is seeded
+  non-empty, because an empty dict is falsy and a regression written as
+  `state or {}` would pass against one (§14's own lesson).
+- Full suite green offline: **3960 tests**.

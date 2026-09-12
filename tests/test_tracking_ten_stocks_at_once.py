@@ -679,16 +679,89 @@ class TestTheSchedulerActuallyRefreshesThem:
             "nothing fetches bars for the tracked stocks, so every line "
             "but SPY would be permanently empty")
 
-    def test_it_has_its_own_daily_marker_so_spy_is_never_held_up(self):
+    def test_it_has_its_own_marker_so_spy_is_never_held_up(self):
         import inspect
 
         from catalyst.orchestrator import scheduler
 
         src = inspect.getsource(scheduler._refresh_tracked_comparisons)
-        assert "comparison_day" in src
+        assert "comparison_key" in src
         assert "benchmark_day" not in src, (
             "sharing SPY's marker means a comparison ticker Alpaca will "
             "not answer can stop SPY being refreshed")
+
+    def test_a_stock_added_today_is_fetched_on_the_NEXT_cycle(self):
+        """OWNER-ASKED: add a stock mid-afternoon and compare it against
+        the last ten days. The date-only marker meant a day on which
+        nothing extra was tracked set it and returned, so the new stock
+        waited until TOMORROW - an empty row for up to a day, looking
+        exactly like a mistyped ticker.
+
+        The marker has to name the tracked SET, so adding one stops it
+        matching. Asserted by calling the function twice with a real
+        state dict, which is the behaviour rather than the source text.
+        """
+        import sqlite3 as _sq
+
+        from catalyst.orchestrator import scheduler
+
+        calls = []
+
+        class Creds:
+            alpaca_key = "k"
+            alpaca_secret = "s"
+
+        import catalyst.data.benchmark as bench
+
+        real = bench.refresh_comparisons
+
+        def spy(_root, _k, _s, symbols, **_kw):
+            calls.append(tuple(sorted(symbols)))
+            return {s: bench.RefreshResult(written=1) for s in symbols}
+
+        bench.refresh_comparisons = spy
+        try:
+            import tempfile
+            from catalyst.storage import init_db
+            from catalyst.dashboard import server
+
+            with tempfile.TemporaryDirectory() as d:
+                path = f"{d}/t.db"
+                conn = init_db(path)
+                benchmark.record(conn, capital_cents=Decimal("200000"),
+                                 start_date=AUG14, source="owner_set",
+                                 account_fingerprint="", reason="x")
+                conn.close()
+                state = {"something": "else"}   # non-empty: falsy is a trap
+                today = date(2026, 9, 12)
+                c = _sq.connect(path)
+                try:
+                    # Pass one: only the default SPY, nothing to fetch.
+                    scheduler._refresh_tracked_comparisons(
+                        c, path, Creds(), state, today)
+                    assert calls == [], "SPY is the refresher's own job"
+                    marked = state.get("comparison_key")
+                    assert marked, "the quiet pass must still mark itself"
+                    # The owner adds a stock, same day.
+                    server.track_stock(path, {
+                        "ticker": "AAPL", "amount_usd": "2000",
+                        "start_date": "2026-09-02"})
+                    scheduler._refresh_tracked_comparisons(
+                        c, path, Creds(), state, today)
+                    # AND A SETTLED SET IS NOT RE-FETCHED. Without the
+                    # short-circuit the add still works, so "it got
+                    # fetched" alone does not prove the marker is read -
+                    # a third pass with nothing changed does.
+                    scheduler._refresh_tracked_comparisons(
+                        c, path, Creds(), state, today)
+                finally:
+                    c.close()
+            assert calls == [("AAPL",)], (
+                "the stock added today was not fetched until tomorrow: "
+                f"{calls}")
+            assert state["comparison_key"] != marked
+        finally:
+            bench.refresh_comparisons = real
 
     def test_a_stuck_symbol_does_not_burn_the_days_only_try(self):
         import inspect
@@ -696,7 +769,8 @@ class TestTheSchedulerActuallyRefreshesThem:
         from catalyst.orchestrator import scheduler
 
         src = inspect.getsource(scheduler._refresh_tracked_comparisons)
-        marker = src.index('state["comparison_day"] = today', src.index("stuck"))
+        marker = src.index('state["comparison_key"] = done_key',
+                           src.index("stuck"))
         guard = src.index("if not stuck:")
         assert guard < marker, (
             "the marker is set before the failures are checked, so one "
