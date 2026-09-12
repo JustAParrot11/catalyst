@@ -118,6 +118,23 @@ def evaluate(
 ) -> RiskDecision:
     skip_reasons: list[str] = []
 
+    # NOTHING SIZES OFF A PRICE THAT IS NOT LIVE. THIS IS THE GATE.
+    #
+    # Since 2026-09-12 research may run while the market is shut, against
+    # the newest cached daily close, so a view can be formed on Saturday
+    # against Friday's close (owner-asked: the weekend deep dive). A
+    # closed-market snapshot must therefore be able to exist - and must
+    # never reach sizing. risk review F5, unchanged: "sizing and the
+    # spread gate off Friday's book is not a decision, it's a guess."
+    #
+    # Refused HERE, in the single gate every candidate passes through,
+    # rather than trusted to each caller. A caller that forgets is the
+    # failure mode; a gate that refuses is not. The spread gate is the
+    # sharpest case: half_spread_bp on a closed book is meaningless, and
+    # the owner's own hard bound is 20bp.
+    if getattr(market, "priced_off", "live_nbbo") != "live_nbbo":
+        skip_reasons.append("price_not_live_cannot_size")
+
     # A catalyst_type with no configured parameters must SKIP, not
     # KeyError inside sizing and kill the cycle (stress ESCALATION-6).
     for param_name in ("adverse_gap_assumption", "stop_width",

@@ -558,6 +558,28 @@ DEFAULT_WINDOW_DAYS = 7
 #: hardcoded table->column map, which would rot silently the first time
 #: a table was added: a table whose time column nobody remembered to
 #: register would be exported in full while the bundle claimed a window.
+#:
+#: WHY THIS IS A LIST AND NOT A RULE, which is worth writing down because
+#: house rule 7 says classify by the rule and the obvious rule here is
+#: WRONG. "Anything ending in _at" was measured against the live schema
+#: on 2026-09-12 and it changes the answer for five existing tables,
+#: because several carry two timestamps and only one of them is the row's
+#: own age:
+#:
+#:   refusals                    refused_at    vs scored_at  (usually NULL)
+#:   position_review_checkins    recorded_at   vs next_check_at (a FUTURE date)
+#:   kill_switch_events          triggered_at  vs cleared_at  (usually NULL)
+#:   adaptive_param_log          changed_at    vs reverted_at (usually NULL)
+#:   cost_reconciliation_events  reconciled_at vs acknowledged_at
+#:
+#: Windowing `refusals` on `scored_at` would drop every unscored refusal
+#: from the diagnostic bundle - all 291 of them - which is precisely the
+#: evidence the refusal tracker exists to accumulate. Which timestamp is
+#: a row's age is not derivable from its name, so this stays an explicit
+#: list. What keeps it honest is not the list, it is
+#: tests/test_bundle_time_window.py: a table whose time column is not
+#: here fails the suite loudly instead of being exported whole behind a
+#: window the bundle claims. It rots noisily, which is the design.
 _TIME_COLUMNS = (
     "ts", "at", "called_at", "decided_at", "reconciled_at", "changed_at",
     "fetched_at", "attempted_at", "discovered_at", "refused_at",
@@ -566,6 +588,9 @@ _TIME_COLUMNS = (
     "first_seen_at", "asserted_at", "recorded_at", "created_at", "run_at",
     "repriced_at", "taken_at", "triggered_at", "checked_at",
     "nominated_at", "observed_at",
+    # When a research view was formed, and therefore which price it was
+    # reasoning about. NOT `price_at_view`, which is money, not a clock.
+    "formed_at",
 )
 
 

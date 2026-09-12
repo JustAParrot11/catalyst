@@ -1068,9 +1068,43 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
         existing = conn.execute(
             "SELECT ticker, catalyst_date FROM candidates WHERE id=?",
             (c.id,)).fetchone()
-        if conn.execute("SELECT 1 FROM research_views WHERE candidate_id=?",
-                        (c.id,)).fetchone():
-            screen_reasons.append(f"{c.id}: already_researched")
+        # AN ID COLLISION IS CHECKED FIRST, because it is the only one of
+        # these that means the RECORD IS WRONG rather than that the
+        # candidate is finished. Moved ahead of the others on 2026-09-12:
+        # once a traded candidate stopped being screened out by its view
+        # and started being screened out by its DECISION, a colliding id
+        # arriving after a trade was reported as "already_decided" -
+        # true, and a description of the wrong problem. Defect 19's
+        # protection held either way; what was lost was being told which
+        # thing had happened.
+        if existing and (existing[0] != c.ticker
+                         or existing[1] != c.catalyst_date.isoformat()):
+            # Candidate ids are content hashes: a collision means two
+            # different clusters share an id. INSERT OR IGNORE kept the
+            # first row while the second candidate was traded, so the
+            # audit trail described the wrong company (stress-tester
+            # defect 19). Every trade must be explainable after the fact.
+            screen_reasons.append(
+                f"{c.id}: id_collision_with_different_candidate "
+                f"(stored {existing[0]} {existing[1]}, "
+                f"got {c.ticker} {c.catalyst_date.isoformat()})")
+        # RESEARCHED IS NOT THE SAME AS FINISHED, since 2026-09-12.
+        #
+        # This used to drop any candidate with a view, full stop. That was
+        # right while research and sizing always happened in the same
+        # iteration - a view existing meant the whole decision had been
+        # made. It stopped being right the moment research could run while
+        # the market was shut (the owner's weekend deep dive): a view
+        # formed on Saturday against Friday's close would be written here
+        # and then thrown away on Monday, so the paid call bought
+        # NOTHING. Found by reading this loop before building that, not
+        # by a test - which is why there is now a test for it.
+        #
+        # What finishes a candidate is a RISK DECISION. A view with no
+        # decision is work in progress and belongs in the belt.
+        elif conn.execute("SELECT 1 FROM risk_decisions WHERE candidate_id=?",
+                          (c.id,)).fetchone():
+            screen_reasons.append(f"{c.id}: already_decided")
         elif _failed_attempts(conn, c.id) >= MAX_RESEARCH_ATTEMPTS:
             # A PAID CALL THAT FAILED LEFT NO TRACE THE SCREEN COULD SEE.
             # research_views is written only when a view PARSES
@@ -1089,17 +1123,6 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
                 + str(_last_skip_reason(conn, c.id) or "no reason recorded"))
         elif c.ticker in open_tickers:
             screen_reasons.append(f"{c.id}: position_already_open")
-        elif existing and (existing[0] != c.ticker
-                           or existing[1] != c.catalyst_date.isoformat()):
-            # Candidate ids are content hashes: a collision means two
-            # different clusters share an id. INSERT OR IGNORE kept the
-            # first row while the second candidate was traded, so the
-            # audit trail described the wrong company (stress-tester
-            # defect 19). Every trade must be explainable after the fact.
-            screen_reasons.append(
-                f"{c.id}: id_collision_with_different_candidate "
-                f"(stored {existing[0]} {existing[1]}, "
-                f"got {c.ticker} {c.catalyst_date.isoformat()})")
         else:
             fresh.append(c)
             conn.execute(
@@ -1155,41 +1178,113 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
             _note_not_attempted(conn, c.id,
                                 "ticker_already_entered_this_cycle", now)
             continue
-        if block_entries is not None:
-            report.drop_reasons.setdefault("researched", []).append(
-                f"{c.id}: {block_entries}")
-            _note_not_attempted(conn, c.id, str(block_entries), now)
-            continue
         if transport is None:
             report.drop_reasons.setdefault("researched", []).append(
                 f"{c.id}: no_model_transport_configured")
             _note_not_attempted(conn, c.id,
                                 "no_model_transport_configured", now)
             continue
-        market = build_market_snapshot(broker, c.ticker, now)
-        if market is None:
+
+        # DOES A VIEW ALREADY EXIST FOR THIS CANDIDATE?
+        #
+        # OWNER-ASKED 2026-09-12: "is there any harm in doing a deep dive
+        # into the news to find potential for monday... it says if price
+        # is less than this on monday buy, if not resume as normal?"
+        #
+        # Since this date the two halves of a decision can happen on
+        # different days: research while the market is shut, sizing when
+        # it opens. So there are three cases here and they were one.
+        stored = _stored_view(conn, c.id)
+        research_only = False
+
+        if stored is None and block_entries == "market_closed":
+            # CASE 1 - THE WEEKEND. Research may run; nothing may be
+            # sized or placed. Deliberately narrow: only market_closed
+            # relaxes, because the other two reasons entries are blocked
+            # (an unprotected position, an unreadable clock) are states
+            # where spending on an opinion is not the right thing to do.
+            research_only = True
+        elif block_entries is not None:
             report.drop_reasons.setdefault("researched", []).append(
-                f"{c.id}: no_market_quote")
-            _note_not_attempted(conn, c.id, "no_market_quote", now)
+                f"{c.id}: {block_entries}")
+            _note_not_attempted(conn, c.id, str(block_entries), now)
             continue
-        log = investigate(
-            c, CostContext(conn=conn,
-                           governor_profit_share=Decimal(
-                               str(params["governor_profit_share"])),
-                           cycle_id=cycle_id, kind=kind,
-                           owner_monthly_cap_cents=owner_monthly_cap_cents),
-            transport, graph_context=_graph_context(c, conn),
-            signals=_signals_for(c, events),
-            **({"model": research_model} if research_model else {}),
-            # THE SNAPSHOT WAS ALREADY HERE, three lines up, and went
-            # only to the risk engine. The model was being asked what
-            # price and volume had done and shown neither.
-            market=market)
-        if log.parsed_view is None:
+
+        if research_only:
+            market = build_closed_market_snapshot(bars_dir, c.ticker)
+            if market is None:
+                # HOUSE RULE 3: this is not "nothing happened". No cached
+                # bars means no price to reason about at all, and the
+                # candidate waits for a live quote exactly as it used to.
+                report.drop_reasons.setdefault("researched", []).append(
+                    f"{c.id}: market_closed_and_no_cached_close")
+                _note_not_attempted(conn, c.id,
+                                    "market_closed_and_no_cached_close", now)
+                continue
+        else:
+            market = build_market_snapshot(broker, c.ticker, now)
+            if market is None:
+                report.drop_reasons.setdefault("researched", []).append(
+                    f"{c.id}: no_market_quote")
+                _note_not_attempted(conn, c.id, "no_market_quote", now)
+                continue
+
+        if stored is not None:
+            # CASE 3 - MONDAY. A view is in hand and the market is open,
+            # so no second paid call. What has to be checked first is
+            # whether the price the thesis was written about still
+            # exists: that is the owner's condition, and
+            # risk/stale_view.py is why the THRESHOLD comes from the
+            # stock's own measured history rather than from the model.
+            gate = _view_still_describes_the_price(
+                conn, c, market, bars_dir, report, now)
+            if gate is not None:
+                continue
+        if stored is None:
+            # CASES 1 AND 2 - THE PAID CALL. Case 3 never reaches here:
+            # a view already exists and paying for a second one because
+            # the calendar turned over would be the same money for the
+            # same answer.
+            log = investigate(
+                c, CostContext(conn=conn,
+                               governor_profit_share=Decimal(
+                                   str(params["governor_profit_share"])),
+                               cycle_id=cycle_id, kind=kind,
+                               owner_monthly_cap_cents=owner_monthly_cap_cents),
+                transport, graph_context=_graph_context(c, conn),
+                signals=_signals_for(c, events),
+                **({"model": research_model} if research_model else {}),
+                # THE SNAPSHOT WAS ALREADY HERE, three lines up, and went
+                # only to the risk engine. The model was being asked what
+                # price and volume had done and shown neither.
+                market=market)
+            if log.parsed_view is None:
+                report.drop_reasons.setdefault("researched", []).append(
+                    f"{c.id}: {log.skipped_reason}")
+                continue
+            researched += 1
+            view = log.parsed_view
+            # WHICH PRICE THIS VIEW WAS FORMED AT, and whether it was
+            # live. Monday cannot apply the owner's condition without it,
+            # and `evaluate` cannot refuse a non-live price without the
+            # provenance travelling with the snapshot.
+            _record_view_context(conn, c.id, market, now)
+        else:
+            view = stored
+
+        if research_only:
+            # THE WEEKEND STOPS HERE, AND THAT IS THE POINT. The view is
+            # recorded; nothing is sized, nothing is placed. The candidate
+            # comes back when the market opens, with the thinking already
+            # paid for, and Monday's slots go to something else.
             report.drop_reasons.setdefault("researched", []).append(
-                f"{c.id}: {log.skipped_reason}")
+                f"{c.id}: researched_while_closed_awaiting_open")
+            _log.info(
+                "Researched %s while the market was shut, against the "
+                "cached close of %s. Nothing is sized until a live quote "
+                "exists, and the move since this price is checked first.",
+                c.ticker, market.last_close)
             continue
-        researched += 1
 
         cluster_key = cluster_keys.get(c.id) or _fallback_cluster_key(c)
         # THE HISTORY HAS TO BE THERE BEFORE IT CAN BE READ. `data/` is
@@ -1258,7 +1353,7 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
         # falls back to the category value for any ticker not cached -
         # which is the conservative direction, since the category value
         # is the ceiling.
-        decision = evaluate(c, log.parsed_view, portfolio, params, market,
+        decision = evaluate(c, view, portfolio, params, market,
                             cluster_key=cluster_key, bars_dir=bars_dir)
         decision_id = _persist_decision(conn, decision, cluster_key)
         if decision.action == "skip":
@@ -1589,6 +1684,228 @@ def build_market_snapshot(broker: Broker, ticker: str,
         half_spread_bp=half_spread_bp.quantize(Decimal("0.1")),
         # not consumed by any current sizing rule; populated when one is
         median_daily_dollar_volume=Decimal("0"))
+
+
+def build_closed_market_snapshot(bars_dir, ticker: str) -> "MarketSnapshot | None":
+    """The newest cached daily close, for RESEARCH ONLY while the market
+    is shut. Never for sizing.
+
+    OWNER-ASKED 2026-09-12: *"is there any harm in doing a deep dive into
+    the news to find potential for monday"*. There was no harm and there
+    was a gap: the cycle runs every fifteen minutes all weekend, the
+    feeds collect and the hunt nominates, and then one gate -
+    `market_closed` - stopped research as well as entries. So the whole
+    weekend was spent finding things and never forming a view on any of
+    them, and Monday's queue had to do the thinking at the worst moment.
+
+    Research does not need a tradeable price; it needs a price to reason
+    about. Sizing needs a tradeable one. `build_market_snapshot` refuses
+    a stale quote for the second reason and was being used for both.
+
+    SO THE PROVENANCE IS CARRIED, NOT ASSUMED. `priced_off` is set to
+    "daily_close" and `risk.evaluate` refuses any snapshot that is not
+    "live_nbbo" - so this object physically cannot size a position, and
+    that refusal is a gate rather than a convention somebody has to
+    remember (risk review F5 stands unchanged).
+
+    `half_spread_bp` is deliberately a REFUSING value rather than zero. A
+    closed book has no spread to measure, and zero is the one figure that
+    would sail through the owner's 20bp hard bound if this ever did reach
+    the spread gate. Belt and braces behind the `priced_off` refusal.
+
+    Never raises: no cached history simply means no snapshot, and the
+    candidate waits for a live quote like it always did.
+    """
+    if not bars_dir:
+        return None
+    try:
+        from catalyst.data.price_action import _rows
+
+        rows = _rows(bars_dir, ticker)
+    except Exception:  # noqa: BLE001 - research must not break a cycle
+        return None
+    if not rows:
+        return None
+    try:
+        close = _finite(rows[-1][1])
+    except (ArithmeticError, TypeError, ValueError, IndexError):
+        return None
+    if close <= 0:
+        return None
+    return MarketSnapshot(
+        ticker=ticker, last_close=close,
+        # NOT ZERO. See the docstring: an impossible spread, so that if
+        # this ever reached the spread gate it would be refused rather
+        # than pass as the tightest book ever measured.
+        half_spread_bp=Decimal("100000"),
+        median_daily_dollar_volume=Decimal("0"),
+        priced_off="daily_close")
+
+
+def _stored_view(conn, candidate_id: str):
+    """A view recorded on an earlier pass, or None.
+
+    The weekend half of the owner's request needs this: a view formed on
+    Saturday against Friday's close has to survive to Monday, when a live
+    quote exists and it can be sized. Without it the view is written,
+    dropped by the screen as `already_researched`, and the paid call buys
+    nothing.
+    """
+    from catalyst.research.schema import ResearchView
+
+    try:
+        row = conn.execute(
+            "SELECT candidate_id, direction, conviction, thesis, "
+            "       invalidation, expected_holding_days, priced_in, "
+            "       priced_in_reasoning "
+            "FROM research_views WHERE candidate_id = ?",
+            (candidate_id,)).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    try:
+        return ResearchView(
+            candidate_id=str(row[0]), direction=str(row[1]),
+            conviction=float(row[2]), thesis=str(row[3]),
+            invalidation=str(row[4]), expected_holding_days=int(row[5]),
+            priced_in=bool(row[6]), priced_in_reasoning=str(row[7]))
+    except (TypeError, ValueError):
+        return None
+
+
+def _record_view_context(conn, candidate_id: str, market, now) -> None:
+    """What price the view was formed at, and whether it was live.
+
+    Written on EVERY view, not only the off-hours ones, so "formed at a
+    live mid" and "no context recorded" stay different facts - the second
+    is what an older database looks like and must not read as the first.
+    """
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO research_view_context "
+            "(candidate_id, price_at_view, priced_off, formed_at) "
+            "VALUES (?,?,?,?)",
+            (candidate_id, str(market.last_close),
+             str(getattr(market, "priced_off", "live_nbbo")),
+             now.isoformat()))
+        conn.commit()
+    except sqlite3.Error:
+        pass          # the view itself is the record; this is context
+
+
+def _view_context(conn, candidate_id: str):
+    """(price_at_view, priced_off) or None."""
+    try:
+        row = conn.execute(
+            "SELECT price_at_view, priced_off FROM research_view_context "
+            "WHERE candidate_id = ?", (candidate_id,)).fetchone()
+    except sqlite3.Error:
+        return None
+    return (row[0], str(row[1])) if row else None
+
+
+def _supersede_view(conn, candidate_id: str) -> None:
+    """Forget a view whose price has gone, so the candidate can be
+    researched again at the price actually on offer.
+
+    THE OWNER'S OTHER BRANCH, in their words: *"if not, resume as
+    normal"*. A refusal here is not a discard - the candidate keeps its
+    place in the funnel and loses only the right to trade on a price that
+    no longer exists. Deleting the view is what lets the screen admit it
+    again; the refusal itself is already on the record.
+    """
+    try:
+        conn.execute("DELETE FROM research_views WHERE candidate_id = ?",
+                     (candidate_id,))
+        conn.execute("DELETE FROM research_view_context WHERE candidate_id = ?",
+                     (candidate_id,))
+        conn.commit()
+    except sqlite3.Error:
+        pass
+
+
+def _view_still_describes_the_price(conn, candidate, market, bars_dir,
+                                    report, now) -> str | None:
+    """THE OWNER'S MONDAY CONDITION. Returns a refusal reason, or None to
+    proceed.
+
+    OWNER-ASKED 2026-09-12: *"it says if price is less than this on monday
+    buy, if not resume as normal"*.
+
+    THE THRESHOLD IS MEASURED, NOT STATED. The owner's phrasing hands the
+    number to the model; this project's one non-negotiable rule is that
+    the model decides what and whether while code decides how much and at
+    what price. So the bar is that stock's own 95th-percentile daily move,
+    read from its cached bars by the same function that places its stop.
+    See risk/stale_view.py for the whole argument.
+
+    ONLY APPLIES TO A VIEW FORMED OFF A CLOSED BOOK. A view formed at a
+    live mid in an earlier cycle of the same session has not crossed a
+    session boundary, and re-gating it would refuse candidates for the
+    ordinary intraday drift the spread gate and sizing already handle.
+
+    A refusal is recorded in `refusals` with the price, so it is scored
+    like every other decline, and the stale view is superseded so the
+    candidate can be researched again at the price actually on offer -
+    the owner's "resume as normal".
+    """
+    from catalyst.risk.stale_view import (
+        ORDINARY_MOVE_PERCENTILE, move_against_view, sentence,
+    )
+
+    ctx = _view_context(conn, candidate.id)
+    if ctx is None or ctx[1] == "live_nbbo":
+        return None
+
+    bound = None
+    if bars_dir:
+        try:
+            from catalyst.risk.stock_gap import daily_move_percentile
+
+            bound = daily_move_percentile(bars_dir, candidate.ticker,
+                                          ORDINARY_MOVE_PERCENTILE)
+        except Exception:  # noqa: BLE001 - unmeasurable, handled below
+            bound = None
+
+    reason, move = move_against_view(ctx[0], market.last_close, bound)
+    if reason is None:
+        return None
+
+    said = sentence(reason, move, bound)
+    # A DECISION ROW, SO IT IS SCORED LIKE EVERY OTHER DECLINE. The
+    # refusal tracker is the brief's "single most important feedback
+    # loop", and a refusal that lives only in a log line is one it
+    # cannot read.
+    from catalyst.risk import RiskDecision
+
+    decision = RiskDecision(
+        candidate_id=candidate.id, action="skip", side=None,
+        notional_usd=None, qty=None, stop_price=None,
+        planned_exit_date=None, skip_reasons=(reason,),
+        limits_applied=(), adaptive_params_snapshot={
+            "stale_view_move": str(move),
+            "ordinary_daily_move": str(bound) if bound is not None else None,
+            "price_at_view": str(ctx[0]),
+            "price_now": str(market.last_close)})
+    try:
+        decision_id = _persist_decision(conn, decision, "")
+        conn.execute(
+            "INSERT INTO refusals "
+            "(decision_id, candidate_id, price_at_refusal, refused_at) "
+            "VALUES (?,?,?,?)",
+            (decision_id, candidate.id, str(market.last_close),
+             now.isoformat()))
+        conn.commit()
+    except sqlite3.Error:
+        pass
+    report.drop_reasons.setdefault("proposed", []).append(
+        f"{candidate.id}: {reason}")
+    _log.info("Declined %s on the stored view: %s The view is discarded, "
+              "so it is researched again at the live price if it is still "
+              "in window.", candidate.ticker, said)
+    _supersede_view(conn, candidate.id)
+    return reason
 
 
 def _graph_context(candidate: Candidate, conn) -> str | None:

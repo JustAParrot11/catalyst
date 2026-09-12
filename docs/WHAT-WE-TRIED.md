@@ -815,3 +815,166 @@ would sit in the audit trail forever and price nothing. The rule now is
 checkable offline, and a newly selected model qualifies from its first
 call onward. Before that it does not need a hand-typed rate, which is
 the entire point.
+
+---
+
+## 13. The weekend was collecting evidence and never judging it
+
+Owner-asked 2026-09-12: *"news is released on the weekend aswell right?
+is there any harm in doing a deep dive into the news to find potential
+for monday. e.g. it finds a good connection and market opportunity, it
+says if price is less than this on monday buy, if not resume as normal?
+I want proper connections being made here. Ensure we keep API cost in
+mind still."*
+
+### What was actually happening, measured before building anything
+
+The cycle runs **every fifteen minutes, seven days a week** — there is no
+weekday gate anywhere in the scheduler. Feeds collect, the screens build,
+and the hunt nominates. Then **one** gate, `market_closed`, stopped
+research *as well as* entries (`cycle.py`, the `block_entries` check
+ahead of `investigate`). So the whole weekend was spent finding things
+and never forming a view on any of them, and Monday's queue had to do the
+thinking at the worst possible moment.
+
+**What is and is not released on a weekend:** EDGAR is shut — no Form 4s,
+no filings. Federal Register is business days only. What *is* live is
+news and the hunt's own web searches, which is also the **expensive**
+input (results arrive as input tokens: 34k median, 166k max). So a
+weekend deep dive is disproportionately a search exercise, and that is
+worth knowing before pointing money at it.
+
+### SUPERSEDED: "the bot is at 105% of its sustainable rate"
+
+§5 recorded *"$3.50/day against the $3.33/day the $100 cap sustains —
+105% of the rate, projecting to $105/month."* **That is wrong**, and it
+is the same error as the entry above it in the opposite direction: it
+multiplied a **trading-day** rate by 30 **calendar** days. Research is
+structurally impossible on the ~9 weekend days a month, so:
+
+```
+~21 trading days x $3.50   =  $73.50
+~9 weekend days x ~$0.23   =   $2.07   (hunts only; research was blocked)
+                              -------
+                               ~$75/month, about 75% of a $100 cap
+```
+
+So **there is roughly $25/month of headroom and it sits precisely on the
+weekend.** This change spends money the weekend could not spend, and
+needs no cap increase. Recorded as a correction because §5's number was
+what justified rejecting `research_per_cycle` increases, and the
+recurring-failure table in §6 already carries "believing a
+month-to-date number is a run rate" — this is its mirror image, and it is
+now two entries for the same lesson: **divide by the days the bot can
+actually spend on.**
+
+### The three things that had to change, and only one was the feature
+
+| # | what | why |
+|---|---|---|
+| 1 | Research may run against the newest **cached daily close** while the market is shut | The feature. `build_closed_market_snapshot` |
+| 2 | `already_researched` **DROPPED the candidate** | A prerequisite, not a nicety. A view formed on Saturday would have been written and then thrown away on Monday, so the paid call bought **nothing**. What finishes a candidate is a risk **decision**, not a view |
+| 3 | The owner's Monday condition | `risk/stale_view.py` |
+
+**Number 2 was found by reading the loop before building the feature, not
+by a test.** That is the fourth time in this project that the thing which
+broke a change was plumbing one level away from it, and it is why the new
+tests assert the funnel outcome rather than only the new function.
+
+### The owner's condition, with the number taken off the model
+
+*"it says if price is less than this on monday buy"* puts a **price that
+gates an order** in the model's hands. That is the one rule that does not
+move: the model decides *what and whether*, code decides *how much and at
+what price*. This bot's own record has a candidate scoring **0.82
+conviction** on a compelling thesis whose conclusion was *do not trade* —
+a thesis that also set its own entry price would convert persuasiveness
+straight into position size.
+
+So the behaviour shipped and the threshold is **measured**: that stock's
+own **95th-percentile daily move**, from `stock_gap.daily_move_percentile`
+— the same function that already decides where its stop sits. One idea,
+one number, so the two cannot drift apart.
+
+**Both directions refuse, named separately** so the refusal tracker can
+score them apart:
+
+| reason | when | why it is not obviously right |
+|---|---|---|
+| `moved_up_past_view_price` | gapped up past its own noise | the owner's case: the move already happened, you are paying for it |
+| `moved_down_past_view_price` | gapped down past its own noise | **cheaper is not better** — something happened the thesis never saw. If the record later shows these were money left on the table, that is evidence to loosen |
+| `view_price_move_unmeasurable` | the stock's own noise cannot be measured | no way to tell an ordinary move from a violent one. Refusing is the tight direction |
+
+A refusal is **not a discard**: it writes a `risk_decisions` row and a
+`refusals` row with the price, so it is scored like every other decline,
+and the stale view is **superseded** so the candidate is researched again
+at the price actually on offer — the owner's own *"if not, resume as
+normal"*.
+
+**Only a view that crossed a session boundary is gated.** Re-gating an
+intraday view would refuse candidates for ordinary drift that sizing and
+the spread gate already handle.
+
+### Risk review F5 is unchanged, and the refusal moved into the gate
+
+F5: *"sizing and the spread gate off Friday's book is not a decision,
+it's a guess."* A closed-market snapshot now has to be able to **exist**,
+so the refusal had to move from "such a snapshot cannot be built" to
+"such a snapshot cannot size". `MarketSnapshot.priced_off` carries the
+provenance and **`risk/evaluate.py` refuses anything that is not
+`live_nbbo`** — in the single gate every candidate passes through, rather
+than trusted to each caller. Belt and braces: the closed snapshot carries
+`half_spread_bp = 100000`, because **zero** is the one figure that would
+sail through the owner's 20bp hard bound as the tightest book ever
+measured.
+
+### TRIED AND REJECTED: replacing the bundle's time-column list with a rule
+
+The new table failed `test_bundle_time_window.py`, and the obvious
+house-rule-7 fix — "window on anything ending in `_at`" instead of a
+30-name list — was **measured against the live schema and is wrong.**
+Five existing tables carry two timestamps where only one is the row's own
+age:
+
+| table | the row's age | the other one |
+|---|---|---|
+| `refusals` | `refused_at` | `scored_at` — usually NULL |
+| `position_review_checkins` | `recorded_at` | `next_check_at` — a **future** date |
+| `kill_switch_events` | `triggered_at` | `cleared_at` — usually NULL |
+| `adaptive_param_log` | `changed_at` | `reverted_at` — usually NULL |
+| `cost_reconciliation_events` | `reconciled_at` | `acknowledged_at` |
+
+Windowing `refusals` on `scored_at` would drop **every unscored refusal**
+from the diagnostic bundle — all 291 — which is the exact evidence the
+refusal tracker exists to accumulate. **Which timestamp is a row's age is
+not derivable from its name.** So the list stays, and what keeps it
+honest is the test: a table whose time column is missing fails the suite
+loudly rather than being exported whole behind a window the bundle
+claims. **It rots noisily, which is the design** — and that is the
+counter-example to house rule 7 worth remembering.
+
+### Also corrected: the id-collision check now runs first
+
+Once a traded candidate stopped being screened out by its *view* and
+started being screened out by its *decision*, a colliding id arriving
+after a trade was reported as `already_decided` — true, and a description
+of the wrong problem. Defect 19's protection held either way; what was
+lost was being told which thing had happened. An id collision means the
+**record is wrong**, so it is checked ahead of everything else.
+
+### Verification
+
+- **18 sabotage breakages, all 18 caught red**, each verified to still
+  import. The first round left **one uncaught**: an unmeasurable move
+  waving through instead of refusing, which had no test at all. Tests
+  added, re-sabotaged, red.
+- Full suite green offline: **3818 tests**.
+
+### What is NOT claimed
+
+- **Whether a Friday-close view is still good on Monday is unmeasured.**
+  The gate bounds the damage; it does not prove the premise. If weekend
+  views are systematically refused on Monday, the money spent forming
+  them is wasted and the honest response is to stop — which the funnel
+  will show, per arm, because the refusal reasons are named.
+- The weekend has never actually run this way. Zero weekend views exist.

@@ -327,6 +327,10 @@ def test_money_critical_files_carry_the_marker():
         # Can close a position, so it belongs on the list; it carried the
         # old marker without ever being checked for it.
         "research/position_review.py",
+        # Decides whether a stored view may still be acted on, which is
+        # the difference between entering at the price the thesis was
+        # written about and entering after the move already happened.
+        "risk/stale_view.py",
     ]
     missing = [
         rel for rel in must_carry_marker
