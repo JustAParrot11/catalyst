@@ -1821,3 +1821,65 @@ work" is the correct outcome rather than a gap to close.
   non-empty, because an empty dict is falsy and a regression written as
   `state or {}` would pass against one (§14's own lesson).
 - Full suite green offline: **3960 tests**.
+
+---
+
+## 20. Saying "US-listed only" in the three places it has to be said
+
+Owner-asked 2026-09-12: *"Can we make it clear only add US stocks that
+are listed if not already"* — following §19, where VUAG turned out to
+have no bars because it is the LSE listing.
+
+### Why the form cannot simply enforce it
+
+The ticker is validated by **shape**, not against a list of known
+symbols, and that is deliberate: a list would reject the first new
+listing nobody thought of (house rule 7). So a London ticker **is
+accepted**, and only reports itself once the fetch has failed. That makes
+this a wording problem rather than a validation one — and the wording has
+to admit what the code actually does, or it becomes a promise the code
+does not keep.
+
+Said in three places, each for a different moment:
+
+| where | what it says |
+|---|---|
+| **the input label** | "US-listed ticker, exactly" — visible text, not a `title` attribute a mouse has to find |
+| **the note** | the rule, why (the closes come from Alpaca, a US broker), the trap by name (VUAG and VUSA will not work, VOO is the US listing of the same index, and because these series include dividends it tracks what an accumulating share class does), and **that an unknown symbol is still accepted and reports itself** |
+| **the empty row** | when a line does not appear: *"either the spelling is wrong, or it is not US-listed"* — because a correctly spelled, real symbol can still have no prices, and blaming only the spelling sends the reader after the wrong thing |
+
+### Five sabotages, ALL FIVE GREEN on the first attempt
+
+Worth recording as a clean instance of §6's opening pattern. The tests
+asserted `"US-listed" in block`, `"VUAG" in block`, `"VOO" in block` —
+against the whole panel. Those strings appear in **three** places, so
+deleting any one of them left the other two and every sabotage passed.
+
+**A test that cannot tell which of three copies it found is not testing
+any of them.** Rewritten to extract each region first — the label text
+between `<label>` and its `<input>`, the note paragraph, and the specific
+`<tr>` for a ticker with no bars — and then all five went red.
+
+The same trap in miniature: the first label assertion searched a window
+around the input and would have passed on the `title` attribute alone,
+which is exactly the hidden-hover text the change exists to avoid.
+
+### And the note double-escaped its own em dash
+
+The wording went through `prov()`, which **escapes** — so `<b>US-listed</b>
+&mdash;` reached the page as visible `&amp;mdash;` and literal `<b>` tags.
+Caught by `test_no_double_escaped_entities` and `test_dashboard_ui_pass`,
+two tests that exist for exactly this, and `render.py`'s own docstring
+already names it: *"Same trap as passing `&mdash;` through `esc()`, which
+this dashboard has been bitten by before."* `prov_html` is the helper for
+text that is already HTML; the note uses it, and the only interpolation is
+an integer constant so nothing unescaped can leak.
+
+Fourth instance of this trap in the file's history, and the first where a
+test caught it before the owner did.
+
+### Verification
+
+- **5 sabotage breakages, all 5 caught red** after the tests were pinned
+  to regions; all 5 green before. Each verified to still import first.
+- Full suite green offline: **3963 tests**.

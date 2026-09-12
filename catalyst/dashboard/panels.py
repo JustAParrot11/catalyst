@@ -3766,8 +3766,10 @@ def _tracked_stocks(v, p: str) -> str:
                     " If you added it just now that is expected: the bot "
                     "fetches a new stock's history on its next daily "
                     "refresh and the line appears then. If it is still "
-                    "empty tomorrow, the ticker is probably not one Alpaca "
-                    "knows - check the spelling.")
+                    "empty tomorrow, Alpaca does not know this symbol - "
+                    "either the spelling is wrong, or it is not US-listed "
+                    "(a London listing such as VUAG has no prices here; "
+                    "VOO is the US equivalent).")
             detail = (f'<span class="prov">{esc(why)} Source tried: '
                       f"{esc(cs.source)}.</span>")
         else:
@@ -3807,9 +3809,11 @@ def _tracked_stocks(v, p: str) -> str:
     out.append(
         f'<form class="inline" id="{p}-track-form" method="post" '
         'action="/track-stock">'
-        '<label class="prov">ticker, exactly '
+        '<label class="prov">US-listed ticker, exactly '
         f'<input id="{p}-track-ticker" name="ticker" type="text" size="8" '
-        f'maxlength="{_cmp._MAX_TICKER_LEN}" placeholder="AAPL" required>'
+        f'maxlength="{_cmp._MAX_TICKER_LEN}" placeholder="AAPL" required '
+        'title="A US-listed symbol, for example AAPL, VOO or SPY. A London '
+        'or European listing (VUAG, VUSA) has no bars here.">'
         "</label> "
         '<label class="prov">dollars in '
         f'<input id="{p}-track-amount" name="amount_usd" type="text" '
@@ -3834,8 +3838,23 @@ def _tracked_stocks(v, p: str) -> str:
             + "</select></label> "
             f'<button id="{p}-untrack-submit" type="submit">Remove</button>'
             "</form>")
-    out.append(prov(
-        f"Up to {_cmp.MAX_COMPARISONS} stocks. Each is bought with its own "
+    # prov_html, NOT prov: this note carries <b> and an em-dash entity, and
+    # prov() escapes - which render.py's own docstring names as a trap this
+    # dashboard has been bitten by before. Caught by
+    # test_no_double_escaped_entities, which is why that test exists.
+    # The only interpolation is an int constant, so nothing unescaped leaks.
+    out.append(prov_html(
+        f"Up to {_cmp.MAX_COMPARISONS} stocks, and they must be "
+        "<b>US-listed</b> &mdash; the daily closes come from Alpaca, which is "
+        "a US broker, so a London or European listing of the same fund has "
+        "no prices here. VUAG and VUSA will not work; VOO is the US listing "
+        "of the same index, and because these series include dividends it "
+        "tracks what an accumulating share class does. A ticker is accepted "
+        "on its SHAPE rather than checked against a list of known symbols, "
+        "so a brand-new listing is never wrongly refused &mdash; which means "
+        "a symbol that does not exist is accepted here and reports itself in "
+        "the table above once the bot has tried to fetch it. "
+        "Each is bought with its own "
         "money on its own date, and every line is indexed to 100 at the "
         "left-hand edge of the chart so they can be read against each other. "
         "A stock keeps its colour when you correct its amount, and the "
