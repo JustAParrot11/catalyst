@@ -1140,6 +1140,39 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
     # Everything below this line is unchanged; only the ORDER of `fresh`
     # differs, and with it which candidates fall past `max_research`.
     # See ARM_ROTATION for the measurements that made this necessary.
+    # A CANDIDATE THAT ALREADY HAS A VIEW DOES NOT WANT A RESEARCH SLOT
+    # WHILE THE MARKET IS SHUT. It is waiting for the market to open, not
+    # for a research call.
+    #
+    # MEASURED 2026-09-12, eight consecutive closed-market cycles with 30
+    # candidates and a belt of 6:
+    #
+    #   cycle 1: researched 6      cycle 3: researched 0, 12 skipped
+    #   cycle 2: researched 6      cycles 4-8: researched 0
+    #
+    # So the weekend researched twelve candidates and then STOPPED
+    # FOREVER - the ones with views kept their places in
+    # `fresh[:max_research]`, were skipped as `market_closed` for nothing,
+    # and the eighteen behind them were never looked at. The weekend deep
+    # dive would have run for half an hour out of sixty.
+    #
+    # They must stay in `fresh` when the market is OPEN, because that is
+    # how a weekend view reaches sizing without paying twice. So the belt
+    # is filtered by what THIS cycle can actually give a candidate, which
+    # is a different question from what the screen let through.
+    if block_entries == "market_closed":
+        waiting = [c for c in fresh if _stored_view(conn, c.id) is not None]
+        if waiting:
+            fresh = [c for c in fresh if _stored_view(conn, c.id) is None]
+            report.drop_reasons.setdefault("researched", []).extend(
+                f"{c.id}: has a view already, waiting for the open"
+                for c in waiting)
+            _log.info(
+                "%d candidate(s) already hold a view and are waiting for "
+                "the market to open, so they are not taking a research "
+                "slot: %s", len(waiting),
+                ", ".join(c.ticker for c in waiting[:10]))
+
     arms = _arm_of(conn, [c.id for c in fresh])
     conversion = arm_conversion(conn)
     probation = demoted_arms(conversion)

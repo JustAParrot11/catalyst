@@ -679,7 +679,24 @@ ROUTINE_SKIPS = (
     "deferred_max_research_per_cycle",
     "market_closed",
     "already_researched",
+    "already_decided",
     "no_candidates",
+    # THE WEEKEND WORKING EXACTLY AS DESIGNED (2026-09-12). An
+    # unrecognised reason on the `researched` stage defaults to FAULT in
+    # red, so without these three every closed-market cycle would paint
+    # the funnel red for a bot that had just done its job - which is the
+    # "routine attrition reading as damage" failure CLAUDE.md says has
+    # already cost real debugging time twice.
+    #
+    # A view was formed and is waiting for the open. That is the feature.
+    "researched_while_closed_awaiting_open",
+    # It already holds a view, so it is not asking for a research slot.
+    "waiting for the open",
+    # No cached daily close to reason about while the market is shut.
+    # Routine rather than a fault: bars are cached when a candidate is
+    # first researched, so a ticker nothing has researched yet
+    # legitimately has none, and it simply waits for a live quote.
+    "market_closed_and_no_cached_close",
     # The model's own judgement. Declining a candidate is the single
     # most common correct thing this bot does - the previous build
     # declined eight of eight and the declines were RIGHT.
@@ -697,6 +714,17 @@ LIMIT_SKIPS = (
     "max_loss_per_position", "max_entry_half_spread", "max_hold_days",
     "notional_below_minimum", "insufficient_settled_cash",
     "liquidity", "kill_switch",
+    # THE OWNER'S MONDAY CONDITION, and it is a gate doing its job rather
+    # than a fault: the price the thesis was written about has gone, so
+    # the stored view is not evidence about the price on offer now. Named
+    # separately in risk/stale_view.py so the refusal tracker can score
+    # the up-gap and the down-gap apart.
+    "moved_up_past_view_price",
+    "moved_down_past_view_price",
+    "view_price_move_unmeasurable",
+    # A closed-market snapshot reaching the risk engine. It cannot size,
+    # by design (risk review F5), and saying so is not an error.
+    "price_not_live_cannot_size",
 )
 
 #: WHERE AN UNRECOGNISED REASON IS A FAULT, and where it is not. This
