@@ -4612,13 +4612,18 @@ def _broker_said(raw_text) -> tuple[str, str]:
 #: every icon is aria-hidden, so a screen reader hears the heading and
 #: nothing is carried by the picture alone. That is the same rule the
 #: status pills follow, and for the same reason.
+#: REMOVED 2026-09-11, owner-asked: "remove emojis also we dont need
+#: them". They were decorative by construction - every one was
+#: aria-hidden and sat beside a heading that already said the same
+#: thing in words - so there is nothing to replace them with. The step
+#: is now carried by its number and its title, which is what a reader
+#: was using anyway.
+#:
+#: The dict stays, keyed the same way, so `_step` and every caller are
+#: unchanged and a future icon set has somewhere to go.
 _STEP_ICON = {
-    "why": "\U0001F50D",       # magnifier - how it was found
-    "view": "\U0001F9E0",      # brain - what Claude concluded
-    "size": "⚖️",    # scales - what code sized
-    "guard": "\U0001F6E1️",  # shield - protection
-    "orders": "\U0001F4CB",    # clipboard - what was sent
-    "next": "\U0001F504",      # cycle - reviews and what happens next
+    "why": "", "view": "", "size": "", "guard": "", "orders": "",
+    "next": "",
 }
 
 
@@ -4929,6 +4934,150 @@ def _evidence(st, p: str, index: int, steps=None) -> str:
     return "".join(out)
 
 
+def _next_checkin(st, p: str, index: int) -> str:
+    """When Claude asked to be woken about this position.
+
+    OWNER-ASKED 2026-09-11: "It should be able to set itself a next to
+    check in tab, i want claude if it does trade to suggest when is best
+    to check back in e.g. 3 days it checks in makes whatever decision
+    but if it holds then it sets another date to check back in".
+
+    Shown only for a position that is still open - a check-in on a
+    closed trade is a date that will never arrive - and it shows BOTH
+    what was asked for and what was honoured, because "it asked for 30
+    days and got 7" is the reading that says the bound is working.
+    """
+    if st.status != "open" or not st.checkin:
+        return ""
+    asked, when, clamped = st.checkin
+    line = [f"Claude asked to re-read this thesis in <b>{int(asked)} "
+            f"day(s)</b>, on <b>{esc(_pretty_date(when))}</b>."]
+    if clamped:
+        line.append(f" Code held it to that: {esc(clamped)}.")
+    line.append(
+        " News naming the company brings the review forward whatever it "
+        "asked for, and the stop and the hard exit date are unaffected "
+        "by this date either way.")
+    return (f'<p class="checkin" id="{p}-t{index}-checkin">'
+            + "".join(line) + "</p>")
+
+
+def _price_on(bars, day):
+    """The close on or most recently before `day`, or None.
+
+    Nearest EARLIER, never later: a timeline row says what the price was
+    when the decision was taken, and reading forward would show the
+    decision the benefit of hindsight.
+    """
+    best = None
+    for b in bars or ():
+        if b.day <= day and (best is None or b.day > best.day):
+            best = b
+    return best
+
+
+def _timeline(st, p: str, index: int, steps=None) -> str:
+    """EVERY STAGE IN ORDER, WITH THE PRICE AT THE TIME.
+
+    OWNER-ASKED 2026-09-11: "i want each stage it took in chronological
+    info and the data that was available and how price changed and what
+    the bot thought when it re-evaluated as it should be doing now and
+    again."
+
+    The card was grouped BY TOPIC - how it was found, the evidence, the
+    conclusion, the size - which is the order the decision was made in
+    but not a time order, and it never put a price beside a moment. So
+    "the stock was $5.40 when Claude said hold and $4.98 two days later
+    when it said hold again" was not readable anywhere, and that is the
+    sequence that says whether the re-reads were doing anything.
+
+    One dated row per event, oldest first, each carrying the close on or
+    before that day from the ticker's own cached bars. Where there are
+    no bars the row still appears with its date and what happened - a
+    missing price is not a missing event.
+
+    NOTHING IS INFERRED. Every row is a stored timestamp: the candidate's
+    discovery, the risk decision, the fill, each review with its verbatim
+    action and reasoning, and the exit. No row is computed from another.
+    """
+    entry = _num(st.entry_price)
+    bars = _load_position_bars(st.ticker) if st.ticker else ()
+    events: list[tuple] = []
+
+    def add(when, what, detail=""):
+        day = _as_date(when)
+        if day:
+            events.append((day, str(when)[:16], what, detail))
+
+    if st.catalyst_date:
+        add(st.catalyst_date, "Catalyst date on the candidate",
+            "the day the event the screen found resolves")
+    add(st.opened_at, f"Bought {st.ticker}",
+        (f"filled at ${entry:.2f}" if entry else "order placed")
+        + (f", stop ${_num(st.stop_price):.2f}" if _num(st.stop_price)
+           else ""))
+    for row in (st.reviews or []):
+        try:
+            when, action, _trig, why, _changed, skipped = row
+        except (TypeError, ValueError):
+            continue
+        if skipped:
+            # A SKIPPED REVIEW IS AN EVENT TOO, and a cheap one - it cost
+            # nothing and decided nothing, but a gap in the timeline
+            # would read as the bot having forgotten the position.
+            add(when, "Review skipped", str(skipped)[:160])
+            continue
+        word = {"hold": "Re-read the thesis and held",
+                "exit_now": "Re-read the thesis and decided to EXIT",
+                "no_opinion": "Re-read the thesis, could not judge"}.get(
+                    str(action), f"Reviewed ({esc(str(action))})")
+        add(when, word, str(why or "")[:240])
+    if st.closed_at:
+        exit_p = _num(st.exit_price)
+        why_out = str(st.exit_reason or "").replace("_", " ") or "closed"
+        add(st.closed_at, f"Sold {st.ticker}",
+            (f"at ${exit_p:.2f}, " if exit_p else "") + why_out)
+    if not events:
+        return ""
+    events.sort(key=lambda e: (e[0], e[1]))
+
+    rows = []
+    for day, stamp, what, detail in events:
+        bar = _price_on(bars, day)
+        if bar is not None:
+            price = f"${float(bar.close):.2f}"
+            if entry:
+                move = (float(bar.close) - float(entry)) / float(entry) * 100
+                price += f' <span class="tl-move">{move:+.1f}%</span>'
+        else:
+            price = DASH
+        rows.append(
+            f'<tr><th>{esc(_pretty_date(day))}</th>'
+            f'<td class="num">{price}</td>'
+            f"<td><b>{esc(what)}</b>"
+            + (f'<br><span class="tl-why">{esc(detail)}</span>'
+               if detail else "")
+            + "</td></tr>")
+    out = [_step("next", f"What happened to {st.ticker}, in order", steps),
+           '<table class="kv timeline" id="'
+           + f'{p}-t{index}-timeline"><thead><tr>'
+           "<th>when</th><th class=\"num\">price then</th>"
+           "<th>what happened</th></tr></thead>"
+           f'<tbody>{"".join(rows)}</tbody></table>']
+    if bars:
+        out.append(figcap(
+            "The price column is this ticker's own cached close on or "
+            "before each date, and the percentage is against the fill - "
+            "so the column shows how the position moved under each "
+            "decision. Never a later price than the row's own date."))
+    else:
+        out.append(figcap(
+            "No daily closes are cached for this ticker, so the price "
+            "column is empty rather than guessed. The dates and "
+            "decisions are on the record."))
+    return "".join(out)
+
+
 def _trade_summary(st) -> str:
     """WHAT HAPPENED, IN ONE PARAGRAPH A PERSON CAN READ.
 
@@ -5224,6 +5373,12 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
 
     # ---- 2. THE EVIDENCE ITSELF, LINKED.
     out.append(_evidence(st, p, index, steps))
+
+    # ---- 3. EVERY STAGE IN ORDER, WITH THE PRICE AT THE TIME.
+    out.append(_timeline(st, p, index, steps))
+
+    # ---- and when Claude asked to look again.
+    out.append(_next_checkin(st, p, index))
 
     # ---- 3. what Claude concluded, in its own words.
     #
@@ -6167,10 +6322,10 @@ def node_panel(db: Db, node_id: str, p: str = "node") -> str:
     return section(f"{p}-section", f"Node: {esc(d.label)}", "".join(out))
 
 
-#: What each queued action is, at a glance. Beside the words, never
-#: instead of them, and aria-hidden - the same rule as the trade steps.
-_ACTION_ICON = {"review": "\U0001F9E0", "exit": "\U0001F6AA",
-                "hunt": "\U0001F50D", "blocked": "⏸"}
+#: Emptied 2026-09-11 with the step icons, same reason: these sat
+#: beside words that already said it. Kept keyed so callers and their
+#: tests are untouched.
+_ACTION_ICON = {"review": "", "exit": "", "hunt": "", "blocked": ""}
 
 
 def next_actions_panel(db: Db, p: str = "na") -> str:

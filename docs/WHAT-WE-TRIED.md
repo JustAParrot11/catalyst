@@ -504,6 +504,76 @@ conjunction arm's 48% share went to the arms that convert, the hunt
 among them. And the hunt is self-limiting either way: no directional
 view in 40+ paid calls demotes it to a probe share like any other arm.
 
+### The 09-12 pass: the links were broken and the card had no time axis
+
+Owner: *"when it references an old trade it references edgar and one url
+content is ttached, they all appear to say that... i want each stage it
+took in chronological info and the data that was available and how price
+changed and what the bot thought when it re-evaluated... It should be
+able to set itself a next to check in tab"* — and separately *"remove
+emojis also we dont need them"*.
+
+**THE EDGAR LINKS ALL 404'd, AND THAT WAS MINE.** The fix I shipped the
+day before stripped the dashes out of the accession number. Checked
+against the real SEC rather than reasoned about:
+
+| URL | result |
+|---|---|
+| `edgar/data/1872789/000094787126000787.txt` | **404** — what I shipped |
+| `edgar/data/1872789/0000947871-26-000787.txt` | 200 |
+| `…/000094787126000787/0000947871-26-000787-index.htm` | 200 |
+
+The accession keeps its dashes in the **filename**, and the index page
+additionally needs the undashed accession as a **directory**. Worse, the
+Form 4 payload already stored `source_url` — the URL the feed itself
+fetched, which resolved by definition — so I derived a link when a
+working one was sitting in the same dict. It prefers the stored URL now
+and derives the index page only as a fallback. The owner's exact broken
+key is a regression test.
+
+**The lesson:** when a payload already contains a URL that was used,
+that is the link. Deriving one is a guess with extra steps.
+
+**The card had no time axis.** It was grouped by topic — found,
+evidence, concluded, sized — which is the order the decision was made in
+but not a sequence, and no price sat beside any moment. There is now one
+dated table per trade: catalyst date, bought, every review with what
+Claude actually said, and the exit, each row carrying **the close on or
+before that date** and its move against the fill. Never a later price
+than the row's own date, so a decision is never shown the benefit of
+hindsight.
+
+**Claude sets its own next check-in.** Reviews ran on a flat 24-hour
+clock brought forward by news, so a quiet position was paid for six
+times to be told nothing had changed. The review tool now takes
+`next_check_in_days`, and code bounds it: clamped to the hard exit date,
+capped at `MAX_CHECK_IN_DAYS` = 7, nothing scheduled on an `exit_now`
+review, and **news still overrides it** — the one property that must
+survive, with its own test. Both the request and the honoured date are
+stored, so "it asked for 30 and got 7" is readable.
+
+Why a longer wait is safe: a missed review cannot cost money beyond the
+stop. The stop rests at the broker, the hard exit date stands, and a
+review can only ever bring an exit **forward**. So the cost of waiting
+is a forgone early exit, not a larger loss.
+
+**Emoji removed.** Every step icon and action icon was decorative by
+construction — aria-hidden, beside a heading that already said the same
+thing — so there was nothing to replace them with. The four status
+glyphs stay: they are geometric shapes, not emoji, and they exist so a
+status is never carried by colour alone.
+
+### A latent flake the suite finally hit
+
+`test_a_position_opened_today_still_says_when` failed once and passed on
+its own seconds later. Cause: the test module captures `NOW` at import
+and positions every fixture against it, while `next_actions()` defaulted
+to `datetime.now()` — so **a suite run that crossed UTC midnight** judged
+a position seeded as "opened today" to be a day old, the age gate opened,
+and the test failed for a reason unrelated to what it tests. House rule 6
+exactly. Fixed by handing the code the same clock the rows were written
+against.
+
 **The lesson that generalises, and it has now cost four reports:** a
 number being present is not the same as a question being answered. When
 a panel is reported as confusing, ask what question the reader brought

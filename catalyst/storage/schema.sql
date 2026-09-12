@@ -655,3 +655,35 @@ CREATE TABLE IF NOT EXISTS refusal_scoring_skips (
 
 CREATE INDEX IF NOT EXISTS idx_refusal_scoring_skips_at
     ON refusal_scoring_skips (attempted_at DESC);
+
+-- WHEN CLAUDE ITSELF WANTS TO LOOK AGAIN.
+--
+-- OWNER-ASKED 2026-09-11: "It should be able to set itself a next to
+-- check in tab, i want claude if it does trade to suggest when is best
+-- to check back in e.g. 3 days it checks in makes whatever decision but
+-- if it holds then it sets another date to check back in".
+--
+-- Reviews ran on a flat 24-hour clock brought forward by news, so a
+-- position with nothing due for a week was paid for six times to be
+-- told nothing had changed, and one with a readout tomorrow waited the
+-- same 24 hours as everything else. This lets the model say which it
+-- is.
+--
+-- A SIDE TABLE, not a column on position_reviews, per CLAUDE.md - and
+-- because the value is about the NEXT review rather than a property of
+-- the one that produced it.
+CREATE TABLE IF NOT EXISTS position_review_checkins (
+    review_id     TEXT PRIMARY KEY REFERENCES position_reviews(id),
+    position_id   TEXT NOT NULL,
+    -- what the model asked for, verbatim, before any bound was applied
+    requested_days INTEGER NOT NULL,
+    -- and the date actually honoured, after clamping to the exit date
+    -- and the ceiling. Both kept: "it asked for 30 and got 7" is the
+    -- reading that tells you the bound is doing something.
+    next_check_at TEXT NOT NULL,
+    clamped_by    TEXT,
+    recorded_at   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_review_checkins_position
+    ON position_review_checkins (position_id, next_check_at DESC);

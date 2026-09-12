@@ -841,16 +841,22 @@ class TestIconsHelpAndNeverCarryMeaningAlone:
 
     def test_the_headings_still_read_without_them(self, tmp_path):
         html = _page(_seed(tmp_path))
-        # THE HEADINGS ARE NUMBERED NOW. Owner-asked 2026-09-11: "Edit
-        # this page more to be more fluid and read in order of process."
-        # The words still have to survive without their icon, which is
-        # what this test is for; only the wording moved.
-        for word in ("1. How EMBC was found", "2. The evidence it read",
-                     "3. What Claude concluded",
-                     "4. What the code then decided",
-                     "5. How the position was protected",
-                     "6. The orders actually sent",
-                     "7. Re-reads, and what happens next"):
+        # THE WORDS, NOT THE NUMBERS. This test is about headings
+        # reading without their icon - and the icons are gone entirely
+        # since 2026-09-11 ("remove emojis also we dont need them"), so
+        # what it guards now is that every step still names itself in
+        # text. The NUMBERS are asserted separately, by
+        # test_the_headings_run_in_process_order, because pinning them
+        # here means inserting one step renumbers a test that has
+        # nothing to do with ordering - which is what happened when the
+        # timeline was added.
+        for word in ("How EMBC was found", "The evidence it read",
+                     "What happened to EMBC, in order",
+                     "What Claude concluded",
+                     "What the code then decided",
+                     "How the position was protected",
+                     "The orders actually sent",
+                     "Re-reads, and what happens next"):
             assert word in html, f"a heading lost its words: {word}"
 
     def test_the_headings_run_in_process_order(self, tmp_path):

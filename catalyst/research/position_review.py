@@ -49,7 +49,7 @@ import json
 import sqlite3
 import uuid
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 
 #: What the model may answer. Deliberately three, and deliberately not a
@@ -100,6 +100,36 @@ POSITION_REVIEW_TOOL = {
                     "Specific new facts since entry. Empty if nothing "
                     "material has happened, which is the common case."),
             },
+            # WHEN TO LOOK AGAIN - the model's call, bounded by code.
+            #
+            # OWNER-ASKED 2026-09-11: "i want claude if it does trade to
+            # suggest when is best to check back in e.g. 3 days it
+            # checks in makes whatever decision but if it holds then it
+            # sets another date to check back in".
+            #
+            # This is NOT an exit decision and cannot become one. The
+            # exit date is fixed at entry and this field cannot move it;
+            # every bound - the stop resting at the broker, the hard
+            # exit date, the kill switches - is unchanged by whatever
+            # number arrives here. What it changes is when the next PAID
+            # REVIEW happens, so the money goes where something is
+            # actually due rather than on a flat clock.
+            "next_check_in_days": {
+                "type": "integer", "minimum": 1, "maximum": 30,
+                "description": (
+                    "When should this thesis be re-read? Answer with the "
+                    "number of days from today. Judge it on WHEN THE NEXT "
+                    "THING HAPPENS: a readout or a filing due on Tuesday "
+                    "means 1 or 2, a slow re-rating with nothing scheduled "
+                    "means 5 or 7. Every review costs money out of a fixed "
+                    "monthly budget, so asking to be woken daily when "
+                    "nothing is due spends the budget that would find the "
+                    "next trade - and asking for a fortnight when a "
+                    "catalyst lands on Thursday misses it. Code clamps "
+                    "this to the position's exit date and to a ceiling, "
+                    "and news about this company brings the review forward "
+                    "whatever you answer."),
+            },
         },
         "required": ["action", "invalidation_triggered", "reasoning"],
         "additionalProperties": False,
@@ -118,6 +148,9 @@ class PositionReview:
     reviewed_at: datetime | None = None
     cost_cents: Decimal = Decimal("0")
     skipped_reason: str | None = None
+    #: Days the model asked to wait before the next review, or None if
+    #: it did not say. Advisory: `next_check_at` applies the bounds.
+    next_check_in_days: int | None = None
 
     @property
     def wants_early_exit(self) -> bool:
@@ -158,12 +191,74 @@ def make_review_from_tool_input(position_id: str, ticker: str,
     changed = tool_input.get("what_changed") or []
     if not isinstance(changed, list):
         raise ValueError(f"what_changed must be a list: {changed!r}")
+    # OPTIONAL, AND A BAD VALUE IS DROPPED RATHER THAN RAISING. The
+    # action, the invalidation and the reasoning are the answer; this is
+    # a scheduling preference. A review that is otherwise sound must not
+    # be discarded - which would leave the position unread - because the
+    # model returned a float or a negative number here. Dropped means
+    # "it did not say", which falls back to the standing clock.
+    asked = tool_input.get("next_check_in_days")
+    if isinstance(asked, bool) or not isinstance(asked, int) or asked < 1:
+        asked = None
     return PositionReview(
         position_id=position_id, ticker=ticker, action=action,
         invalidation_triggered=triggered, reasoning=reasoning.strip(),
         what_changed=tuple(str(c) for c in changed),
         reviewed_at=datetime.now(timezone.utc),
+        next_check_in_days=asked,
     )
+
+
+#: However long the model asks for, a held position is re-read at least
+#: this often. A missed review cannot cost money beyond the stop - the
+#: stop rests at the broker and the hard exit date stands, and a review
+#: can only ever bring an exit FORWARD - so the cost of waiting is a
+#: forgone early exit, not a larger loss. Seven days bounds that without
+#: paying for six answers of "nothing has changed".
+MAX_CHECK_IN_DAYS = 7
+
+
+def next_check_at(review, position: dict, now: datetime):
+    """(the datetime of the next review, what clamped it) or (None, "").
+
+    THE MODEL PROPOSES, CODE DISPOSES, applied to a date. The number
+    that arrives is a request; this decides what is honoured:
+
+      - nothing asked            -> None, and the standing clock applies
+      - past the hard exit date  -> clamped to the exit date, because a
+                                    review after the position closes is
+                                    a paid call about nothing
+      - beyond MAX_CHECK_IN_DAYS -> clamped to the ceiling
+      - an exit_now review       -> None; the position is leaving, and
+                                    scheduling its next read would be
+                                    an answer to a question nobody asked
+
+    Both the request and the honoured date are recorded by the caller,
+    so "it asked for 30 and got 7" is readable afterwards.
+    """
+    asked = getattr(review, "next_check_in_days", None)
+    if not asked or getattr(review, "wants_early_exit", False):
+        return None, ""
+    days = int(asked)
+    clamped = ""
+    if days > MAX_CHECK_IN_DAYS:
+        days, clamped = MAX_CHECK_IN_DAYS, (
+            f"asked for {asked}d, capped at {MAX_CHECK_IN_DAYS}d")
+    when = now + timedelta(days=days)
+    exit_date = position.get("planned_exit_date")
+    if exit_date:
+        try:
+            if isinstance(exit_date, str):
+                exit_date = date.fromisoformat(exit_date[:10])
+            deadline = datetime.combine(
+                exit_date, time(0, 0), tzinfo=timezone.utc)
+            if when > deadline:
+                return deadline, (
+                    f"asked for {asked}d, clamped to the exit date "
+                    f"{exit_date}")
+        except (TypeError, ValueError):
+            pass
+    return when, clamped
 
 
 def should_review(position: dict, as_of: date) -> tuple[bool, str]:
@@ -348,6 +443,32 @@ def news_since(conn, ticker: str, since: datetime) -> tuple[int, str]:
     return hits, newest
 
 
+def requested_check_at(conn, position_id: str):
+    """The datetime Claude asked to be woken for this position, or None.
+
+    The NEWEST request wins: each review supersedes the last, so a
+    position told "look in five days" and then, after news brought a
+    review forward, "look tomorrow", is looked at tomorrow.
+
+    Never raises - a database that predates the table simply has no
+    request, which falls back to the standing clock.
+    """
+    try:
+        row = conn.execute(
+            "SELECT next_check_at FROM position_review_checkins "
+            "WHERE position_id = ? ORDER BY recorded_at DESC LIMIT 1",
+            (str(position_id),)).fetchone()
+    except sqlite3.Error:
+        return None
+    if not row or not row[0]:
+        return None
+    try:
+        when = datetime.fromisoformat(str(row[0]))
+    except (TypeError, ValueError):
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
 def due_for_review(conn, positions, now: datetime,
                    interval_hours: int = REVIEW_INTERVAL_HOURS):
     """(to_review, [(position, why_not)]).
@@ -390,13 +511,30 @@ def due_for_review(conn, positions, now: datetime,
                     f"reviewed {hours:.1f}h ago; nothing is re-read inside "
                     f"{MIN_REVIEW_GAP_HOURS}h however much news there is")))
                 continue
-            if hours < interval_hours:
+            # CLAUDE'S OWN DATE, WHERE IT SET ONE, in place of the
+            # flat clock. Owner-asked 2026-09-11: "if it holds then it
+            # sets another date to check back in".
+            #
+            # It can push the next read LATER than the standing
+            # interval, which is the point - paying six times to be
+            # told nothing has changed is the waste this removes - and
+            # it is bounded before it ever reaches here: clamped to the
+            # exit date and to MAX_CHECK_IN_DAYS when it was recorded.
+            # News still overrides it below, and MIN_REVIEW_GAP_HOURS
+            # above, so this can only ever move a QUIET position's
+            # review later.
+            asked_at = requested_check_at(conn, position.get("id"))
+            due_at = asked_at if asked_at is not None else (
+                last + timedelta(hours=interval_hours))
+            if now < due_at:
                 hits, headline = news_since(conn, position.get("ticker"), last)
                 if not hits:
+                    when = ("Claude asked to be woken "
+                            f"{due_at.date()}" if asked_at is not None
+                            else f"the interval is {interval_hours}h")
                     skipped.append((position, (
-                        f"reviewed {hours:.1f}h ago, the interval is "
-                        f"{interval_hours}h, and no news has named "
-                        f"{position.get('ticker')} since")))
+                        f"reviewed {hours:.1f}h ago, {when}, and no news "
+                        f"has named {position.get('ticker')} since")))
                     continue
                 position["review_trigger"] = (
                     f"{hits} news item(s) named {position.get('ticker')} "
@@ -543,7 +681,8 @@ def review_position(conn, position: dict, view: dict, market: dict,
             review = make_review_from_tool_input(position_id, ticker, early)
             review = _with_cost(review, cost_cents)
             record_review(conn, review, prompt=prompt,
-                          raw_response=response, model=REVIEW_MODEL)
+                          raw_response=response, model=REVIEW_MODEL,
+                          position=position)
             return review
         except (KeyError, TypeError, ValueError):
             pass          # fall through to the forced turn
@@ -570,7 +709,7 @@ def review_position(conn, position: dict, view: dict, market: dict,
         return skip(f"invalid_review: {exc}")
     review = _with_cost(review, cost_cents)
     record_review(conn, review, prompt=prompt, raw_response=response,
-                  model=REVIEW_MODEL)
+                  model=REVIEW_MODEL, position=position)
     return review
 
 
@@ -611,7 +750,8 @@ def bring_exit_forward(conn, position: dict, review: PositionReview,
 
 
 def record_review(conn, review: PositionReview, *, prompt: str = "",
-                  raw_response=None, model: str = "") -> str:
+                  raw_response=None, model: str = "",
+                  position: dict | None = None) -> str:
     """Persist it. Every review is recorded even when it changed
     nothing, because "we asked and the model said hold" is exactly the
     evidence the dashboard needs to narrate a trade afterwards - and a
@@ -631,5 +771,30 @@ def record_review(conn, review: PositionReview, *, prompt: str = "",
          json.dumps(raw_response) if raw_response is not None else None,
          model, str(review.cost_cents), review.skipped_reason,
          (review.reviewed_at or datetime.now(timezone.utc)).isoformat()))
+    # WHEN THE MODEL WANTS TO LOOK AGAIN, and what was honoured.
+    #
+    # Recorded in a side table (CLAUDE.md) and never raises: a review
+    # that cannot store its scheduling preference must still be a
+    # recorded review, because the alternative is a paid call whose
+    # answer is lost. Both the request and the clamped date go in, so
+    # "asked for 30 and got 7" is readable afterwards rather than
+    # inferred.
+    if review.next_check_in_days and position is not None:
+        try:
+            when, clamped = next_check_at(
+                review, position, review.reviewed_at
+                or datetime.now(timezone.utc))
+            if when is not None:
+                conn.execute(
+                    "INSERT OR REPLACE INTO position_review_checkins "
+                    "(review_id, position_id, requested_days, "
+                    " next_check_at, clamped_by, recorded_at) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (row_id, review.position_id,
+                     int(review.next_check_in_days), when.isoformat(),
+                     clamped or None,
+                     datetime.now(timezone.utc).isoformat()))
+        except Exception:            # noqa: BLE001 - scheduling is not the answer
+            pass
     conn.commit()
     return row_id

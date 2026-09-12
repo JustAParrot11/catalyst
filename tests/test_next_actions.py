@@ -74,10 +74,24 @@ def seed(tmp_path, *, opened_days_ago=3, exit_in_days=10, reviews=(),
     return path
 
 
-def actions(path):
+def actions(path, now=None):
+    """ONE CLOCK FOR THE FIXTURE AND THE CODE.
+
+    HOUSE RULE 6, THE HARD WAY. `NOW` above is captured at import and
+    every fixture is positioned relative to it, while next_actions()
+    defaulted to datetime.now() - so a suite run that crossed UTC
+    midnight had a position seeded as "opened today" judged as one day
+    old, the age gate opened, and
+    test_a_position_opened_today_still_says_when failed for a reason
+    that had nothing to do with what it tests. It passed again on its
+    own seconds later, which is the signature of exactly this.
+
+    next_actions already takes the clock, so it is handed the same one
+    the rows were written against.
+    """
     db = Db(path)
     try:
-        return queries.next_actions(db)
+        return queries.next_actions(db, now or NOW)
     finally:
         db.close()
 
