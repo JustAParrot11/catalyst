@@ -2499,6 +2499,10 @@ class TradeStory:
     #: it chose. What the model went looking for is part of why it
     #: concluded what it did.
     searches: list = field(default_factory=list)
+    #: (requested_days, next_check_at, clamped_by) from the newest
+    #: review that set one, or None. Owner-asked 2026-09-11: Claude
+    #: suggests when to look again and the card shows the date.
+    checkin: tuple | None = None
 
 
 @dataclass
@@ -2509,10 +2513,49 @@ class Trades:
     n_closed: int = 0
 
 
-#: Where a filing can be read, by EDGAR accession number. Built rather
-#: than stored: the accession is in the payload and the URL shape is
-#: stable, so deriving it cannot go stale the way a cached link can.
-EDGAR_FILING_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{acc}.txt"
+#: Where a filing can be READ BY A PERSON, derived from its accession.
+#:
+#: OWNER-REPORTED 2026-09-11 with a screenshot: every EDGAR link on the
+#: trades tab returned
+#:
+#:   <Error><Code>NoSuchKey</Code>
+#:     <Key>edgar/data/1872789/000094787126000787.txt</Key>
+#:
+#: because the first version of this stripped the dashes out of the
+#: accession number. Checked against the real SEC rather than reasoned
+#: about:
+#:
+#:   edgar/data/1872789/000094787126000787.txt              404  <- mine
+#:   edgar/data/1872789/0000947871-26-000787.txt            200
+#:   edgar/data/1872789/000094787126000787/
+#:       0000947871-26-000787-index.htm                     200
+#:
+#: The accession keeps its dashes in the FILENAME, and the index page
+#: additionally needs the undashed accession as a DIRECTORY. The index
+#: is what is linked: a person opening a Form 4 wants the filing's own
+#: page, not a raw submission dump with the XML inline.
+#:
+#: AND IT IS THE FALLBACK, NOT THE FIRST CHOICE. The Form 4 payload
+#: already stores `source_url` - the URL the feed itself fetched and
+#: therefore one that demonstrably resolves - so deriving anything is a
+#: last resort for a payload that lacks it.
+EDGAR_FILING_INDEX_URL = (
+    "https://www.sec.gov/Archives/edgar/data/{cik}/{acc_plain}/"
+    "{acc_dashed}-index.htm")
+
+
+def _edgar_accession(raw: str) -> tuple[str, str] | None:
+    """(dashed, undashed) accession, or None if it is not one.
+
+    Accepts either spelling because payloads carry both, and rebuilds
+    the dashes from the digits rather than trusting them: the 404 above
+    was caused by a stripped dash, so the shape is reconstructed to the
+    documented 10-2-6 grouping instead of being passed through.
+    """
+    digits = "".join(c for c in str(raw) if c.isdigit())
+    if len(digits) != 18:
+        return None
+    return f"{digits[:10]}-{digits[10:12]}-{digits[12:]}", digits
 
 
 def _source_link(source: str, payload: dict) -> str:
@@ -2522,15 +2565,23 @@ def _source_link(source: str, payload: dict) -> str:
     which the archive path is derived. Anything else contributes no
     link, and the row still shows what the source said.
     """
-    url = str(payload.get("url") or "").strip()
-    if url.startswith(("http://", "https://")):
-        return url
+    # THE URL THE FEED ACTUALLY FETCHED, first and by preference. It
+    # resolved once by definition, which no derived link can promise.
+    for key in ("url", "source_url"):
+        url = str(payload.get(key) or "").strip()
+        if url.startswith(("http://", "https://")):
+            return url
     acc = str(payload.get("accession") or payload.get("accession_no")
               or payload.get("accessionNumber") or "").strip()
-    cik = str(payload.get("cik") or payload.get("issuer_cik") or "").strip()
-    if acc and cik:
-        return EDGAR_FILING_URL.format(cik=cik.lstrip("0") or cik,
-                                       acc=acc.replace("-", ""))
+    cik = str(payload.get("cik") or payload.get("issuer_cik")
+              or ((payload.get("parsed") or {}) if
+                  isinstance(payload.get("parsed"), dict) else {})
+              .get("cik") or "").strip()
+    parts = _edgar_accession(acc)
+    if parts and cik.strip("0"):
+        dashed, plain = parts
+        return EDGAR_FILING_INDEX_URL.format(
+            cik=cik.lstrip("0") or cik, acc_plain=plain, acc_dashed=dashed)
     return ""
 
 
@@ -2584,6 +2635,30 @@ def _describe_source(payload: dict) -> str:
         if issuer:
             return f"Form 4 for {issuer}"
     return ""
+
+
+def _next_checkin_row(db: Db, position_id: str):
+    """(requested_days, next_check_at, clamped_by) or None.
+
+    The newest request wins - each review supersedes the last - which is
+    the same rule position_review.requested_check_at applies, so the
+    page cannot show a date the scheduler is not using.
+    """
+    try:
+        rows = db.q(
+            "SELECT requested_days, next_check_at, clamped_by "
+            "FROM position_review_checkins WHERE position_id = ? "
+            "ORDER BY recorded_at DESC LIMIT 1", (str(position_id),)).rows
+    except Exception:            # noqa: BLE001 - older database, no table
+        return None
+    if not rows:
+        return None
+    r = dict(rows[0])
+    try:
+        return (int(r["requested_days"]), str(r["next_check_at"]),
+                str(r["clamped_by"] or ""))
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _candidate_sources(db: Db, candidate_id: str) -> list:
@@ -2716,6 +2791,7 @@ def trades(db: Db, position_id: str | None = None) -> Trades:
         if st.candidate_id:
             st.sources = _candidate_sources(db, st.candidate_id)
             st.searches = _candidate_searches(db, st.candidate_id)
+        st.checkin = _next_checkin_row(db, st.position_id)
 
         if st.candidate_id:
             v = db.q("SELECT * FROM research_views WHERE candidate_id = ?",

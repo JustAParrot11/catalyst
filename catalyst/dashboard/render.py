@@ -820,6 +820,23 @@ button { background: var(--series-1); color: #fff; border-color: transparent;
 .fold > div { padding: 2px 0 8px; }
 /* Key/value rows for the unrounded figures. tabular-nums here and
    NOT on the tiles: these align vertically, the tiles do not. */
+/* THE TIMELINE. Owner-asked 2026-09-11: "i want each stage it took in
+   chronological info and the data that was available and how price
+   changed and what the bot thought when it re-evaluated". Three
+   columns, the price right-aligned and tabular so the moves line up
+   down the page. */
+.timeline { max-width: 100%; }
+.timeline th { white-space: nowrap; vertical-align: top; }
+.timeline td { vertical-align: top; padding: 5px 0; }
+.timeline td.num { font-variant-numeric: tabular-nums;
+  padding-right: 14px; white-space: nowrap; }
+.tl-move { color: var(--muted); font-size: var(--t-fine); }
+.tl-why { color: var(--ink-2); font-size: var(--t-fine);
+  display: inline-block; max-width: 64ch; line-height: 1.45; }
+/* When Claude asked to be woken. Quiet - it is a plan, not a result. */
+.checkin { font-size: var(--t-fine); color: var(--ink-2); max-width: 68ch;
+  line-height: 1.5; margin: 8px 0 12px; padding-left: 10px;
+  border-left: 2px solid var(--accent); }
 .kv { width: 100%; max-width: 460px; border-collapse: collapse; }
 .kv th { text-align: left; font-weight: 400; color: var(--muted);
   font-size: var(--t-fine); padding: 3px 10px 3px 0; }

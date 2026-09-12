@@ -160,10 +160,61 @@ class TestTheLinksActuallyOpen:
     def test_news_uses_its_own_url(self):
         assert queries._source_link("alpaca_news", NEWS) == NEWS["url"]
 
-    def test_a_filing_link_is_derived_from_the_accession(self):
-        got = queries._source_link("edgar_form4", FORM4)
+    def test_the_url_the_feed_FETCHED_wins_over_any_derivation(self):
+        """It resolved once by definition, which no derived link can
+        promise. This is the first half of the 2026-09-11 fix."""
+        assert queries._source_link("edgar_form4", FORM4) == \
+            FORM4["source_url"]
+
+    def test_a_filing_link_is_derived_when_nothing_was_stored(self):
+        payload = {k: v for k, v in FORM4.items() if k != "source_url"}
+        got = queries._source_link("edgar_form4", payload)
         assert got.startswith("https://www.sec.gov/Archives/edgar/data/")
-        assert "1895262" in got and "000189526226000031" in got
+        assert "1895262" in got
+
+    def test_THE_OWNERS_404_IS_NOT_PRODUCIBLE_ANY_MORE(self):
+        """THE REPORTED BUG, 2026-09-11. Every EDGAR link on the trades
+        tab returned
+
+            <Error><Code>NoSuchKey</Code>
+              <Key>edgar/data/1872789/000094787126000787.txt</Key>
+
+        because the first version stripped the dashes out of the
+        accession. Checked against the real SEC at the time: that form
+        404s, while the accession KEEPS its dashes in the filename and
+        the index page additionally needs the undashed accession as a
+        directory.
+        """
+        got = queries._source_link("edgar_form4", {
+            "accession": "0000947871-26-000787", "cik": "1872789"})
+        assert got == (
+            "https://www.sec.gov/Archives/edgar/data/1872789/"
+            "000094787126000787/0000947871-26-000787-index.htm")
+        # The exact broken shape must be unreachable.
+        assert not got.endswith("000094787126000787.txt")
+        assert "/000094787126000787/" in got, (
+            "the accession directory is missing again, which is what "
+            "produced NoSuchKey")
+        assert "0000947871-26-000787" in got, (
+            "the dashes were stripped from the filename again")
+
+    def test_an_undashed_accession_is_still_linked_correctly(self):
+        """Payloads carry both spellings, so the dashes are rebuilt from
+        the digits rather than trusted."""
+        dashed = queries._source_link("edgar_form4", {
+            "accession": "0000947871-26-000787", "cik": "1872789"})
+        plain = queries._source_link("edgar_form4", {
+            "accession": "000094787126000787", "cik": "1872789"})
+        assert dashed == plain
+
+    @pytest.mark.parametrize("acc", [
+        "", "nonsense", "123", "0000947871-26-00078",
+        "0000947871-26-0007871", None,
+    ])
+    def test_a_non_accession_produces_no_link_rather_than_a_broken_one(
+            self, acc):
+        assert queries._source_link(
+            "edgar_form4", {"accession": acc, "cik": "1872789"}) == ""
 
     def test_a_source_with_no_link_gets_no_link_rather_than_a_guess(self):
         assert queries._source_link("x", {"headline": "no url here"}) == ""
