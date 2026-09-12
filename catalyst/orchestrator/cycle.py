@@ -1034,11 +1034,19 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
     try:
         events = feed_fetch(since, now)
     except Exception as exc:   # FeedError and anything transport-shaped
-        raw_text = getattr(exc, "raw_text", None) or repr(exc)
+        # THE DIAGNOSIS IS RECORDED, NOT ONLY THE BODY. This used to
+        # store `exc.raw_text` alone, so a 4KB sec.gov error page was the
+        # entire record and the status code, URL and attempt count the
+        # exception was carrying were discarded here - which is why the
+        # dashboard could only ever show the owner markup (reported
+        # 2026-09-12). House rule 3 is unchanged: the raw body is still
+        # kept verbatim, below the sentence rather than instead of it.
+        from catalyst.data.sources import error_text as _feed_error_text
+
         conn.execute(
             "INSERT INTO raw_events_errors (source, attempted_at, error_text) "
             "VALUES (?,?,?)",
-            ("edgar_form4", now.isoformat(), str(raw_text)))
+            ("edgar_form4", now.isoformat(), _feed_error_text(exc)))
         conn.commit()
         report.errors.append(f"feed: {type(exc).__name__}")
         # unreachable is NOT empty (build brief): name the stage and stop

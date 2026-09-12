@@ -1158,6 +1158,38 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
 
         return already_have, on_fetched
 
+    def _record_feed_error(source, exc):
+        """Put a feed failure where the dashboard can see it.
+
+        A RATE-LIMIT BLOCK USED TO WRITE NOTHING AT ALL. It logged and
+        returned [], so the pass fetched nothing and the "Feeds that
+        could not be read" panel had no row to show - the block was
+        visible only to somebody reading the log file, which is exactly
+        the SSH-free troubleshooting the brief rules out. Worse, the
+        panel's own FIRST fault sentence is the one for a rate-limit
+        block, so its flagship case was unreachable for this feed.
+
+        Best effort and never raises: failing to RECORD a failure must
+        not become a second failure.
+        """
+        import sqlite3 as _sq
+
+        from catalyst.data.sources import error_text as _feed_error_text
+
+        try:
+            c = _sq.connect(db_file, timeout=5.0)
+            try:
+                c.execute(
+                    "INSERT INTO raw_events_errors (source, attempted_at, "
+                    "error_text) VALUES (?,?,?)",
+                    (source, datetime.now(timezone.utc).isoformat(),
+                     _feed_error_text(exc)))
+                c.commit()
+            finally:
+                c.close()
+        except Exception:  # noqa: BLE001 - recording is best effort
+            _log.debug("a feed error could not be recorded", exc_info=True)
+
     def feed(since, until):
         """All three feeds. Form 4 is the only one that may fail the pass.
 
@@ -1191,6 +1223,7 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
             # search below shares the same budget and is skipped too.
             _log.error("sec.gov rate-limited this IP; skipping every SEC "
                        "feed this pass. %s", exc)
+            _record_feed_error("edgar_form4", exc)
             return []
 
         try:
@@ -1200,6 +1233,7 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
         except RateLimitBlocked as exc:
             _log.error("sec.gov rate-limited this IP during full-text "
                        "search; no further SEC request this pass. %s", exc)
+            _record_feed_error("edgar_fts", exc)
             fts = None
         except Exception:  # noqa: BLE001 - breadth is not correctness
             _log.exception(
