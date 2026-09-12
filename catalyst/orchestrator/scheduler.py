@@ -528,12 +528,21 @@ def _maybe_refresh_benchmark(state: dict | None, *, force: bool = False,
 def _refresh_tracked_comparisons(conn, db_file, creds, state, today) -> None:
     """Cache daily closes for each stock the owner tracks. Never raises.
 
-    Its own function, and its own once-a-day marker, so a comparison
-    symbol Alpaca will not answer cannot stop SPY being refreshed - the
-    account's own benchmark outranks a chart preference.
+    Its own function, and its own marker, so a comparison symbol Alpaca
+    will not answer cannot stop SPY being refreshed - the account's own
+    benchmark outranks a chart preference.
+
+    THE MARKER SAYS WHAT WAS DONE, NOT JUST WHEN. It used to be the date
+    alone, and a day on which nothing extra was tracked set it and
+    returned - so a stock the owner added that afternoon was not fetched
+    until TOMORROW, and they watched an empty row for up to a day
+    wondering whether the ticker was wrong. Keying on the date AND the
+    tracked set means adding or removing a stock no longer matches the
+    marker, so the very next cycle fetches it: minutes, not a day. It
+    also needs no cross-thread signalling from the web form, which is
+    what makes it safe - the same information is already in the database
+    the loop reads every pass.
     """
-    if state.get("comparison_day") == today:
-        return
     try:
         from catalyst.benchmark import comparisons as _cmp
         from catalyst.data import benchmark as _bench
@@ -556,8 +565,12 @@ def _refresh_tracked_comparisons(conn, db_file, creds, state, today) -> None:
                 own.close()
         symbols = [c.ticker for c in rows
                    if c.ticker != _bench.BENCHMARK_SYMBOL]
+        # The marker is read AFTER the list, because the list is part of it.
+        done_key = f"{today}:" + ",".join(sorted(symbols))
+        if state.get("comparison_key") == done_key:
+            return
         if not symbols:
-            state["comparison_day"] = today
+            state["comparison_key"] = done_key
             return
         results = _bench.refresh_comparisons(
             bars_path(), creds.alpaca_key, creds.alpaca_secret, symbols)
@@ -568,7 +581,7 @@ def _refresh_tracked_comparisons(conn, db_file, creds, state, today) -> None:
         # SPY's marker is: burning the day's only try on a transient
         # failure is what left the SPY line 48 hours stale once already.
         if not stuck:
-            state["comparison_day"] = today
+            state["comparison_key"] = done_key
         for symbol, r in results.items():
             if r.skipped_reason in (None, "already_current") or r.routine:
                 _log.info("Comparison %s: %s bar(s) added, %s.", symbol,
