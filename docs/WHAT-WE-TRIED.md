@@ -1154,3 +1154,67 @@ red, which is the right way to show a pair is load-bearing.
   round, so the allocation exists; what was missing was hunt supply, and
   this removes the cap on supply. Whether supply converts is the open
   question.
+
+### The Arms page would have shown zeros forever — found on the upgrade check
+
+Owner, 2026-09-12: *"ok im ready to upgrade, anything else i should do
+first?"* — and the answer turned out to be yes.
+
+**`orders.decision_id` holds a CANDIDATE id, not a risk-decision id.**
+The column name lies. The schema settles it: the foreign key on that
+column is `REFERENCES candidates(id)`, `execution/orders.py` passes
+`decision.candidate_id` into it, and every pre-existing join in the
+codebase reads it that way (`risk_decisions d ON d.candidate_id =
+o.decision_id`).
+
+The Arms page's money query joined it **as a decision id**:
+
+```sql
+JOIN risk_decisions rd ON rd.id = ord.decision_id   -- matches NOTHING
+```
+
+So orders, closed trades, wins and realised P&L would have read **zero
+forever, even after trades closed** — the worst possible failure for a
+page built to answer "is the insider data helping", and a silent one,
+because zeros are exactly what it is supposed to show before any trade
+exists. The owner would have watched it stay empty and concluded the bot
+had not traded.
+
+### Why every test missed it: the fixtures did not match production
+
+`catalyst.storage.init_db` runs `PRAGMA foreign_keys = ON`. A raw
+`sqlite3.connect` + `executescript(schema.sql)` does **not** — and **23
+test files in this suite take the raw route.** With foreign keys off, the
+fixture could seed `decision_id` as a risk-decision id, which is
+impossible in production, and the wrong fixture agreed with the wrong
+query. Both were consistent and both were wrong.
+
+Found by running the weekend path against `init_db` while checking what
+the upgrade would do to a live database — not by a test. The first
+`closed_trades` insert raised `FOREIGN KEY constraint failed` immediately.
+
+**Fixed:** the query joins `candidate_origin.candidate_id =
+orders.decision_id` (and filters `side = 'buy'`, so a stop order is not
+counted as a second order); both new test files use `init_db` and
+**assert the pragma is on**, so an impossible row is impossible in the
+tests too. Sabotaging the join back to its original form now goes red.
+
+**The generalising lesson, and it is expensive:** a test fixture that
+differs from production in a way the production code depends on will
+agree with a bug. The 21 other files on the raw pattern are a known blind
+spot, deliberately left for a change of their own rather than churned the
+night before an upgrade — several of them insert rows without parents on
+purpose, so switching them is not mechanical.
+
+### Verified against the upgrade itself
+
+Built a database from the schema at `4a34e46` (before this session), then
+ran today's `init_db` over it — which is what the service does on start
+after `upgrade.sh` pulls:
+
+| check | result |
+|---|---|
+| tables added | `research_view_context` |
+| tables lost | none |
+| existing rows preserved | yes |
+| the weekend → Monday chain under `foreign_keys = ON` | research 1, context recorded `daily_close` at 50.5, no orders, no proposals; then at +5.2% the gate fired `moved_up_past_view_price`, no orders, **no second research call** |

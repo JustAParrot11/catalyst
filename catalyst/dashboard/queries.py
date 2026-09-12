@@ -4614,6 +4614,27 @@ def arm_records(db: Db) -> ArmRecords:
     # origin stamp. json_extract with a json_valid guard, the same shape
     # build_portfolio_state uses, so a malformed entry_order_ids column
     # drops the row rather than failing the page.
+    # `orders.decision_id` HOLDS A CANDIDATE ID, NOT A DECISION ID.
+    #
+    # The column name lies, and the schema settles it: the foreign key on
+    # that column is `REFERENCES candidates(id)`, and `execution/orders.py`
+    # passes `decision.candidate_id` into it. Every other join in this
+    # codebase reads it that way too - `risk_decisions d ON d.candidate_id
+    # = o.decision_id`.
+    #
+    # THE FIRST VERSION OF THIS QUERY JOINED IT AS A DECISION ID, which
+    # matches nothing, so this page would have shown zero orders and zero
+    # realised P&L FOREVER - even after trades closed. The worst possible
+    # failure for a page built to answer "is the insider data helping",
+    # and a silent one: zeros are exactly what it is supposed to show
+    # before any trade exists.
+    #
+    # It survived its own tests because those built the database with a
+    # raw connection, which leaves PRAGMA foreign_keys OFF, so the fixture
+    # could seed the wrong shape consistently with the wrong query. Found
+    # by running the path against `init_db` - production settings - while
+    # checking the upgrade. The fixtures now use init_db, so an impossible
+    # row is impossible in the tests too.
     d.money_q = db.q(
         "SELECT o2.origin, "
         "  COUNT(DISTINCT ord.id) AS orders, "
@@ -4621,13 +4642,13 @@ def arm_records(db: Db) -> ArmRecords:
         "  SUM(CASE WHEN ct.realized_pnl_cents > 0 THEN 1 ELSE 0 END) AS wins, "
         "  SUM(COALESCE(ct.realized_pnl_cents, 0)) AS realised "
         "FROM orders ord "
-        "JOIN risk_decisions rd ON rd.id = ord.decision_id "
-        "JOIN candidate_origin o2 ON o2.candidate_id = rd.candidate_id "
+        "JOIN candidate_origin o2 ON o2.candidate_id = ord.decision_id "
         "LEFT JOIN positions p ON p.id = ("
         "    SELECT p2.id FROM positions p2 WHERE ord.id = json_extract("
         "        CASE WHEN json_valid(p2.entry_order_ids) "
         "             THEN p2.entry_order_ids ELSE '[]' END, '$[0]')) "
         "LEFT JOIN closed_trades ct ON ct.position_id = p.id "
+        "WHERE ord.side = 'buy' "
         "GROUP BY o2.origin")
     for row in d.money_q.rows:
         r = dict(row)
