@@ -926,6 +926,24 @@ def _sync_benchmark_baseline(conn, broker, daily_state: dict | None = None,
             "account. Trading is unaffected and the baseline is unchanged.")
         return False
 
+    # AN UNREADABLE BASELINE IS LOUD, AND IT IS STILL NOT REPLACED.
+    #
+    # Owner-reported 2026-09-12: the SPY comparison restarted on its own.
+    # One cause was a baseline that could not be read being treated as
+    # one that did not exist, which struck a fresh baseline at today and
+    # threw away a month of tracking. Refusing to overwrite it is the
+    # fix; going quiet about it would be the next bug, because the
+    # comparison cannot work at all until somebody looks.
+    if after.is_unreadable:
+        _log.error(
+            "The SPY baseline could not be read, so it has been LEFT "
+            "EXACTLY AS IT IS rather than replaced - a failed read is not "
+            "evidence that the baseline is absent, and striking a new one "
+            "would restart the comparison and discard the history. The "
+            "performance page will say the baseline is unreadable until "
+            "this is resolved. Reason: %s", after.reason)
+        return False
+
     if not changed:
         return False
 

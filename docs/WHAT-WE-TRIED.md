@@ -1327,3 +1327,84 @@ conditional fallback inside a test is one of the ways it happens.
 | **Cost** (`/costs`) | weekend spend as its own days; the monthly cap is what bounds it |
 | **Logs** (`/logs`) | `Researched <TICKER> while the market was shut, against the cached close of <price>`, and `Hunt not due: no event has arrived since the last hunt at …` |
 | **Monday, Pipeline** | either an order, or `moved_up_past_view_price` tagged LIMIT with the price on the refusals page |
+
+---
+
+## 16. The SPY comparison restarted itself — three causes, one mistake
+
+Owner-reported 2026-09-12: *"something has gone wrong, it has reset my
+SPY track, it has randomly gone to tracking from 11/09 when it started
+14/08, figure out why?"*
+
+**It was real, it was mine, and it fired three separate ways.** All three
+are the same mistake in different clothes: **absence of evidence read as
+evidence that the broker account had changed.** `sync_with_account`'s own
+docstring has always promised *"AN OWNER-SET BASELINE IS NOT
+OVERWRITTEN"*, and the code did the opposite on the very next cycle.
+
+| # | cause | measured | why it fired |
+|---|---|---|---|
+| 1 | **An owner-set baseline stores no fingerprint** | seeded `owner_set`, `account_fingerprint=""`, ran one healthy cycle: `changed=True`, `source=account_changed`, `start_date` moved to today | the setup form cannot know the broker's account id, so `""` != the live hash and the mismatch branch fired. The reason it wrote claimed the account had changed **"fingerprint  -> 5a8297…"** — from a blank to a real one, which is not a change of account, it is the first time anyone looked |
+| 2 | **The fingerprint was `id or account_number`** | two reads of the SAME account, the second omitting `id`: `changed=True` | one read that happened to omit a field hashed the *other* field, matched nothing, and looked like a different account. A stored value that depends on which fields a particular read carried is a value that flips |
+| 3 | **An unreadable row reported `source="unset"`** | one `UPDATE … SET start_date='not-a-date'`: `changed=True`, a second row written, `start_date` = today | `is_placeholder` is `source == "unset"`, which `sync_with_account` reads as *"nothing has ever been stored"* — so **one row it could not parse** struck a fresh baseline at today and discarded a month of tracking |
+
+Cause 1 is the one that matches the owner's report exactly: they set the
+baseline by hand, and the next fifteen-minute cycle overwrote it.
+
+### What changed: a restart now needs POSITIVE evidence
+
+Three explicit branches, each returning `(now, False)` and writing
+nothing:
+
+| state | old behaviour | now |
+|---|---|---|
+| the baseline could not be read | struck a new one at today | `is_unreadable` is its own fact, distinct from `is_placeholder`; never replaced, and the scheduler logs it at **ERROR** saying it has been "LEFT EXACTLY AS IT IS" |
+| the read carries no canonical `id` | mismatch → restart | inconclusive → nothing. "Different account" and "same account reported by a different field" are indistinguishable, and one answer destroys a month of tracking while the other costs nothing |
+| the baseline carries no fingerprint | mismatch → restart | the fingerprint is **adopted onto it**, keeping the owner's own capital and start date, with `NOT restarted` in the reason |
+
+**Compare wide, write narrow.** `account_fingerprints()` hashes every
+identifier the payload carries and the match is an **intersection**, so a
+payload missing a field is still recognised and rows written by the older
+`id or account_number` code keep matching. The stored value is always
+`id` (`CANONICAL_ID_FIELD`), so it cannot depend on which fields a read
+happened to include.
+
+**TRIED AND BACKED OUT: storing the full SET of fingerprints.** The first
+version accumulated every identifier ever seen into the column. It works,
+and it **appends a row every time a read presents a field the baseline has
+not recorded yet** — which broke the existing property that a settled
+baseline writes no second row, and would have filled the owner's history
+with near-identical rows. Wide comparison plus a narrow canonical write
+gets the same recognition with no churn.
+
+### The property that must not break, and does not
+
+The owner's own instruction is *"when I change the Alpaca keys i want it
+to register there is a new account and restart the SPY tracker"*. Checked
+by running it: a genuinely different `id` still restarts —
+`source=account_changed`, `start_date` = today, capital struck from the
+new account's equity, and the previous baseline still in the history.
+
+### The owner's 14/08 baseline is recoverable
+
+`benchmark_baselines` is **append-only** — that design decision is what
+saved this. Every baseline the bot ever struck, including the owner's
+original, is still in the table with its capital, its date and the reason
+it was replaced. Re-entering it on the performance page now sticks,
+because cause 1 was what ate it.
+
+### Verification
+
+- **12 sabotage breakages, all 12 caught red**, each verified to still
+  import first. The first round reported one "not caught" that was
+  actually a **sabotage that never applied** — the target string is split
+  across two source lines, so `count(old)` was 0. The script asserts
+  every replacement applied (§6, "a multi-edit script that writes
+  nothing"), which is the only reason that was visible rather than being
+  recorded as a passing sabotage.
+- Four existing tests in `test_benchmark_baseline.py` **encoded the bug**
+  and were inverted, not deleted — e.g.
+  `test_unreadable_capital_cents_degrades_to_a_placeholder` became
+  `test_unreadable_capital_cents_is_unreadable_not_absent`. A test
+  asserting the broken behaviour is why this shipped.
+- Full suite green offline: **3871 tests**.

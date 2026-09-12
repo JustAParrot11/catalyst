@@ -368,7 +368,22 @@ class TestUnreadableEquity:
 
 
 class TestMalformedStoredRowDegradesInsteadOfRaising:
-    def test_unreadable_capital_cents_degrades_to_a_placeholder(
+    """INVERTED 2026-09-12, and the old assertion WAS the bug.
+
+    These used to assert `is_placeholder is True` for a row that exists
+    and cannot be parsed. `sync_with_account` reads a placeholder as
+    "nothing has ever been stored" and answers by striking a new baseline
+    at TODAY - so one unparseable row silently threw away the owner's
+    tracking and restarted the comparison. Owner-reported: "it has reset
+    my SPY track, it has randomly gone to tracking from 11/09 when it
+    started 14/08."
+
+    "Nothing is stored" and "something is stored and I cannot read it"
+    are different facts. Never raising is still required; reporting the
+    second as the first is not.
+    """
+
+    def test_unreadable_capital_cents_is_unreadable_not_absent(
             self, tmp_db):
         tmp_db.execute(
             "INSERT INTO benchmark_baselines (id, capital_cents, "
@@ -377,9 +392,12 @@ class TestMalformedStoredRowDegradesInsteadOfRaising:
             "'ok', ?)", (datetime.now(timezone.utc).isoformat(),))
         tmp_db.commit()
         baseline = current(tmp_db)  # must not raise
-        assert baseline.is_placeholder is True
+        assert baseline.is_unreadable is True
+        assert baseline.is_placeholder is False, (
+            "an unreadable row reported as absent is what re-baselined "
+            "the owner's tracker")
 
-    def test_unreadable_start_date_degrades_to_a_placeholder(self, tmp_db):
+    def test_unreadable_start_date_is_unreadable_not_absent(self, tmp_db):
         tmp_db.execute(
             "INSERT INTO benchmark_baselines (id, capital_cents, "
             "start_date, source, account_fingerprint, reason, set_at) "
@@ -387,7 +405,8 @@ class TestMalformedStoredRowDegradesInsteadOfRaising:
             "'ok', ?)", (datetime.now(timezone.utc).isoformat(),))
         tmp_db.commit()
         baseline = current(tmp_db)  # must not raise
-        assert baseline.is_placeholder is True
+        assert baseline.is_unreadable is True
+        assert baseline.is_placeholder is False
 
     def test_the_degraded_placeholder_names_the_bad_row_in_its_reason(
             self, tmp_db):
@@ -405,15 +424,19 @@ class TestMalformedStoredRowDegradesInsteadOfRaising:
         assert "could not be read" in baseline.reason
         assert "not-a-number" in baseline.reason
 
-    def test_a_missing_benchmark_baselines_table_degrades_to_a_placeholder(
+    def test_a_missing_benchmark_baselines_table_is_unreadable_not_absent(
             self, tmp_path):
         """A database that predates this migration, or one opened
         against the wrong schema file, must not crash dashboard
         rendering - it must say the baseline is unset."""
         conn = sqlite3.connect(str(tmp_path / "no_table.db"))
         baseline = current(conn)  # must not raise
-        assert baseline.source == "unset"
-        assert baseline.is_placeholder is True
+        # UNREADABLE, not unset. A table that will not read is not an
+        # absent baseline, and calling it one is what let a failed read
+        # overwrite a month of tracking.
+        assert baseline.is_unreadable is True
+        assert baseline.is_placeholder is False
+        assert "could not be read" in baseline.reason
         conn.close()
 
 

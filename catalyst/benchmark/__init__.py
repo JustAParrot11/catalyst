@@ -59,6 +59,70 @@ class Baseline:
         so rather than presenting a default as a decision."""
         return self.source == "unset"
 
+    @property
+    def fingerprints(self) -> set:
+        """Every identifier this baseline's account has ever presented.
+
+        STORED AS A SET, space-separated, because matching on one field
+        is not enough. The column used to hold a single hash of
+        `id or account_number`; a read that omitted `id` then hashed
+        `account_number` instead, matched nothing, and the bot concluded
+        the account had been swapped (measured 2026-09-12 - it
+        re-baselined an unchanged account). An older row holding one hash
+        parses as a one-element set, so nothing needs migrating.
+        """
+        return {part for part in str(self.account_fingerprint or "").split()
+                if part}
+
+    @property
+    def is_unreadable(self) -> bool:
+        """True when a baseline EXISTS and could not be read.
+
+        OWNER-REPORTED 2026-09-12: *"something has gone wrong, it has
+        reset my SPY track, it has randomly gone to tracking from 11/09
+        when it started 14/08"*.
+
+        "Nothing has ever been stored" and "something is stored and I
+        cannot read it" were the same state, and the second one was
+        treated as the first - so ONE unparseable row restarted the
+        comparison at today and threw away a month of tracking.
+        Distinguishing them is the whole point: absence of a baseline is
+        a reason to strike one, a failure to read it never is.
+        """
+        return self.source == "unreadable"
+
+
+#: The field a stored fingerprint is always computed from. Alpaca's
+#: /v2/account always returns `id`; `account_number` is accepted when
+#: COMPARING, so an older row or a payload missing `id` still matches,
+#: but it is never what gets written - a stored value that depends on
+#: which fields a read happened to carry is what flipped and restarted
+#: the owner's SPY comparison (measured 2026-09-12).
+CANONICAL_ID_FIELD = "id"
+
+
+def account_fingerprints(account: dict) -> set:
+    """EVERY identifier this payload carries, hashed.
+
+    OWNER-REPORTED 2026-09-12: the SPY comparison restarted on its own.
+    One cause: the fingerprint was `account.get("id") or
+    account.get("account_number")`, so a single read that happened to
+    omit `id` produced a DIFFERENT fingerprint for the SAME account, and
+    the bot concluded the account had been swapped. Measured: it
+    re-baselined on an unchanged account.
+
+    A set, compared by intersection, so any identifier matching means
+    the same account. That is the honest test - two payloads describe the
+    same account when they agree on any identifier, not only when they
+    happen to carry the same field.
+    """
+    out = set()
+    for key in ("id", "account_number"):
+        fp = fingerprint_account((account or {}).get(key))
+        if fp:
+            out.add(fp)
+    return out
+
 
 def fingerprint_account(account_id) -> str:
     """A stable, non-reversible id for a broker account.
@@ -84,8 +148,19 @@ def current(conn: sqlite3.Connection) -> Baseline:
             "SELECT capital_cents, start_date, source, account_fingerprint, "
             "reason, set_at FROM benchmark_baselines "
             "ORDER BY set_at DESC, rowid DESC LIMIT 1").fetchone()
-    except sqlite3.Error:
-        row = None
+    except sqlite3.Error as exc:
+        # A TABLE THAT WILL NOT READ IS NOT AN ABSENT BASELINE. Returning
+        # the placeholder here told sync_with_account "nothing has ever
+        # been stored", and it answered by striking a new baseline at
+        # today - throwing away the owner's tracking over one failed
+        # read (owner-reported 2026-09-12).
+        return Baseline(
+            capital_cents=FALLBACK_CAPITAL_CENTS,
+            start_date=datetime.now(timezone.utc).date(),
+            source="unreadable", account_fingerprint="", set_at="",
+            reason=f"the baseline table could not be read ({exc}). The "
+                   "stored baseline is unchanged and is NOT replaced on "
+                   "the strength of a failed read.")
     if not row:
         return Baseline(
             capital_cents=FALLBACK_CAPITAL_CENTS,
@@ -101,12 +176,19 @@ def current(conn: sqlite3.Connection) -> Baseline:
             source=str(row[2]), account_fingerprint=str(row[3]),
             reason=str(row[4]), set_at=str(row[5]))
     except (ValueError, ArithmeticError):
-        # A row we cannot read is a fact worth showing, not a crash.
+        # A row we cannot read is a fact worth showing, not a crash - and
+        # it is "unreadable", NOT "unset". It used to report source
+        # "unset", which sync_with_account reads as "nothing has ever
+        # been stored" and answers by re-baselining at today. Measured
+        # 2026-09-12: one row with an unparseable start_date restarted a
+        # month of tracking.
         return Baseline(
             capital_cents=FALLBACK_CAPITAL_CENTS,
             start_date=datetime.now(timezone.utc).date(),
-            source="unset", account_fingerprint="", set_at="",
-            reason=f"the stored baseline row could not be read: {row!r}")
+            source="unreadable", account_fingerprint="", set_at="",
+            reason=f"the stored baseline row could not be read: {row!r}. It "
+                   "is NOT replaced on the strength of a row this code "
+                   "cannot parse.")
 
 
 def record(conn: sqlite3.Connection, *, capital_cents, start_date: date,
@@ -143,12 +225,66 @@ def sync_with_account(conn: sqlite3.Connection, account: dict,
     says so.
     """
     today = today or datetime.now(timezone.utc).date()
-    fp = fingerprint_account(account.get("id") or account.get("account_number"))
-    if not fp:
+    # COMPARE AGAINST EVERY IDENTIFIER, WRITE ONLY THE CANONICAL ONE.
+    #
+    # The comparison is wide so a payload that omits one field is still
+    # recognised - and so rows written by the older `id or
+    # account_number` code keep matching. The WRITE is narrow so the
+    # stored value does not depend on which fields a particular read
+    # happened to carry, which is what made it flip.
+    seen = account_fingerprints(account)
+    if not seen:
         return current(conn), False
+    # The canonical field for WRITING, with the long-standing fallback to
+    # account_number so a payload without `id` can still strike a FIRST
+    # baseline. What changed is the mismatch rule below.
+    fp = (fingerprint_account((account or {}).get(CANONICAL_ID_FIELD))
+          or fingerprint_account((account or {}).get("account_number")))
 
     now = current(conn)
-    if now.account_fingerprint == fp and not now.is_placeholder:
+
+    # ONLY POSITIVE EVIDENCE OF A DIFFERENT ACCOUNT MAY RESTART THE
+    # COMPARISON. Owner-reported 2026-09-12: "it has reset my SPY track,
+    # it has randomly gone to tracking from 11/09 when it started 14/08."
+    # Three separate ways it fired, all measured, all the same mistake -
+    # absence of evidence read as evidence of change:
+    #
+    #   1. An OWNER-SET baseline stores no fingerprint, so ""
+    #      != the live hash and it was overwritten on the VERY NEXT
+    #      CYCLE - with a reason claiming the account had changed, from a
+    #      blank fingerprint to a real one. The docstring above has
+    #      always promised the opposite.
+    #   2. The fingerprint was `id or account_number`, so one read that
+    #      omitted `id` looked like a different account.
+    #   3. An unparseable row reported source "unset", which reads as
+    #      "nothing stored" and struck a new baseline at today.
+    #
+    # So each of those is now its own explicit branch, and none of them
+    # records anything.
+
+    # (3) A baseline we cannot read is never replaced. There IS one; the
+    # only honest thing to do is leave it alone and say so.
+    if now.is_unreadable:
+        return now, False
+
+    # (2) Same account if ANY identifier matches one we have ever seen
+    # for it. When this read carries an identifier the baseline has not
+    # recorded yet, remember it - so the next read that presents only
+    # that field is still recognised.
+    known = now.fingerprints
+    if known and (known & seen):
+        return now, False
+
+    # A MISMATCH IS NOT ENOUGH ON ITS OWN. If this read does not carry the
+    # canonical identifier, "different account" and "same account
+    # reported by a different field" are indistinguishable - and one of
+    # those answers destroys a month of the owner's tracking while the
+    # other costs nothing. Measured 2026-09-12: a read that omitted `id`
+    # re-baselined an unchanged account.
+    #
+    # So a restart needs positive evidence: the canonical field present,
+    # and different from the one on record.
+    if known and not (account or {}).get(CANONICAL_ID_FIELD):
         return now, False
 
     try:
@@ -157,6 +293,21 @@ def sync_with_account(conn: sqlite3.Connection, account: dict,
         # No readable equity means no honest baseline. Say nothing
         # rather than strike one against a number we do not have.
         return now, False
+
+    # (1) A baseline with NO fingerprint is not a different account - it
+    # is a baseline that predates fingerprinting, or one the owner set by
+    # hand from a page that cannot know the account id. Adopt the
+    # fingerprint onto it and keep the owner's dates and money.
+    if not now.account_fingerprint and not now.is_placeholder:
+        return record(
+            conn, capital_cents=now.capital_cents,
+            start_date=now.start_date, source=now.source,
+            account_fingerprint=fp,
+            reason=(
+                f"{now.reason} [Account fingerprint {fp} attached on "
+                f"{today}; the comparison was NOT restarted. A baseline "
+                "carrying no fingerprint is one set before fingerprinting "
+                "or set by hand, not a different account.]")), False
 
     first = now.is_placeholder
     return record(
