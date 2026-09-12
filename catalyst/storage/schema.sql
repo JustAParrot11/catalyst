@@ -516,6 +516,34 @@ CREATE TABLE IF NOT EXISTS benchmark_baselines (
 CREATE INDEX IF NOT EXISTS idx_benchmark_baselines_at
     ON benchmark_baselines (set_at DESC);
 
+-- The stocks the owner wants drawn BESIDE the bot, each with its own
+-- money and start date.
+--
+-- OWNER-ASKED 2026-09-12: "can you edit it a bit so i can track up to 10
+-- stocks at once, I type the stock name exactly and set the date and
+-- amount, set SPY as default, but then show as different colours on the
+-- graph so I can track how we are beating multiple stocks."
+--
+-- A SEPARATE TABLE, NOT A COLUMN ON benchmark_baselines. That table is
+-- append-only and `benchmark.current()` reads its newest row as THE
+-- account baseline; a per-ticker row in it would be returned as the
+-- account's own comparison and would reset the SPY tracking the owner
+-- has already had reset once.
+--
+-- KEYED ON THE TICKER, and edited in place rather than appended: this is
+-- a display choice, not a money fact, and an append-only list the owner
+-- edits ten times is a list nobody can read. `slot` is the colour, and
+-- it is STORED rather than derived from list order so adding a stock
+-- never re-colours the ones already drawn.
+CREATE TABLE IF NOT EXISTS benchmark_comparisons (
+    ticker        TEXT PRIMARY KEY,           -- upper case, as typed
+    start_date    TEXT NOT NULL,              -- the day it is bought
+    capital_cents TEXT NOT NULL,              -- decimal string, cents
+    slot          INTEGER NOT NULL,           -- stable colour slot
+    set_at        TEXT NOT NULL,
+    reason        TEXT NOT NULL DEFAULT ''
+);
+
 -- Every closed-day comparison of what the ledger PRICED against what
 -- Anthropic actually BILLED, and what that said about the rate table.
 -- Written whether or not it changed anything: the quiet "checked and

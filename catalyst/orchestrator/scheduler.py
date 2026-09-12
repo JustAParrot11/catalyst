@@ -515,8 +515,77 @@ def _maybe_refresh_benchmark(state: dict | None, *, force: bool = False,
                 result.skipped_reason, (result.raw_response or "")[:500])
             _maybe_rebuild_refused_feed(
                 conn, db_file, result, creds, state, today)
+        # EVERY STOCK THE OWNER TRACKS NEEDS ITS OWN BARS. Owner-asked
+        # 2026-09-12: up to ten comparison lines. Done AFTER SPY and
+        # inside the same try, because SPY is the account's own benchmark
+        # and a comparison ticker is a preference - a typed symbol that
+        # does not exist must never be able to hold SPY's refresh up.
+        _refresh_tracked_comparisons(conn, db_file, creds, state, today)
     except Exception:  # noqa: BLE001 - reporting must never stop trading
         _log.exception("The benchmark refresh failed; trading is unaffected.")
+
+
+def _refresh_tracked_comparisons(conn, db_file, creds, state, today) -> None:
+    """Cache daily closes for each stock the owner tracks. Never raises.
+
+    Its own function, and its own once-a-day marker, so a comparison
+    symbol Alpaca will not answer cannot stop SPY being refreshed - the
+    account's own benchmark outranks a chart preference.
+    """
+    if state.get("comparison_day") == today:
+        return
+    try:
+        from catalyst.benchmark import comparisons as _cmp
+        from catalyst.data import benchmark as _bench
+        from catalyst.dashboard.db import bars_path
+
+        own = None
+        if conn is None and db_file:
+            import sqlite3 as _sq
+
+            own = _sq.connect(db_file, timeout=5.0)
+        use = conn if conn is not None else own
+        try:
+            if use is None:
+                return
+            from catalyst import benchmark as _base
+
+            rows = _cmp.tracked(use, _base.current(use))
+        finally:
+            if own is not None:
+                own.close()
+        symbols = [c.ticker for c in rows
+                   if c.ticker != _bench.BENCHMARK_SYMBOL]
+        if not symbols:
+            state["comparison_day"] = today
+            return
+        results = _bench.refresh_comparisons(
+            bars_path(), creds.alpaca_key, creds.alpaca_secret, symbols)
+        stuck = {s: r.skipped_reason for s, r in results.items()
+                 if r.skipped_reason not in (None, "already_current")
+                 and not r.routine}
+        # Marked done only when nothing is stuck, for the same reason
+        # SPY's marker is: burning the day's only try on a transient
+        # failure is what left the SPY line 48 hours stale once already.
+        if not stuck:
+            state["comparison_day"] = today
+        for symbol, r in results.items():
+            if r.skipped_reason in (None, "already_current") or r.routine:
+                _log.info("Comparison %s: %s bar(s) added, %s.", symbol,
+                          r.written, r.skipped_reason or "up to date")
+            else:
+                # House rule 3: the raw upstream response beside the zero.
+                _log.warning(
+                    "Comparison %s has no new bars (%s), so its line on the "
+                    "performance chart will not move. If the ticker was "
+                    "mistyped this is what that looks like. Raw upstream: "
+                    "%s", symbol, r.skipped_reason,
+                    (r.raw_response or "")[:500])
+    except Exception:  # noqa: BLE001 - a chart preference must never
+        # touch trading, and must never take SPY's refresh down with it.
+        _log.exception(
+            "The tracked-comparison refresh failed; SPY and trading are "
+            "unaffected.")
 
 
 #: A pinned feed refused on every attempt across this many distinct days,

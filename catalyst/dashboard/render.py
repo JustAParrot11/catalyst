@@ -113,6 +113,39 @@ _CSS = """
      2.74:1 on the light surface, so every node carries a visible
      text label - identity is never colour alone. */
   --series-3:    #1baf7a;
+  /* THE COMPARISON PALETTE. Owner-asked 2026-09-12: up to ten stocks
+     tracked beside the bot, "different colours on the graph".
+
+     COMPUTED, NOT CHOSEN, and ORDERED so the first n slots are the
+     best-separated n - the owner will usually track two or three, and
+     those must be unmistakable. Greedy max-min on the worst of four
+     vision models (normal, deuteranopia, protanopia, tritanopia), CIE76
+     dE, seeded with slot 0 (the bot's own blue) and slot 1 (SPY's
+     orange, so SPY keeps the colour this dashboard has always given it).
+     Every stroke is at least 2.4:1 against its own surface, because a
+     line nobody can see is worse than one they confuse.
+
+     Measured worst-pair CVD dE as lines are added, light / dark:
+        2 series 96.3/95.7   3: 42.8/42.6   4: 18.6/26.5
+        5 series 14.9/18.4  <- the last row where colour alone is reliable
+        6 series 14.0/11.1   8: 11.7/7.1   11: 5.8/4.0
+
+     PAST FIVE SERIES COLOUR IS A CUE, NOT AN IDENTIFIER, and the chart
+     does not ask it to be one: each line also carries its own dash
+     pattern and its ticker printed at its right-hand end. That is this
+     project's standing rule - identity is never colour alone - applied
+     to the case where the arithmetic says it cannot be. */
+  --cmp-0:       #2a78d6;   /* the bot; same as --series-1 */
+  --cmp-1:       #eb6834;   /* SPY; same as --series-2 */
+  --cmp-2:       #8c1c2b;
+  --cmp-3:       #d0397f;
+  --cmp-4:       #4b3fa8;
+  --cmp-5:       #1baf7a;
+  --cmp-6:       #5f9e00;
+  --cmp-7:       #c2185b;
+  --cmp-8:       #00838f;
+  --cmp-9:       #6d7f00;
+  --cmp-10:      #e05c5c;
   --good:        #0ca30c;
   --good-ink:    #006300;
   --warning:     #fab219;
@@ -151,6 +184,21 @@ _CSS = """
     --series-1:  #3987e5;
     --series-2:  #d95926;
     --series-3:  #199e70;
+    /* Dark-mode comparison palette, computed the same way against the
+       dark surface. Different hues from light, not merely lightened: the
+       greedy ordering is run per surface because what is furthest apart
+       on off-white is not what is furthest apart on near-black. */
+    --cmp-0:     #3987e5;
+    --cmp-1:     #d95926;
+    --cmp-2:     #5fdcc0;
+    --cmp-3:     #e3bd4a;
+    --cmp-4:     #3fb56a;
+    --cmp-5:     #e878b0;
+    --cmp-6:     #49c3f0;
+    --cmp-7:     #d7a520;
+    --cmp-8:     #2ab8c4;
+    --cmp-9:     #c08457;
+    --cmp-10:    #8b7fe0;
     --good-ink:  #33d17a;
     --pos:       #33d17a;
     --neg:       #f2555a;
@@ -522,6 +570,13 @@ h3 { font-size: 11px; margin: 14px 0 5px 0; text-transform: uppercase;
 .key-1 { background: var(--series-1); }
 .key-2 { background: var(--series-2); }
 .key-3 { background: var(--series-3); }
+/* A tracked stock's colour, beside its ticker in the list, so the chart
+   and the list can be read against each other. Never the only
+   identifier - the ticker is right next to it in text, because measured,
+   ten of these cannot be told apart (see the palette note above). */
+.cmp-key { display: inline-block; width: 9px; height: 9px; border-radius: 2px;
+           margin: 0 6px 0 0; vertical-align: baseline;
+           outline: 1px solid var(--hairline); }
 /* Provenance, folded. The rule is unchanged - every figure says where
    it came from - but it says so on request rather than in the middle of
    the page. Closed it costs one line; open it is the same text as

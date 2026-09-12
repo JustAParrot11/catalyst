@@ -1533,3 +1533,185 @@ URL and the attempt count, so the *next* occurrence answers that
 question from the dashboard — which is the point: the diagnosis was
 never stored, so it could not be read out afterwards no matter how the
 panel was written.
+
+---
+
+## 18. Ten stocks beside the bot, and the arithmetic that says colour cannot carry them
+
+Owner-asked 2026-09-12: *"on the tab where i can set where to track SPY
+from, can you edit it a bit so i can track up to 10 stocks at once, I
+type the stock name exactly and set the date and amount, set SPY as
+default, but then show as different colours on the graph so I can track
+how we are beating multiple stocks."*
+
+### Measured first: eleven lines cannot be told apart by colour
+
+Before choosing anything, the palette was computed — CIE76 ΔE against
+this dashboard's own two surfaces, under normal vision plus simulated
+deuteranopia, protanopia and tritanopia, greedily ordered so the first
+*n* slots are the best-separated *n*:
+
+| series drawn | worst-pair CVD ΔE, light / dark |
+|---|---|
+| 2 | 96.3 / 95.7 |
+| 3 | 42.8 / 42.6 |
+| 4 | 18.6 / 26.5 |
+| **5** | **14.9 / 18.4** — the last row that is reliable |
+| 6 | 14.0 / 11.1 |
+| 8 | 11.7 / 7.1 |
+| 11 | **5.8 / 4.0** |
+
+A first attempt with hand-picked hues measured **0.6** on its worst pair
+(the bot's blue against an indigo, identical under deuteranopia), which
+is what made the point unarguable.
+
+**So colour is a grouping cue and never the identifier.** Each line also
+carries its own dash pattern, and its **ticker is printed at the
+right-hand end of its own line** — which is strictly better than a
+legend anyway, because reading a legend requires exactly the hue
+discrimination the table above says a reader does not have. That is this
+project's standing rule (a status is never carried by colour alone)
+applied to the case where the arithmetic says it cannot be. Every stroke
+also clears 2.4:1 against its own surface: a line nobody can see is
+worse than one they confuse.
+
+`slate` was computed into slot 2 and **removed by hand** — it is
+maximally distant precisely because it is neutral, and a grey line among
+coloured ones reads as chrome. The cost of dropping it was 42.8 instead
+of 45.3 at three series.
+
+### Four things the feature needed that were not the feature
+
+| # | what | why it mattered |
+|---|---|---|
+| 1 | **A separate table**, not a column on `benchmark_baselines` | that table is append-only and `benchmark.current()` reads its newest row as **the account baseline**. A per-ticker row in it would be returned as the account's own comparison — and §16 is this same baseline being reset under the owner three different ways. A test asserts the baseline table has no ticker column |
+| 2 | **SPY had to survive the first add** | the list is *synthesised* from the account baseline while empty, so the first real write would have made the new stock the only row and silently dropped the line the owner was reading. `seed_from_baseline` writes SPY first |
+| 3 | **Per-symbol cache metadata** | `BarCache` wrote **one** `cache_meta.json` for the whole root, so refreshing AAPL would have overwritten SPY's `feed` pin — and SPY's next refresh would then append one exchange's prints to a consolidated-tape series. That is the exact "never mix bases" failure `catalyst/data/benchmark.py` exists to prevent, and a silent one. SPY keeps the unqualified file it has always had; everything else gets its own |
+| 4 | **Something had to fetch the bars** | `refresh_benchmark` was hard-wired to SPY, so every new line would have been permanently empty. It takes a symbol now, with `refresh_comparisons` looping, its **own** daily marker so a mistyped ticker cannot hold SPY's refresh up, and the marker set only when nothing is stuck — the defect that once left the SPY line 48 hours stale |
+
+**Number 3 was found by reading `BarCache` before using it, not by a
+test.** That is the fifth time in this project that the thing which
+broke a change was one level away from it.
+
+### The default is synthesised, not seeded
+
+With no stored rows the list *is* SPY bought with the account baseline's
+own money on its own date — byte for byte what this page drew before the
+list existed. So an owner who never opens the form sees no change, no
+migration writes anything, and the list can never be empty (a page built
+to compare cannot do it with one line). Removing every row falls back to
+the same default.
+
+### My own fix had a defect, and my own test caught it
+
+The end-label stack was slid **up** by its bottom overflow. With eleven
+lines crammed against the floor — ten stocks in a drawdown, which is a
+real Tuesday — that pushed the topmost label clean out through the **top**
+of the chart:
+
+```
+labels outside the viewBox: ["'BOT' box=(776.5,-75.3,797.2,-61.0)"]
+```
+
+Written for the bottom case; the top was never considered. It now fits on
+both sides, and falls back to even spacing when the labels cannot both
+follow their own lines and stay inside the plot.
+
+**And a second one of the same kind:** the label gap was `FONT_SIZE + 2`
+= 13 against `text_boxes`' own measured box height of 14.3 — so the
+project's own measurement tool reported an overlap the code believed it
+had prevented. Two numbers meaning the same thing, quietly disagreeing
+(§6's "two constants that later became equal", in reverse). Both now
+derive from one `LINE_H`.
+
+**A third, found by a test that had nothing to do with this feature.**
+`BarCache.load_bars` raises a message written for a developer running a
+backtest — *"run scripts/fetch_history.py first; the backtest never
+fetches mid-run"* — and the brief says the owner must never be told to
+run a script. So I replaced it with a helpful paragraph, and
+`test_the_overview_is_no_longer_mostly_prose` went red:
+
+```
+assert (1578 / 21) < 75      # the page is still an essay with numbers in it
+```
+
+Measured, the performance panel had grown by **59 words**, and a word-by-
+word diff named them: the whole paragraph, appearing on the **account's
+own SPY** — where *"check SPY is spelled exactly right"* is nonsense,
+because SPY is not a ticker the owner typed. **The advice belonged to the
+display, not to the loader.** The loader now states the fact in eight
+words with the raw exception after it, and `panels._tracked_stocks` adds
+the wait-or-check-the-spelling sentence for the stocks the owner actually
+typed.
+
+Worth recording because the word budget caught a **correctness** bug, not
+a style one: a guardrail against prose found a sentence being shown to
+the wrong reader.
+
+### Recurring failure, and it was mine twice in one session
+
+**Killing a sabotage harness mid-run leaves the sabotage in the working
+tree.** §17 recorded it once (piping the script to `head`, SIGPIPE). I
+then did it again — `pkill` while a round was live, whose `finally` never
+ran — and `FIRST_COMPARISON_SLOT = 0` sat in the tree until a test
+failed for a reason unrelated to what it tests. The second harness *did*
+restore in a `finally`; a signal does not run one.
+
+The check that actually works is not a better harness, it is **auditing
+every sabotage target afterwards**: a script asserting each target string
+is present at its expected count, run before trusting any suite result.
+That found the one left-over immediately and confirmed the other thirty-
+eight were clean.
+
+### Verification
+
+- **39 sabotage breakages** (see the commit for the final count red),
+  each verified to still import first.
+- **Three sabotages came back green as defence-in-depth pairs** —
+  the stored slot is protected by `add` *and* by the `ON CONFLICT` clause
+  not touching the column; the ten-stock cap by `add` *and* by
+  `free_slot` running out; a validation refusal by its own branch *and*
+  by the generic handler. In each case a test was added for the property
+  only the first half holds (the returned object's slot; the refusal
+  naming the rejected stock; a mistyped field not being reported as "the
+  tracked list could not be written", which sends the owner to look at
+  their database). §14's lesson: the way to show a pair is load-bearing
+  is to break both.
+- **One sabotage was itself a no-op** (`… if False else None`) and one
+  was a syntax error — both rewritten. A sabotage that does not apply is
+  recorded as *not applied*, never as caught.
+- The bar fixture was **sabotaged to write no bars**, confirming three
+  chart tests go red — otherwise they would have passed without ever
+  reading the cache.
+- **The upgrade was run, not assumed.** A database was built from the
+  schema at `b769a18` (before this session), seeded with the owner's own
+  baseline shape, and today's `init_db` run over it — which is what the
+  service does on start after `upgrade.sh` pulls:
+
+  | check | result |
+  |---|---|
+  | tables added by this change | `benchmark_comparisons` only |
+  | tables lost | none |
+  | existing baselines preserved | 1 of 1 |
+  | `PRAGMA foreign_keys` | 1 |
+  | the page before any edit | SPY, $2,000.00 from 2026-08-14, worth $2,119.30, +6.0% |
+  | after adding AAPL | three lines drawn (BOT, SPY, AAPL); account baseline still `owner_set` 2026-08-14 $2,000 |
+
+  Ten stocks were then rendered together with one deliberately having no
+  bars: nine value rows, one dash carrying its raw reason, and
+  `labels_outside_viewbox` empty.
+- Full suite green offline (count in the commit).
+
+### What is NOT claimed
+
+- **No tracked stock has ever been fetched in production.** The chain is
+  verified offline: a comparison added now has no line until the bot's
+  next daily refresh, and the row says so with the exact upstream
+  response.
+- **Whether the owner can read ten lines at once is not established by
+  the ΔE table** — the table says colour alone cannot do it, which is why
+  the dash and the end label exist. Whether eleven lines is *useful* is a
+  judgement the owner will make by looking at it.
+- Nothing here can size, spend or trade: `grep` over `risk/`,
+  `execution/` and `cost/` for the table name returns nothing, and a test
+  holds that.
