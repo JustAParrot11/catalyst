@@ -277,9 +277,35 @@ class TestItRefusesRatherThanGuesses:
         with pytest.raises(BackfillError, match="cannot be priced"):
             backfill_day(db, DAY, fetch=fetch([bad]), now=NOW)
 
-    def test_an_unknown_model_is_loud(self, db):
+    def test_an_unknown_model_is_priced_high_rather_than_abandoning_the_day(
+            self, db):
+        """INVERTED 2026-09-12. This used to raise, and raising was the
+        WORSE direction here: the whole day's backfill failed, so the
+        ledger kept its hole and under-stated the spend - which is the
+        "$3.64 here, $2.95 in the console" class of report this module
+        exists to answer.
+
+        The usage report carries Anthropic's OWN model names, so a model
+        this table has not heard of is a real model that was really
+        billed. It is priced at the cold-start seed, which over-states
+        the day and therefore throttles; the next closed day's
+        cost_report corrects the rate, and `reprice_all` can restate the
+        row from the verbatim usage kept beside it."""
+        from catalyst.cost.pricing import cold_start_rates, rates_for
+
         bad = dict(REAL_GROUP, model="claude-something-new")
-        with pytest.raises(Exception):
+        r = backfill_day(db, DAY, fetch=fetch([bad]), now=NOW)
+        assert r.billed_cents > REAL_BILLED, (
+            "an unknown model must be assumed dearer than a known one")
+        assert ledger_total(db, DAY) == r.billed_cents
+        assert rates_for("claude-something-new", DAY) == cold_start_rates()
+
+    def test_a_group_with_a_blank_model_still_refuses(self, db):
+        """The guard that survived: there is no rate for a call that
+        does not name a model, and treating it as free is the silent
+        understatement TRAPS.md is about."""
+        bad = dict(REAL_GROUP, model="   ")
+        with pytest.raises(BackfillError, match="cannot be priced"):
             backfill_day(db, DAY, fetch=fetch([bad]), now=NOW)
 
     def test_an_empty_day_reports_zero_rather_than_erasing_the_ledger(

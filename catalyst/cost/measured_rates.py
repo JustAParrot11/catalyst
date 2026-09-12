@@ -170,6 +170,54 @@ def _sole_model(conn: sqlite3.Connection, target_date: date) -> str | None:
     return rows[0][0] if len(rows) == 1 else None
 
 
+def _is_cold_start_guess(conn: sqlite3.Connection, model: str) -> bool:
+    """Is the rate in force for `model` a GUESS rather than evidence?
+
+    True when nothing has ever been measured or published for it: no
+    `pricing_overrides` row, and no entry in pricing.py's table - so
+    what priced the day was `pricing.cold_start_rates()`, which is
+    deliberately twice the dearest known rate and is not a claim about
+    this model at all.
+
+    WHY THIS EXISTS. `SANITY_MULTIPLE` refuses a measured rate more than
+    4x from the one in force, on the reasoning that no published price
+    has ever moved that far, so such a reading is a credit, a refund or
+    a changed API answer. That reasoning depends on the rate in force
+    being something we have EVIDENCE for. Against a cold-start guess it
+    is simply wrong, and it produced a real trap:
+
+        seed for an unknown model  = 1000/5000 (2x the dearest known)
+        a new Haiku-class model    =  100/500
+        ratio                      = 0.10, beyond 4x -> REFUSED
+
+    Measured in an adversarial read of the 2026-09-12 change: the guess
+    stayed in force permanently and the bot throttled itself at ten
+    times the true price, with no way out but a hand-typed rate - which
+    is exactly the manual step the owner asked to be rid of ("i want
+    nothing manual").
+
+    A first measurement cannot be "a price move that never happened",
+    because there was no price to move from. So it applies in full. The
+    guards that still hold are the ones that do not depend on a prior:
+    the day must clear MIN_DAY_CENTS, the reading must be outside the
+    deadband, and the derived rate must be positive.
+    """
+    from catalyst.cost.pricing import has_published_rate
+
+    if has_published_rate(model):
+        return False
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM pricing_overrides WHERE model = ? LIMIT 1",
+            (model,)).fetchone()
+    except sqlite3.Error:
+        # No overrides table: nothing has ever been measured, so the
+        # rate in force is necessarily the table or the seed. Only the
+        # seed reaches here, because has_published_rate said no.
+        return True
+    return row is None
+
+
 def _day_token_counts(conn: sqlite3.Connection, target_date: date) -> dict:
     """The day's token counts by component, from the RAW usage objects.
 
@@ -441,7 +489,15 @@ def learn_from_closed_day(
 
         # A FACTOR THIS LARGE IS NOT A PRICE. Refused and recorded, not
         # applied - see SANITY_MULTIPLE.
-        if ratio > SANITY_MULTIPLE or ratio < (Decimal("1") / SANITY_MULTIPLE):
+        #
+        # UNLESS THE RATE IT IS BEING COMPARED AGAINST IS ITSELF A GUESS.
+        # See _is_cold_start_guess: the bound protects a rate we have
+        # evidence for, and applying it to a cold-start seed left a
+        # cheap new model priced at ten times its real cost forever.
+        first_measurement = _is_cold_start_guess(conn, model)
+        if not first_measurement and (
+                ratio > SANITY_MULTIPLE
+                or ratio < (Decimal("1") / SANITY_MULTIPLE)):
             m = _replace(base, reason=(
                 f"billed {billed}c against {local}c priced locally is a "
                 f"factor of {ratio:.2f} - beyond {SANITY_MULTIPLE}x, which no "
@@ -458,7 +514,21 @@ def learn_from_closed_day(
         new_in = (old_in * ratio).quantize(Decimal("1"))
         new_out = (old_out * ratio).quantize(Decimal("1"))
         if new_in <= 0 or new_out <= 0:
-            return None
+            # RECORDED, NOT A SILENT RETURN. This used to `return None`,
+            # which left no trace at all. It became reachable when a
+            # first measurement stopped being bounded by SANITY_MULTIPLE:
+            # a ratio small enough to round a rate to zero now gets this
+            # far, and a rate that rounds to nothing is the
+            # price-at-zero failure TRAPS.md is entirely about. Refused
+            # and written down, so the seed staying in force has a reason
+            # beside it.
+            m = _replace(base, reason=(
+                f"billed {billed}c against {local}c priced locally would "
+                f"round the rate to {new_in}/{new_out} per Mtok - a rate of "
+                "zero prices every later call at nothing, so it is refused "
+                "and the rate is unchanged."))
+            _record(conn, m)
+            return m
 
         if new_in == base_in and new_out == base_out:
             m = _replace(base, old_input=base_in, old_output=base_out,
@@ -478,6 +548,13 @@ def learn_from_closed_day(
             "The Admin API is the price (owner-set 2026-09-05), so a clean "
             "reading is applied in full rather than walked toward."
         )
+        if first_measurement:
+            reason += (
+                f" FIRST MEASUREMENT for {model}: the day was priced at a "
+                f"cold-start guess ({old_in}/{old_out}), not at anything "
+                f"measured, so the {SANITY_MULTIPLE}x sanity bound was not "
+                "applied - there was no prior price for this to be an "
+                "implausible move away from.")
         # Effective from the day AFTER the day it was measured on, so
         # already-priced history keeps the rate that was actually in
         # force when it was priced, and a backfill of an earlier day

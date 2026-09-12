@@ -169,7 +169,11 @@ def price_usage_day(groups: list, target_date: date) -> tuple[Decimal, list]:
     """(total cents, [(model, api_key_id, cents)]) for one day."""
     total, itemised = Decimal("0"), []
     for g in groups:
-        model = str(g.get("model") or "")
+        # STRIPPED. A whitespace-only model is as unpriceable as an
+        # absent one, and without this it skipped past the clear message
+        # below and surfaced as a raw UnknownModelError from pricing.py -
+        # same refusal, no explanation of which day or which group.
+        model = str(g.get("model") or "").strip()
         if not model:
             raise BackfillError(
                 f"a usage group for {target_date} carries no model, so it "

@@ -1747,6 +1747,20 @@ def _token_price_editor(db: Db, p: str, as_of) -> str:
     from catalyst.cost import overrides as _ovr
     from catalyst.cost.pricing import MODEL_RATES_CENTS_PER_MTOK
 
+    # EVERY MODEL THE LEDGER HAS ACTUALLY BILLED, plus the ones with a
+    # published rate. A model chosen from the setup dropdown that this
+    # table has never heard of is priced from the cold-start seed, and
+    # leaving it off this panel would hide the one rate most worth
+    # checking - the guess.
+    shown = set(MODEL_RATES_CENTS_PER_MTOK)
+    if db.conn is not None:
+        try:
+            shown |= {r["model"] for r in db.q(
+                "SELECT DISTINCT model FROM cost_events "
+                "WHERE model IS NOT NULL AND model != ''").rows}
+        except Exception:      # noqa: BLE001 - the panel still draws
+            pass
+
     out: list[str] = [
         "<h3>Token prices &mdash; what the ledger prices at</h3>",
         # Owner-asked 2026-08-11: "Surely the API pulling API costs is
@@ -1767,14 +1781,19 @@ def _token_price_editor(db: Db, p: str, as_of) -> str:
     # What is in force today, per model, so the form has a baseline to
     # correct rather than a blank box.
     live_rows = []
-    for m in sorted(MODEL_RATES_CENTS_PER_MTOK):
+    for m in sorted(shown):
         try:
+            from catalyst.cost.pricing import has_published_rate, rates_for
+
             if db.conn is not None:
                 inp, outp = _ovr.rates_for_on(db.conn, m, as_of)
             else:
-                from catalyst.cost.pricing import rates_for
                 inp, outp = rates_for(m, as_of)
-            source = "built-in table"
+            source = ("built-in table" if has_published_rate(m) else
+                      "NOT BILLED YET - a deliberately high cold-start "
+                      "estimate, replaced by the first closed day's real "
+                      "bill. High on purpose: it makes the bot do less, "
+                      "never overspend")
             if db.conn is not None:
                 hit = db.q(
                     "SELECT effective_from, set_by FROM pricing_overrides "
@@ -1801,7 +1820,7 @@ def _token_price_editor(db: Db, p: str, as_of) -> str:
         f'<option value="{esc(m)}"'
         + (" selected" if m == "claude-sonnet-5" else "")
         + f">{esc(m)}</option>"
-        for m in sorted(MODEL_RATES_CENTS_PER_MTOK))
+        for m in sorted(shown))
     out.append(
         f'<form class="inline" id="{p}-price-form" method="post" '
         'action="/set-token-price">'

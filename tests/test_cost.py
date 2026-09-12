@@ -112,9 +112,27 @@ class TestPricing:
             assert bumped != base, f"{field} does not affect price - TRAPS.md violation"
         assert price(usage_fixture(web_search_requests=10), "claude-sonnet-4-6") == base + Decimal("10")
 
-    def test_unknown_model_is_loud(self):
-        with pytest.raises(UnknownModelError):
-            price(usage_fixture(), "claude-renamed-model-v9")
+    def test_an_unknown_model_is_priced_high_and_never_at_zero(self):
+        """INVERTED 2026-09-12. This used to raise, which meant a model
+        Anthropic had released but nobody had typed into pricing.py
+        halted ALL spending until a human edited the file - the manual
+        step the owner asked to be rid of.
+
+        The property that MATTERS is unchanged and is what this asserts:
+        it never prices at zero (TRAPS.md), and it errs HIGH, because
+        over-pricing only makes the bot do less while under-pricing
+        overspends the budget."""
+        from catalyst.cost.pricing import cold_start_rates
+
+        seeded = price(usage_fixture(), "claude-renamed-model-v9")
+        assert seeded > 0
+        dearest = max(price(usage_fixture(), m)
+                      for m in ("claude-haiku-4-5", "claude-sonnet-5",
+                                "claude-opus-5"))
+        assert seeded > dearest, (
+            "a model nobody has been billed for must be assumed dearer "
+            "than anything known, or the first day overspends")
+        assert cold_start_rates()[0] > 0
 
     def test_1h_cache_writes_bill_at_2x(self):
         # Audit F3 follow-up: 1h-TTL writes at 2x, not 1.25x. 500k 1h
@@ -159,16 +177,34 @@ class TestPricing:
 
 
 class TestRecordFirstPriceSecond:
-    def test_unknown_model_still_lands_a_row(self, tmp_db):
-        """Audit F2: the money is spent before we price it. A dated model
-        ID missing from the table must still be recorded."""
+    def test_a_model_missing_from_the_table_is_priced_not_refused(self, tmp_db):
+        """INVERTED 2026-09-12 - see
+        TestPricingArithmetic.test_an_unknown_model_is_priced_high. A
+        dated model id absent from the table lands PRICED now, at the
+        cold-start seed, so it cannot block the governor."""
+        record_usage({"input_tokens": 100, "output_tokens": 50},
+                     "claude-sonnet-4-5-20250929", "scheduled", "research",
+                     tmp_db)
+        rows = tmp_db.execute(
+            "SELECT model, priced_cents FROM cost_events").fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == "claude-sonnet-4-5-20250929"
+        assert Decimal(rows[0][1]) > 0
+        assert not has_unpriced_rows(tmp_db)
+
+    def test_a_call_naming_no_model_still_lands_a_row(self, tmp_db):
+        """Audit F2, and the guard that SURVIVED the inversion: the
+        money is spent before we price it. A blank model is not a model,
+        there is no rate for "unnamed", and pooling that spend would
+        also make measured_rates read a two-model day as one - so it
+        still refuses, and the row is still recorded first."""
         with pytest.raises(UnknownModelError):
             record_usage({"input_tokens": 100, "output_tokens": 50},
-                         "claude-sonnet-4-5-20250929", "scheduled", "research", tmp_db)
+                         "", "scheduled", "research", tmp_db)
         rows = tmp_db.execute(
-            "SELECT model, priced_cents FROM cost_events"
-        ).fetchall()
-        assert rows == [("claude-sonnet-4-5-20250929", None)]
+            "SELECT model, priced_cents FROM cost_events").fetchall()
+        assert rows == [("", None)]
+        assert has_unpriced_rows(tmp_db)
 
     def test_unrecognized_field_still_lands_a_row(self, tmp_db):
         """Audit N1 regression: the unknown-field guard must never
@@ -196,16 +232,22 @@ class TestRecordFirstPriceSecond:
 
     def test_reprice_all_fills_holes_and_reports_changes(self, tmp_db):
         """Audit F3: the verbatim-storage recovery path must be real."""
-        with pytest.raises(UnknownModelError):
-            record_usage({"input_tokens": 1_000_000, "output_tokens": 0},
-                         "claude-newmodel-x", "scheduled", "research", tmp_db)
-        import catalyst.cost.pricing as pricing
-        pricing.MODEL_RATES_CENTS_PER_MTOK["claude-newmodel-x"] = (
-            Decimal("100"), Decimal("500"))
+        # THE RENAMED-FIELD HOLE, which is the one that still exists.
+        # An unknown MODEL no longer makes a hole - it is seeded - so
+        # this uses the other unpriceable route: a billing field the
+        # parser does not recognise, later recognised (TRAPS.md).
+        import catalyst.cost.tracker as tracker
+        with pytest.raises(UnrecognizedUsageFieldError):
+            record_usage({"input_tokens": 1_000_000, "output_tokens": 0,
+                          "input_tokens_v2": 0},
+                         "claude-haiku-4-5", "scheduled", "research", tmp_db)
+        tracker._KNOWN_BENIGN_TOP_KEYS = (
+            set(tracker._KNOWN_BENIGN_TOP_KEYS) | {"input_tokens_v2"})
         try:
             outcome = reprice_all(tmp_db)
         finally:
-            del pricing.MODEL_RATES_CENTS_PER_MTOK["claude-newmodel-x"]
+            tracker._KNOWN_BENIGN_TOP_KEYS = (
+                set(tracker._KNOWN_BENIGN_TOP_KEYS) - {"input_tokens_v2"})
         assert len(outcome.changes) == 1
         row_id, old, new = outcome.changes[0]
         assert old is None and new == Decimal("100")
@@ -222,10 +264,10 @@ class TestRecordFirstPriceSecond:
         rest of history."""
         with pytest.raises(UnknownModelError):
             record_usage({"input_tokens": 1_000_000, "output_tokens": 0},
-                         "claude-mystery", "scheduled", "research", tmp_db)
+                         "", "scheduled", "research", tmp_db)
         insert_cost_row(tmp_db, cents="1", model="claude-sonnet-4-6")
         outcome = reprice_all(tmp_db)
-        assert [m for _, m in outcome.still_unpriced] == ["claude-mystery"]
+        assert [m for _, m in outcome.still_unpriced] == [""]
         # the known row got (re)priced from raw '{}' -> 0
         assert any(new == Decimal("0") for _, _, new in outcome.changes)
 
@@ -935,12 +977,22 @@ class TestOwnerEditableTokenPrices:
         assert rates_for_on(tmp_db, "claude-sonnet-5", date(2026, 12, 1)) \
             == rates_for("claude-sonnet-5", date(2026, 12, 1))
 
-    def test_an_unknown_model_still_refuses_rather_than_pricing_at_zero(
+    def test_a_model_with_no_override_and_no_table_entry_is_seeded(
+            self, tmp_db):
+        """The date-effective lookup has to answer for a model released
+        since anyone edited pricing.py, or a measured rate could never
+        be written for one."""
+        from catalyst.cost.overrides import rates_for_on
+        from catalyst.cost.pricing import cold_start_rates
+        assert rates_for_on(tmp_db, "claude-renamed-v9", date(2026, 9, 1)) \
+            == cold_start_rates()
+
+    def test_a_blank_model_still_refuses_rather_than_pricing_at_zero(
             self, tmp_db):
         from catalyst.cost.overrides import rates_for_on
         from catalyst.cost.pricing import UnknownModelError
         with pytest.raises(UnknownModelError):
-            rates_for_on(tmp_db, "claude-renamed-v9", date(2026, 9, 1))
+            rates_for_on(tmp_db, "", date(2026, 9, 1))
 
     def test_a_zero_or_negative_rate_is_refused(self, tmp_db):
         """A zero rate prices every future call at nothing - the exact

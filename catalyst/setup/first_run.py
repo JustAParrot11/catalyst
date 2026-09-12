@@ -29,6 +29,7 @@ import html
 import json
 import logging
 import math
+import re
 import urllib.parse
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -37,6 +38,22 @@ from typing import Callable
 from catalyst.setup import credentials as creds
 
 _log = logging.getLogger("catalyst.setup.first_run")
+
+
+#: What a model id can look like. A RULE, not a list of known models
+#: (house rule 7): the point of this change is that a model nobody has
+#: heard of yet is accepted, so enumerating today's names here would
+#: reintroduce exactly the manual step being removed. It only rejects
+#: what is not an id at all - markup, whitespace, a pasted sentence.
+_MODEL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{2,63}")
+
+
+def _default_model_lister(api_key: str) -> list:
+    """The real Anthropic model list. Imported late so this module does
+    not pull httpx in just to render a page."""
+    from catalyst.setup.models import list_models
+
+    return list_models(api_key)
 
 DEFAULT_PORT = 8000
 DEFAULT_BIND = "0.0.0.0"  # the VPS is IP restricted (BUILD-BRIEF.md)
@@ -118,17 +135,20 @@ FIELDS: tuple[Field, ...] = (
         label="Which Claude model does the research",
         explanation=(
             "The model the bot uses to research a candidate and decide "
-            "whether it is worth trading. Sonnet 5 is the default and is "
-            "the one the running costs were measured against. The list "
-            "is fetched from Anthropic when you open this page, so it is "
-            "whatever your key can actually use today rather than a list "
-            "written into the bot months ago. "
-            "Only models the bot knows how to PRICE can be selected: it "
-            "records the cost of every call to the cent, and a model it "
-            "cannot price would record a call it cannot cost and stop "
-            "spending until a human intervened. A newer, cleverer model "
-            "generally costs more per call, which means fewer calls "
-            "inside the same monthly budget - not a free upgrade."
+            "whether it is worth trading, and to re-read the positions "
+            "it already holds. Sonnet 5 is the default and is the one "
+            "the running costs were measured against. The list is "
+            "fetched from Anthropic when you open this page, so it is "
+            "whatever your key can actually use today - a model released "
+            "next year will simply be in this list, with nothing to "
+            "install and no price to type in. "
+            "If the bot has no published price for a model yet it "
+            "estimates one deliberately HIGH, so it under-spends rather "
+            "than over-spends, and then corrects it from your real "
+            "Anthropic bill the day after the first calls. "
+            "A newer, cleverer model generally costs more per call, "
+            "which means fewer calls inside the same monthly budget - "
+            "not a free upgrade."
         ),
         kind="model_choice",
         default="claude-sonnet-5",
@@ -416,6 +436,7 @@ function saveSettings(ev){
   post(PREFIX + '/settings', {
     monthly_budget_usd: val('monthly_budget_usd'),
     anthropic_admin_key: val('anthropic_admin_key'),
+    research_model: val('research_model'),
     confirm_big_budget: (cb && cb.checked) ? '1' : ''
   }).then(function(r){
     show('settings_result', r.ok, r.message);
@@ -446,22 +467,37 @@ def _shell(title: str, inner: str, prefix: str) -> str:
     )
 
 
-def _field_input(f: Field, models=None, models_error: str = "") -> str:
+def _field_input(f: Field, models=None, models_error: str = "",
+                 current: str = "") -> str:
     if f.kind == "model_choice":
         # POPULATED FROM ANTHROPIC, not from a list in this file that
         # would go stale exactly when it matters. If the list cannot be
         # fetched the current value is still offered and the real reason
         # is printed beside it - a dropdown quietly showing one entry
         # looks like an API with one model in it (house rule 3).
+        #
+        # NOTHING IS DISABLED HERE ANY MORE (2026-09-12). Models with no
+        # published rate used to be rendered `disabled`, because a model
+        # the ledger could not price recorded an unpriced call and
+        # halted all spending. `pricing.cold_start_rates()` prices any
+        # of them now - high on purpose, corrected by the first real
+        # bill - so every model the API returns can be chosen, and the
+        # label says which ones are running on an estimate.
+        chosen = (current or f.default or "").strip()
         opts = []
+        listed = False
         for m in (models or []):
-            sel = " selected" if m.id == f.default else ""
-            dis = "" if m.priceable else " disabled"
-            opts.append(f'<option value="{html.escape(m.id)}"{sel}{dis}>'
+            listed = listed or m.id == chosen
+            sel = " selected" if m.id == chosen else ""
+            opts.append(f'<option value="{html.escape(m.id)}"{sel}>'
                         f"{html.escape(m.label)}</option>")
-        if not opts:
-            opts.append(f'<option value="{html.escape(f.default)}" selected>'
-                        f"{html.escape(f.default)}</option>")
+        if not listed and chosen:
+            # THE MODEL IN USE IS ALWAYS AN OPTION, even when the live
+            # list does not contain it - otherwise opening this page and
+            # pressing Save would silently switch the bot to whatever
+            # happened to be first in the list.
+            opts.insert(0, f'<option value="{html.escape(chosen)}" selected>'
+                           f"{html.escape(chosen)} (in use now)</option>")
         note = ""
         if models_error:
             note = (f'<p class="explain" id="{f.name}_error">The live list '
@@ -598,7 +634,9 @@ def _budget_typo_guard(new_usd: float, current_usd: str,
 
 
 def render_configured_page(prefix: str = "", *, budget_usd: str = "5",
-                           admin_key_present: bool = False) -> str:
+                           admin_key_present: bool = False,
+                           model: str = "", models=None,
+                           models_error: str = "") -> str:
     """The page after first run: settings changeable, keys not shown.
 
     Settings and secrets are deliberately separate forms. Changing the
@@ -606,8 +644,18 @@ def render_configured_page(prefix: str = "", *, budget_usd: str = "5",
     re-pasting all three secrets, which is enough friction that the
     budget was in practice fixed at whatever was typed on day one - the
     setup page offered a choice it then made unreachable.
+
+    THE MODEL WAS STILL IN EXACTLY THAT STATE until 2026-09-12. Asked
+    *"where can i actually change the dropdown to try a different
+    model, e.g. i wanted to switch to opus 5"*, the honest answer was
+    nowhere: this page had no model field, so the only route was
+    "open the full setup form" and re-pasting all three keys. It is
+    here now, in the same form as the budget, saved by the same POST.
     """
     p = html.escape(prefix)
+    model_field = _field_input(
+        next(f for f in FIELDS if f.name == "research_model"),
+        models, models_error, current=model)
     admin_state = ("A billing key is saved, so the nightly bill check can read "
                    "what Anthropic actually charged."
                    if admin_key_present else
@@ -636,6 +684,19 @@ def render_configured_page(prefix: str = "", *, budget_usd: str = "5",
         '<label class="prov" id="confirm_big_wrap" style="display:none">'
         '<input type="checkbox" id="confirm_big_budget"> '
         'Yes, I meant that figure</label>'
+
+        "<h2>Which Claude model does the thinking</h2>"
+        '<label for="research_model">The model that researches a candidate '
+        "and re-reads the positions the bot already holds. This list comes "
+        "from Anthropic each time you open this page, so a model released "
+        "after Catalyst was installed appears here on its own - there is "
+        "nothing to install and no price to type in. If the bot has no "
+        "published price for one yet it estimates the cost deliberately "
+        "high, so it does too little rather than overspending, then "
+        "corrects that from your real bill the day after the first calls. "
+        "A dearer model means fewer calls inside the same monthly budget, "
+        "so it is a trade rather than an upgrade.</label>"
+        + model_field +
 
         "<h2>Anthropic billing key <span class=\"opt\">(optional)</span></h2>"
         f'<p class="hint">{admin_state}</p>'
@@ -723,6 +784,7 @@ class SetupApp:
         alpaca_tester: Callable[..., tuple[bool, str]] | None = None,
         anthropic_tester: Callable[..., tuple[bool, str]] | None = None,
         admin_tester: Callable[..., tuple[bool, str]] | None = None,
+        model_lister: Callable[[str], list] | None = None,
         require_token: bool = True,
     ) -> None:
         self.credentials_path = credentials_path
@@ -738,7 +800,40 @@ class SetupApp:
         self.alpaca_tester = alpaca_tester or creds.test_alpaca
         self.anthropic_tester = anthropic_tester or creds.test_anthropic
         self.admin_tester = admin_tester or creds.test_admin_key
+        #: Asks Anthropic what models this key can use, so the dropdown
+        #: is whatever exists today rather than a list in this file.
+        #: Injected like the testers so the offline suite never reaches
+        #: a socket.
+        self.model_lister = model_lister or _default_model_lister
         self.require_token = require_token
+
+    def _models_for_page(self) -> tuple[list, str]:
+        """(models, why the list is missing). Never raises.
+
+        WIRED IN 2026-09-12, and it had never been wired in before:
+        `setup/models.list_models` existed, was tested, and had NO
+        PRODUCTION CALLER - `render_setup_page(self.path_prefix)` was
+        called with no models at all, so the "live dropdown fetched from
+        Anthropic" rendered exactly one hard-coded option and the owner
+        had no way to choose a model from any page. That is the third
+        time in this project's record that a helper nobody calls has
+        passed its own tests (docs/WHAT-WE-TRIED.md section 6), so
+        tests/test_the_model_dropdown_is_reachable.py asserts the CALL
+        SITE, not just this function.
+
+        A failure here prints the upstream reason beside the field
+        (house rule 3) rather than showing a one-entry list as though
+        Anthropic had one model.
+        """
+        try:
+            key = creds.load_credentials(self.credentials_path).anthropic_key
+        except Exception as exc:  # noqa: BLE001
+            return [], ("the saved Anthropic key could not be read: "
+                        + creds.redact(str(exc)))
+        try:
+            return list(self.model_lister(key)), ""
+        except Exception as exc:  # noqa: BLE001
+            return [], creds.redact(str(exc)) or type(exc).__name__
 
     # -- helpers ---------------------------------------------------------
 
@@ -855,12 +950,20 @@ class SetupApp:
         cookie = self._cookie_header(query)
 
         if route == "/" and method == "GET":
+            # ASK ANTHROPIC WHAT EXISTS, on both pages. This call had no
+            # production caller at all until 2026-09-12 (see
+            # _models_for_page), so the "live" dropdown had one entry.
+            models, models_error = self._models_for_page()
             if self._is_configured() and not query.get("replace"):
                 budget, admin_present = self._current_settings()
                 return _page(200, render_configured_page(
                     self.path_prefix, budget_usd=budget,
-                    admin_key_present=admin_present), cookie)
-            return _page(200, render_setup_page(self.path_prefix), cookie)
+                    admin_key_present=admin_present,
+                    model=self._current_model(), models=models,
+                    models_error=models_error), cookie)
+            return _page(200, render_setup_page(
+                self.path_prefix, models=models,
+                models_error=models_error), cookie)
 
         if route == "/test/admin" and method == "POST":
             data = self._parse_body(body, headers)
@@ -910,6 +1013,22 @@ class SetupApp:
             return "5", False
         budget = (existing.settings or {}).get("monthly_budget_usd", 5)
         return str(budget), bool(existing.anthropic_admin_key)
+
+    def _current_model(self) -> str:
+        """The model the bot is actually researching with right now.
+
+        Read through `selected_model` rather than off the settings dict,
+        so the page shows the same answer the orchestrator acts on - a
+        settings page displaying a choice the bot is not honouring is
+        worse than one that offers no choice at all.
+        """
+        from catalyst.setup.models import selected_model
+
+        try:
+            existing = creds.load_credentials(self.credentials_path)
+            return selected_model(existing.settings)
+        except Exception:  # noqa: BLE001
+            return selected_model(None)
 
     def _replace_key(self, data: dict[str, str],
                      cookie: list[tuple[str, str]]) -> Response:
@@ -1042,6 +1161,20 @@ class SetupApp:
             return _json(200, {"ok": False, "message": refused,
                                "needs_confirmation": True}, cookie)
 
+        # THE MODEL CHOICE. Blank means "leave it alone", which is what
+        # an older cached copy of this page posts - a blank must never
+        # be read as "go back to the default", or changing the budget
+        # would silently undo the owner's model choice.
+        model_raw = (data.get("research_model") or "").strip()
+        if model_raw and not _MODEL_ID_RE.fullmatch(model_raw):
+            return _json(200, {
+                "ok": False,
+                "message": ("Nothing was changed. "
+                            f"\"{html.escape(model_raw[:60])}\" is not a "
+                            "model name - they look like "
+                            "claude-sonnet-5. Pick one from the list."),
+            }, cookie)
+
         admin_raw = (data.get("anthropic_admin_key") or "").strip()
         if admin_raw:
             ok, message = self.admin_tester(admin_raw)
@@ -1068,7 +1201,11 @@ class SetupApp:
                 existing.anthropic_key,
                 None,                       # keep this machine's access code
                 anthropic_admin_key=admin_raw or None,   # blank keeps it
-                settings={"monthly_budget_usd": budget},
+                # save_credentials MERGES settings, so omitting the model
+                # when the field was not posted keeps whatever is stored.
+                settings=({"monthly_budget_usd": budget,
+                           "research_model": model_raw} if model_raw
+                          else {"monthly_budget_usd": budget}),
                 path=self.credentials_path,
             )
         except creds.CredentialError as exc:
@@ -1088,6 +1225,15 @@ class SetupApp:
                     f"{creds.fingerprint(admin_raw)} - the Maintenance page "
                     "shows the same fingerprint for what the bot actually "
                     "reads, so you can confirm it matches.")
+        if model_raw:
+            from catalyst.cost.pricing import has_published_rate
+
+            note += (f" Research model set to {model_raw}."
+                     if has_published_rate(model_raw) else
+                     f" Research model set to {model_raw}. The bot has no "
+                     "published price for it, so it will estimate the cost "
+                     "high to stay inside your budget and correct that "
+                     "from your real Anthropic bill tomorrow.")
         if budget == 0:
             spend = ("The bot will not spend anything on research, so it will "
                      "not trade.")
