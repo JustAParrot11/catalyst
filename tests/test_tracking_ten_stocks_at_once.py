@@ -436,6 +436,36 @@ class TestAMissingLineSaysWhy:
             "a mistyped ticker and a stock added a minute ago look the same, "
             "so the row has to cover both")
 
+    def test_the_DEFAULT_row_is_not_told_to_check_its_spelling(self, tmp_path,
+                                                               monkeypatch):
+        """A BRAND-NEW INSTALL: no baseline, no bars, so the list holds the
+        synthesised SPY default and it has no series. The owner never typed
+        SPY, so telling them to check its spelling is the same nonsense
+        that was moved out of the loader, reappearing one level up.
+
+        Uses its own fresh database rather than the `db` fixture, because
+        the defect only exists when the row is the DEFAULT.
+        """
+        from catalyst.dashboard import panels
+        from catalyst.dashboard.db import Db
+        from catalyst.storage import init_db
+
+        monkeypatch.setenv("CATALYST_BARS", str(tmp_path / "no-bars"))
+        path = str(tmp_path / "fresh.db")
+        init_db(path).close()
+        d = Db(path)
+        try:
+            html = panels.benchmark_panel(d)
+        finally:
+            d.close()
+        block = html[html.find("bench-tracked"):][:4000]
+        assert "SPY" in block and "the default" in block
+        assert "check the spelling" not in block, (
+            "the default row was told to check the spelling of a ticker the "
+            f"owner never typed: {block[:400]!r}")
+        assert "next daily refresh" in block, (
+            "it must still say when the line will appear")
+
     def test_a_short_window_is_not_told_to_check_its_spelling(self, db, bars):
         """The advice is for ONE cause - no cached file at all. A stock
         whose bars exist but predate its start date has a real ticker and
