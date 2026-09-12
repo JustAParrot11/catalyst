@@ -386,6 +386,11 @@ def route_maintenance(db: Db, params: dict) -> str:
         message = ("Benchmark updated. The figures below and every "
                    "performance number now compare against it, and the "
                    "previous baseline is kept in the history.")
+    if params.get("tracked") == ["ok"]:
+        message = ("Tracked list updated. The performance chart draws one "
+                   "coloured line per stock; a stock added just now has no "
+                   "line until the bot's next daily refresh caches its "
+                   "closes, and the list below says so per stock.")
     return render_page("Maintenance",
                        panels.maintenance_panel(report, p="maint")
                        + panels.benchmark_panel(db, p="bench",
@@ -1146,6 +1151,81 @@ def set_benchmark(db_file: str, form: dict) -> tuple[bool, str]:
                   "below.")
 
 
+def track_stock(db_file: str, form: dict) -> tuple[bool, str]:
+    """Add or update one stock in the comparison list.
+
+    OWNER-ASKED 2026-09-12: *"so i can track up to 10 stocks at once, I
+    type the stock name exactly and set the date and amount."*
+
+    EVERY REFUSAL IS A SENTENCE, like the baseline form beside it - a
+    mistyped ticker or an empty amount must never reach a traceback.
+
+    This writes a COMPARISON, not a limit. It cannot change what the bot
+    may spend, how it sizes, or what it trades: nothing in `risk/` or
+    `execution/` reads this table.
+    """
+    from catalyst import benchmark
+    from catalyst.benchmark import comparisons as _cmp
+    from catalyst.storage import init_db
+
+    try:
+        # init_db is CREATE TABLE IF NOT EXISTS throughout, so this also
+        # migrates a database made before this table existed - the owner's
+        # only other route would be an upgrade they cannot run from a
+        # browser.
+        conn = init_db(db_file)
+    except Exception as exc:  # noqa: BLE001 - the owner reads this
+        return False, (f"the database at {db_file} could not be opened for "
+                       f"writing: {type(exc).__name__}: {exc}")
+    try:
+        # KEEP THE LINE THAT IS ALREADY ON THE CHART. With nothing stored,
+        # the list is the synthesised SPY default; adding AAPL without
+        # this would make AAPL the only stored row and SPY would vanish
+        # from a chart the owner was reading.
+        _cmp.seed_from_baseline(conn, benchmark.current(conn))
+        added = _cmp.add(conn, ticker=form.get("ticker"),
+                         amount=form.get("amount_usd"),
+                         start=form.get("start_date"),
+                         reason=form.get("reason"))
+    except _cmp.Invalid as exc:
+        return False, str(exc)
+    except Exception as exc:  # noqa: BLE001
+        return False, (f"the tracked list could not be written: "
+                       f"{type(exc).__name__}: {exc}")
+    finally:
+        conn.close()
+    return True, (
+        f"Tracking {added.ticker}: ${added.capital_cents / 100:,.2f} bought "
+        f"on {added.start_date}. Its line appears on the performance chart "
+        "once the bot's next daily refresh has cached its closes; until then "
+        "the row above says so, with the exact upstream response.")
+
+
+def untrack_stock(db_file: str, form: dict) -> tuple[bool, str]:
+    """Stop drawing one stock. Removing the last one is allowed - the
+    list then falls back to the synthesised SPY default, because a page
+    built to compare cannot do it with one line."""
+    from catalyst.benchmark import comparisons as _cmp
+    from catalyst.storage import init_db
+
+    try:
+        conn = init_db(db_file)
+    except Exception as exc:  # noqa: BLE001
+        return False, (f"the database at {db_file} could not be opened for "
+                       f"writing: {type(exc).__name__}: {exc}")
+    try:
+        gone = _cmp.remove(conn, form.get("ticker"))
+    except _cmp.Invalid as exc:
+        return False, str(exc)
+    except Exception as exc:  # noqa: BLE001
+        return False, (f"the tracked list could not be written: "
+                       f"{type(exc).__name__}: {exc}")
+    finally:
+        conn.close()
+    return True, (f"{gone} is no longer tracked and its colour is free for "
+                  "the next stock. Nothing else changed.")
+
+
 def rebuild_spy_series(confirm: str) -> tuple[bool, str]:
     """Throw the SPY comparison away and refetch it on a feed the
     current Alpaca keys can actually reach.
@@ -1429,6 +1509,34 @@ class Handler(BaseHTTPRequestHandler):
                             alarm(esc(message))
                             + "<p>Nothing was written. The baseline in force "
                             "is unchanged.</p>"
+                            "<p><a href='/maintenance'>back to the "
+                            "maintenance page</a></p>"),
+                    "/maintenance", db.path, db=db)
+            finally:
+                db.close()
+            return self._send_html(400, body)
+
+        if parsed.path in ("/track-stock", "/untrack-stock"):
+            okay, message = (
+                track_stock(db_file, form)
+                if parsed.path == "/track-stock"
+                else untrack_stock(db_file, form))
+            if okay:
+                self.send_response(303)
+                self.send_header(
+                    "Location", "/maintenance?tracked=ok&check=skip")
+                _no_store_headers(self, "text/plain", 0)
+                self.end_headers()
+                return
+            db = Db(db_file)
+            try:
+                body = render_page(
+                    "Tracked list not changed",
+                    section("track-fail", "Tracked list not changed",
+                            alarm(esc(message))
+                            + "<p>Nothing was written. The stocks already "
+                            "tracked are unchanged, and so is everything the "
+                            "bot may spend, size or trade.</p>"
                             "<p><a href='/maintenance'>back to the "
                             "maintenance page</a></p>"),
                     "/maintenance", db.path, db=db)

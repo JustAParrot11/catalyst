@@ -21,6 +21,43 @@ FONT_SIZE = 11
 #: an over-estimate is the safe direction for both.
 CHAR_W = 6.9
 
+#: How tall one line of text is taken to be, as a multiple of its font
+#: size: `size` above the baseline plus 0.3 below it.
+#:
+#: ONE CONSTANT, TWO USES, ON PURPOSE. `text_boxes` measures with it and
+#: the end-label spacing below keeps labels apart by it. The first
+#: version spaced them by FONT_SIZE + 2 = 13 against a measured box
+#: height of 14.3, so the project's own measurement tool reported an
+#: overlap the code believed it had prevented - two numbers meaning the
+#: same thing and quietly disagreeing (section 6 of WHAT-WE-TRIED, the
+#: "two constants that later became equal" trap, in reverse).
+LINE_H = 1.3
+
+
+#: How many colour slots the comparison palette defines (render.py's
+#: --cmp-0 .. --cmp-10). Slot 0 is the bot's own line, permanently.
+N_COMPARISON_SLOTS = 11
+
+#: Dash patterns, cycled by slot. COLOUR CANNOT CARRY IDENTITY at ten
+#: lines - measured worst-pair CVD dE falls from 96 at two series to
+#: under 6 at eleven (see render.py's palette note) - so each line also
+#: differs in stroke. Slot 0, the bot, is always solid: it is the line
+#: every other one is being compared against and it should read as the
+#: reference.
+COMPARISON_DASHES = ("", "5 3", "1 3", "8 3 2 3", "2 2", "10 4",
+                     "6 2 2 2", "4 4", "1 2 6 2", "12 3", "3 3 1 3")
+
+
+def comparison_color(slot: int) -> str:
+    """The CSS variable for a comparison slot, wrapping round rather than
+    raising: an out-of-range slot should draw in a colour, not crash the
+    page."""
+    return f"var(--cmp-{int(slot) % N_COMPARISON_SLOTS})"
+
+
+def comparison_dash(slot: int) -> str:
+    return COMPARISON_DASHES[int(slot) % len(COMPARISON_DASHES)]
+
 
 @dataclass(frozen=True)
 class Series:
@@ -28,6 +65,16 @@ class Series:
     points: list  # [(x_float, y_index_float)]
     color: str
     dash: str = ""
+    #: Printed at the line's right-hand end, inside the plot.
+    #:
+    #: WHY IT EXISTS. With up to eleven lines the legend stops working:
+    #: matching a swatch to a line requires telling two colours apart,
+    #: which is exactly what the measured dE says a reader cannot do past
+    #: five series. A label at the end of the line needs no matching at
+    #: all. Kept short - a ticker - because the space is one text height.
+    end_label: str = ""
+    #: A thicker stroke for the line everything else is compared against.
+    emphasis: bool = False
 
 
 def _fmt_tick(index_value: float, start_capital_dollars: float) -> str:
@@ -73,7 +120,13 @@ def index_chart(
 
     # Margin computed from the widest label actually rendered (lesson 1).
     m_left = max(len(t) for t in tick_labels) * CHAR_W + 12
+    # AND THE RIGHT MARGIN FROM THE WIDEST END LABEL, same lesson. An end
+    # label drawn into a 12px gutter is the "labels outside the viewBox"
+    # defect again, one series at a time.
+    end_labels = [s.end_label for s in usable if s.end_label]
     m_right = 12
+    if end_labels:
+        m_right = max(len(t) for t in end_labels) * CHAR_W + 14
     m_top = 34
     m_bottom = 46
 
@@ -157,9 +210,66 @@ def index_chart(
         pts = " ".join(f"{px(x):.1f},{py(y):.1f}" for x, y in s.points)
         dash = f' stroke-dasharray="{s.dash}"' if s.dash else ""
         out.append(
-            f'<polyline fill="none" stroke="{s.color}" stroke-width="2" '
+            f'<polyline fill="none" stroke="{s.color}" '
+            f'stroke-width="{2.6 if s.emphasis else 1.8}" '
             f'points="{pts}"{dash}/>'
         )
+
+    # END-OF-LINE LABELS, PUSHED APART SO NONE OVERPRINTS ANOTHER.
+    #
+    # This dashboard has already shipped labels that landed on one pixel
+    # and overprinted into "skipp/jjjgted" (owner-reported 2026-08-21).
+    # Two stocks that happen to be flat against each other put their
+    # labels at the same height, and with ten lines that is the normal
+    # case rather than the unlucky one. So the y positions are spread to
+    # a minimum spacing, keeping their order, and the leader line shows
+    # which line a nudged label belongs to.
+    labelled = [s for s in usable if s.end_label]
+    if labelled:
+        placed = sorted(
+            ((py(s.points[-1][1]), px(s.points[-1][0]), s) for s in labelled),
+            key=lambda t: t[0])
+        # THE STACK MUST FIT ON BOTH SIDES, not just the bottom. The first
+        # version slid the whole stack up by the bottom overflow, and with
+        # eleven lines crammed against the floor - ten stocks in a
+        # drawdown, which is a real Tuesday - that pushed the topmost
+        # label clean out through the TOP of the chart. Caught by a test
+        # written for the bottom case; the top was never considered.
+        top_limit = m_top + FONT_SIZE
+        bottom_limit = m_top + plot_h
+        room = max(1.0, bottom_limit - top_limit)
+        n = len(placed)
+        gap = FONT_SIZE * LINE_H + 1.0
+        ys = [t[0] for t in placed]
+        for i in range(1, n):
+            ys[i] = max(ys[i], ys[i - 1] + gap)
+        if ys[-1] - ys[0] > room or gap * (n - 1) > room:
+            # The labels cannot both follow their own lines and stay
+            # inside the plot, so they are spaced evenly across it
+            # instead - tighter if there are more of them than it can fit.
+            # Which line each belongs to is carried by its leader line,
+            # which is what leader lines are for.
+            step = room / (n - 1) if n > 1 else 0.0
+            ys = [top_limit + i * step for i in range(n)]
+        else:
+            # Slide the stack, as a whole, into the plot. It is known to
+            # be no taller than `room`, so one nudge per edge is enough.
+            if ys[-1] > bottom_limit:
+                shift = ys[-1] - bottom_limit
+                ys = [y - shift for y in ys]
+            if ys[0] < top_limit:
+                shift = top_limit - ys[0]
+                ys = [y + shift for y in ys]
+        for (y_true, x_end, s), y_at in zip(placed, ys):
+            if abs(y_at - y_true) > 1.0:
+                out.append(
+                    f'<line x1="{x_end:.1f}" y1="{y_true:.1f}" '
+                    f'x2="{m_left + plot_w + 3:.1f}" y2="{y_at:.1f}" '
+                    f'stroke="{s.color}" stroke-width="1" opacity="0.55"/>')
+            out.append(
+                f'<text x="{m_left + plot_w + 5:.1f}" y="{y_at + 4:.1f}" '
+                f'font-size="{FONT_SIZE}" text-anchor="start" '
+                f'fill="{s.color}">{s.end_label}</text>')
 
     # Legend, below the plot, on as many rows as it needs.
     ly = m_top + plot_h + 34
@@ -352,7 +462,8 @@ def text_boxes(svg: str) -> list[tuple[float, float, float, float, str]]:
             x0 = x - w / 2
         else:
             x0 = x
-        boxes.append((x0, y - size, x0 + w, y + size * 0.3, content))
+        boxes.append((x0, y - size, x0 + w,
+                      y + size * (LINE_H - 1.0), content))
     return boxes
 
 

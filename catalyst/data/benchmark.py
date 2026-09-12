@@ -96,9 +96,20 @@ def _weekdays_between(start: date, end: date) -> int:
 FEED_PREFERENCE = ("sip", "iex")
 
 
-def _cached_feed(cache) -> str | None:
+def _meta_key(symbol: str) -> str | None:
+    """Which metadata file a symbol's basis is recorded in.
+
+    SPY keeps the ORIGINAL unqualified `cache_meta.json`, because the
+    dashboard has read that file since August and an upgrade must not
+    make the existing series look unlabelled. Everything else gets its
+    own, so refreshing a comparison can never rewrite SPY's feed pin.
+    """
+    return None if symbol.upper() == BENCHMARK_SYMBOL else symbol.upper()
+
+
+def _cached_feed(cache, symbol: str = BENCHMARK_SYMBOL) -> str | None:
     try:
-        return (cache.read_meta() or {}).get("feed")
+        return (cache.read_meta(_meta_key(symbol)) or {}).get("feed")
     except Exception:  # noqa: BLE001
         return None
 
@@ -117,7 +128,8 @@ class AllFeedsRefused(RuntimeError):
         self.bodies = list(bodies)
 
 
-def _fetch_with_fallback(client, start, end, have_feed):
+def _fetch_with_fallback(client, start, end, have_feed,
+                         symbol: str = BENCHMARK_SYMBOL):
     """Bars, and the feed that produced them.
 
     NEVER MIXES FEEDS. A series is one basis or it is not a series: half
@@ -139,7 +151,7 @@ def _fetch_with_fallback(client, start, end, have_feed):
     """
     if have_feed:
         by_symbol, notes = fetch_daily_bars(
-            client, [BENCHMARK_SYMBOL], start, end, feed=have_feed)
+            client, [symbol], start, end, feed=have_feed)
         return by_symbol, notes, have_feed
 
     # A BOOTSTRAP TRIES EACH FEED UNTIL ONE ANSWERS - including the ones
@@ -156,7 +168,7 @@ def _fetch_with_fallback(client, start, end, have_feed):
     for feed in FEED_PREFERENCE:
         try:
             by_symbol, notes = fetch_daily_bars(
-                client, [BENCHMARK_SYMBOL], start, end, feed=feed)
+                client, [symbol], start, end, feed=feed)
         except Exception as exc:   # noqa: BLE001 - try the next feed
             status = getattr(getattr(exc, "response", None), "status_code",
                              None)
@@ -164,7 +176,7 @@ def _fetch_with_fallback(client, start, end, have_feed):
             body = getattr(getattr(exc, "response", None), "text", "") or ""
             bodies.append(f"{feed}: {body or repr(exc)}")
             continue
-        if by_symbol.get(BENCHMARK_SYMBOL):
+        if by_symbol.get(symbol):
             return by_symbol, notes, feed
         last_notes = notes
     if refusals and not last_notes:
@@ -177,9 +189,9 @@ def _fetch_with_fallback(client, start, end, have_feed):
     return {}, last_notes, FEED_PREFERENCE[-1]
 
 
-def _existing(cache: BarCache):
+def _existing(cache: BarCache, symbol: str = BENCHMARK_SYMBOL):
     try:
-        return list(cache.load_bars(BENCHMARK_SYMBOL))
+        return list(cache.load_bars(symbol))
     except Exception:
         return []          # missing file / unreadable = bootstrap case
 
@@ -191,15 +203,23 @@ def refresh_benchmark(
     *,
     today: date | None = None,
     client_factory=None,
+    symbol: str = BENCHMARK_SYMBOL,
 ) -> RefreshResult:
-    """Bring the local SPY cache up to yesterday. Never raises."""
+    """Bring one symbol's local daily cache up to yesterday. Never raises.
+
+    `symbol` defaults to SPY, which is what every existing caller wants.
+    It became a parameter when the owner asked to track up to ten stocks
+    beside the bot (2026-09-12): each of those needs its own cached
+    closes, and a comparison line with no bars is the empty chart this
+    dashboard has already been reported for twice.
+    """
     today = today or datetime.now(timezone.utc).date()
     if not alpaca_key or not alpaca_secret:
         return RefreshResult(skipped_reason="no_alpaca_credentials")
 
     cache = BarCache(bars_root)
-    have = _existing(cache)
-    have_feed = _cached_feed(cache)
+    have = _existing(cache, symbol)
+    have_feed = _cached_feed(cache, symbol)
     end = today - timedelta(days=_LAG_DAYS)
     start = (have[-1].day + timedelta(days=1)) if have else SIP_START
     if start > end:
@@ -216,7 +236,7 @@ def refresh_benchmark(
             client = httpx.Client(headers=headers, timeout=30.0)
         try:
             by_symbol, notes, used_feed = _fetch_with_fallback(
-                client, start, end, have_feed)
+                client, start, end, have_feed, symbol)
         finally:
             close = getattr(client, "close", None)
             if callable(close):
@@ -242,7 +262,7 @@ def refresh_benchmark(
         return RefreshResult(skipped_reason=reason,
                              raw_response=(body or repr(exc))[:2000])
 
-    fresh = by_symbol.get(BENCHMARK_SYMBOL) or []
+    fresh = by_symbol.get(symbol) or []
     if not fresh:
         # A weekend, a holiday, or a broken query all look like this.
         # None of them is a reason to lose the history we already have -
@@ -262,16 +282,16 @@ def refresh_benchmark(
     merged = {b.day: b for b in have}
     merged.update({b.day: b for b in fresh})
     ordered = [merged[d] for d in sorted(merged)]
-    cache.write_bars(BENCHMARK_SYMBOL, ordered)
+    cache.write_bars(symbol, ordered)
     cache.write_meta({
-        "symbol": BENCHMARK_SYMBOL,
+        "symbol": symbol,
         "feed": used_feed,
         "adjustment": ADJUSTMENT,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "first_day": ordered[0].day.isoformat(),
         "last_day": ordered[-1].day.isoformat(),
         "rows": len(ordered),
-    })
+    }, _meta_key(symbol))
     return RefreshResult(written=len(fresh), first_day=fresh[0].day,
                          last_day=fresh[-1].day, feed=used_feed,
                          routine=True)
@@ -303,3 +323,54 @@ def rebuild_benchmark(bars_root: str, alpaca_key: str, alpaca_secret: str,
                              raw_response=repr(exc)[:2000])
     return refresh_benchmark(bars_root, alpaca_key, alpaca_secret,
                              today=today, client_factory=client_factory)
+
+
+#: A symbol that has never produced a bar is not retried every fifteen
+#: minutes forever. A typed ticker that does not exist ("APPL") would
+#: otherwise cost one Alpaca request per cycle indefinitely, and the
+#: owner would see nothing anywhere saying why - the request is free but
+#: the silence is not.
+MAX_EMPTY_ATTEMPTS = 3
+
+
+def refresh_comparisons(
+    bars_root: str,
+    alpaca_key: str,
+    alpaca_secret: str,
+    symbols,
+    *,
+    today: date | None = None,
+    client_factory=None,
+) -> dict:
+    """Bring every tracked comparison symbol up to date. Never raises.
+
+    OWNER-ASKED 2026-09-12: up to ten stocks tracked beside the bot. Each
+    needs its own cached closes, or its line is an empty chart - and this
+    dashboard has been reported for an empty chart twice.
+
+    Returns {symbol: RefreshResult}, so the page can say per stock
+    whether it has bars, is waiting for its first fetch, or was refused -
+    three states that look identical as a missing line.
+
+    SPY IS SKIPPED HERE. `refresh_benchmark` already owns it, runs on its
+    own schedule, and writes the unqualified metadata the dashboard
+    reads; fetching it twice a cycle would spend requests to learn
+    nothing.
+    """
+    out: dict = {}
+    for raw in symbols or ():
+        symbol = str(raw or "").strip().upper()
+        if not symbol or symbol == BENCHMARK_SYMBOL or symbol in out:
+            continue
+        try:
+            out[symbol] = refresh_benchmark(
+                bars_root, alpaca_key, alpaca_secret, today=today,
+                client_factory=client_factory, symbol=symbol)
+        except Exception as exc:   # noqa: BLE001 - one bad symbol must
+            # never cost the other nine, and this runs in the trading
+            # loop. refresh_benchmark promises not to raise; this is the
+            # belt for the day that promise is broken by an edit.
+            out[symbol] = RefreshResult(
+                skipped_reason=f"refresh_raised_{type(exc).__name__}",
+                raw_response=repr(exc)[:2000])
+    return out

@@ -123,12 +123,30 @@ class BarCache:
             return []
         return sorted(p.stem for p in self.root.glob("*.csv"))
 
-    def write_meta(self, meta: dict) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
-        (self.root / self.META_FILE).write_text(json.dumps(meta, indent=2, default=str))
+    def _meta_path(self, symbol: str | None = None) -> Path:
+        """Where one symbol's cache metadata lives.
 
-    def read_meta(self) -> dict | None:
-        path = self.root / self.META_FILE
+        `symbol=None` is the ORIGINAL unqualified file, which holds SPY's
+        metadata and is what the dashboard has always read. Per-symbol
+        files were added when the owner asked to track up to ten stocks
+        beside the bot (2026-09-12): one shared file meant refreshing
+        AAPL would overwrite SPY's `feed` pin, and SPY's next refresh
+        would then append one exchange's prints to a consolidated-tape
+        series - the exact "never mix bases" failure
+        `catalyst/data/benchmark.py` exists to prevent, and a silent one.
+        """
+        if not symbol:
+            return self.root / self.META_FILE
+        stem, _, ext = self.META_FILE.rpartition(".")
+        return self.root / f"{stem}.{symbol.upper()}.{ext}"
+
+    def write_meta(self, meta: dict, symbol: str | None = None) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+        self._meta_path(symbol).write_text(
+            json.dumps(meta, indent=2, default=str))
+
+    def read_meta(self, symbol: str | None = None) -> dict | None:
+        path = self._meta_path(symbol)
         if not path.exists():
             return None
         return json.loads(path.read_text())

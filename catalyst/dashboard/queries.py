@@ -7,6 +7,7 @@ print provenance and, on a zero, the exact query that produced it.
 Nothing here writes. The two write paths live in server.py.
 """
 
+import sqlite3
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -133,6 +134,12 @@ class Performance:
     #: from what date, and why. Never None after performance() runs; the
     #: default keeps the dataclass constructible in a test.
     baseline: benchmark.Baseline | None = None
+    #: The stocks the owner tracks beside the bot, each with its own
+    #: cached closes and its own reason for having none. Owner-asked
+    #: 2026-09-12. SPY above is the ACCOUNT's benchmark and is unchanged;
+    #: this list is the extra lines, and it always holds at least the
+    #: synthesised SPY default so the chart can never lose its comparison.
+    comparisons: list = field(default_factory=list)
     #: Closed trades and priced cost rows dated BEFORE the baseline, and
     #: therefore outside this comparison. Counted rather than dropped
     #: silently: money that was really spent must not simply vanish from
@@ -212,26 +219,52 @@ def last_real_close_day(points):
     return None
 
 
-def _load_spy(start: date, end: date, capital_cents=None):
-    """SPY closes from the local bar cache. Returns (points, source, error,
-    row_count). Never touches the network — the dashboard reads what
-    scripts/fetch_history.py already cached.
+def _load_spy(start: date, end: date, capital_cents=None, ticker: str = "SPY"):
+    """One ticker's closes from the local bar cache. Returns (points,
+    source, error, row_count, feed). Never touches the network — the
+    dashboard reads what the bot's own daily refresh already cached.
 
-    `capital_cents` is the money the benchmark is bought with, from the
+    `capital_cents` is the money the comparison is bought with, from the
     stored baseline. It is what turns an index into "your $2,000 would be
     worth this", and it is a parameter rather than a constant because the
     account it compares against is not fixed.
+
+    `ticker` became a parameter when the owner asked to track up to ten
+    stocks beside the bot (2026-09-12). Every message this function
+    produces names the symbol, because the whole point of ten lines is
+    being told WHICH one has no bars.
     """
     capital = Decimal(str(capital_cents if capital_cents is not None
                           else START_CAPITAL_CENTS))
+    symbol = str(ticker or "SPY").upper()
     root = bars_path()
     try:
         from catalyst.backtest.data import BarCache
 
         cache = BarCache(root)
-        bars = cache.load_bars("SPY")
+        bars = cache.load_bars(symbol)
+    except KeyError as exc:
+        # NO FILE AT ALL, stated in as few words as the fact needs.
+        #
+        # `BarCache.load_bars` raises a message written for a developer
+        # running a backtest ("run scripts/fetch_history.py first"), and
+        # the owner is not a developer and must never be told to run a
+        # script. But the ADVICE - wait for tonight's refresh, or check
+        # the spelling - belongs where a typed ticker is displayed, not
+        # here: this same function loads the ACCOUNT's own SPY, where
+        # "check SPY is spelled correctly" is nonsense. `panels.
+        # _tracked_stocks` adds it for the stocks the owner typed.
+        #
+        # House rule 3: the raw exception still follows the sentence. And
+        # this page has a measured words-per-figure budget, which a
+        # 59-word paragraph here broke - measured, not guessed.
+        return ([], f"local bar cache {root}/{symbol}.csv",
+                (f"no daily closes are cached for {symbol}. "
+                 f"Raw: {type(exc).__name__}: {exc}"), 0, "")
     except Exception as exc:
-        return [], f"local bar cache {root}/SPY.csv", f"{type(exc).__name__}: {exc}", 0, ""
+        return ([], f"local bar cache {root}/{symbol}.csv",
+                f"{symbol}'s cached closes could not be read. Raw: "
+                f"{type(exc).__name__}: {exc}", 0, "")
 
     window = [b for b in bars if start <= b.day <= end]
     if not window:
@@ -252,7 +285,7 @@ def _load_spy(start: date, end: date, capital_cents=None):
         stale_days = (start - newest).days if newest else None
         if stale_days is not None and stale_days > SPY_STALE_AFTER_DAYS:
             why = (
-                f"the SPY cache has not been updated since {newest} - "
+                f"the {symbol} cache has not been updated since {newest} - "
                 f"{stale_days} days before this comparison even starts. The "
                 "bot refreshes it once a day from Alpaca, so this is the "
                 "daily refresh failing rather than a window that is merely "
@@ -260,12 +293,12 @@ def _load_spy(start: date, end: date, capital_cents=None):
                 f"reachable. Cache holds {len(bars)} bars ({span}).")
         else:
             why = (
-                f"the comparison starts on {start} and there is not yet a "
-                f"full session inside it, so there is nothing to index "
+                f"the {symbol} comparison starts on {start} and there is not "
+                "yet a full session inside it, so there is nothing to index "
                 "against. This is what a brand-new baseline or a weekend "
                 "looks like, not a fault - a figure appears once a session "
                 f"or two has closed. Cache holds {len(bars)} bars ({span}).")
-        return ([], f"local bar cache {root}/SPY.csv", why, len(bars), "")
+        return ([], f"local bar cache {root}/{symbol}.csv", why, len(bars), "")
     base = window[0].close
     # THE FOURTH ELEMENT SAYS WHETHER THIS POINT IS A REAL CLOSE.
     # Two synthetic points are added below so the two lines on the chart
@@ -317,7 +350,10 @@ def _load_spy(start: date, end: date, capital_cents=None):
     # the old one - a caption that cannot be wrong is not provenance.
     basis, meta, feed = "basis unrecorded", "", ""
     try:
-        raw_meta = cache.read_meta() or {}
+        # PER-SYMBOL METADATA. One shared cache_meta.json meant a
+        # comparison's refresh overwrote SPY's feed pin; SPY keeps the
+        # unqualified file it has always had.
+        raw_meta = cache.read_meta(None if symbol == "SPY" else symbol) or {}
         feed = str(raw_meta.get("feed") or "")
         if raw_meta.get("feed") or raw_meta.get("adjustment"):
             basis = (f"feed={raw_meta.get('feed', 'unrecorded')}, "
@@ -325,8 +361,8 @@ def _load_spy(start: date, end: date, capital_cents=None):
         meta = f", fetched_at={raw_meta.get('fetched_at', 'unknown')}"
     except Exception:
         meta = ", cache_meta unreadable"
-    return (points, f"local bar cache {root}/SPY.csv ({basis}{meta})", None,
-            len(window), feed)
+    return (points, f"local bar cache {root}/{symbol}.csv ({basis}{meta})",
+            None, len(window), feed)
 
 
 def performance(db: Db) -> Performance:
@@ -445,6 +481,11 @@ def performance(db: Db) -> Performance:
         perf.start_day, perf.end_day, capital)
     (perf.spy_points, perf.spy_source, perf.spy_error, perf.spy_rows,
      perf.spy_feed) = (spy_points, source, error, rows, feed)
+    # EVERY STOCK THE OWNER TRACKS, on the bot's own window so the lines
+    # share a left-hand edge. SPY above is the ACCOUNT's benchmark and
+    # keeps every existing tile and alarm; these are the extra lines.
+    perf.comparisons = comparison_series(
+        db, base, start=perf.start_day, end=perf.end_day)
     # A cache full of bars with none in a two-day window that happens to
     # be a weekend is not a broken benchmark. Distinguishing the two is
     # the whole point: one needs fixing, the other needs Tuesday.
@@ -499,6 +540,96 @@ def performance(db: Db) -> Performance:
 
 
 @dataclass
+class ComparisonSeries:
+    """One tracked stock, its cached closes, and why it has none.
+
+    OWNER-ASKED 2026-09-12: up to ten stocks drawn beside the bot. A
+    missing line has three causes needing three different answers - the
+    ticker does not exist, the bars have not been fetched yet, or the
+    window is too short - and as a gap in a chart they look identical.
+    So the reason travels with the series.
+    """
+
+    comparison: object                      # benchmark.comparisons.Comparison
+    points: list = field(default_factory=list)
+    source: str = ""
+    error: str | None = None
+    rows: int = 0
+    feed: str = ""
+
+    @property
+    def ticker(self) -> str:
+        return str(getattr(self.comparison, "ticker", "") or "")
+
+    @property
+    def slot(self) -> int:
+        return int(getattr(self.comparison, "slot", 1) or 1)
+
+    @property
+    def value_cents(self) -> Decimal | None:
+        """What this stock's money would be worth on its last close.
+        None when there is nothing to read - never 0."""
+        if not self.points:
+            return None
+        return Decimal(self.points[-1][2])
+
+    @property
+    def last_real_day(self):
+        return last_real_close_day(self.points)
+
+    @property
+    def move_pct(self) -> float | None:
+        if not self.points:
+            return None
+        return float(self.points[-1][1]) - 100.0
+
+
+def comparison_series(db: Db, base=None, *, end: date | None = None,
+                      start: date | None = None) -> list:
+    """Every tracked stock, loaded from the bar cache. Never raises.
+
+    `start` forces a common left-hand edge, which the performance chart
+    needs: two lines indexed to 100 on different days are not comparable,
+    and drawing them that way is a defect this page was reported for
+    twice. Each stock is still BOUGHT on its own date - the caller's
+    `start` only extends the window leftwards, and `_load_spy` prepends a
+    flat point so the line sits at 100 until its own money goes in.
+    """
+    from catalyst.benchmark import comparisons as _cmp
+
+    base = base if base is not None else baseline(db)
+    rows = []
+    try:
+        rows = _cmp.tracked(db.conn if db.conn is not None else _NoConn(),
+                            base)
+    except Exception:  # noqa: BLE001 - a chart preference never takes the
+        # page down. `tracked` already returns the synthesised SPY default
+        # when it cannot read a row, which is what this page drew before
+        # the list existed, so the fallback is the previous behaviour.
+        rows = []
+    today = datetime.now(timezone.utc).date()
+    out = []
+    for c in rows:
+        window_start = min(start, c.start_date) if start else c.start_date
+        window_end = end or today
+        points, source, error, n, feed = _load_spy(
+            window_start, window_end, c.capital_cents, c.ticker)
+        out.append(ComparisonSeries(comparison=c, points=points,
+                                    source=source, error=error, rows=n,
+                                    feed=feed))
+    return out
+
+
+class _NoConn:
+    """Stands in for a database handle the dashboard could not open, so
+    `comparisons.tracked` can still synthesise the SPY default. Every
+    method raises the error `tracked` already treats as "no rows"."""
+
+    def execute(self, *_a, **_k):
+        raise sqlite3.Error("the dashboard has no database handle")
+
+
+@dataclass
 class BenchmarkView:
     """Everything the Maintenance page needs to explain - and change -
     the comparison the bot is judged against."""
@@ -522,6 +653,11 @@ class BenchmarkView:
     #: side the owner asked for.
     bot_net_cents: Decimal = Decimal("0")
     n_closed: int = 0
+    #: The tracked list, for the editor on the Maintenance page.
+    comparisons: list = field(default_factory=list)
+    #: Stored rows this code could not parse. House rule 3: a line that
+    #: silently fails to appear is a zero with no explanation.
+    comparisons_unreadable: int = 0
 
     @property
     def spy_value_cents(self) -> Decimal | None:
@@ -581,6 +717,14 @@ def benchmark_view(db: Db) -> BenchmarkView:
     perf = performance(db)
     view.bot_net_cents = perf.net_equity_cents
     view.n_closed = perf.n_closed
+    view.comparisons = comparison_series(db, base, end=end)
+    try:
+        from catalyst.benchmark import comparisons as _cmp
+
+        view.comparisons_unreadable = (
+            _cmp.unreadable(db.conn) if db.conn is not None else 0)
+    except Exception:  # noqa: BLE001 - a count, never a crash
+        view.comparisons_unreadable = 0
     return view
 
 

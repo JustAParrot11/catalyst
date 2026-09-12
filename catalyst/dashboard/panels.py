@@ -448,13 +448,36 @@ def performance_panel(db: Db, p: str = "perf") -> str:
         series = [charts.Series(
             "catalyst, net of all API spend",
             [(pt[0].toordinal(), pt[1]) for pt in perf.bot_points],
-            "var(--series-1)",
+            charts.comparison_color(0), end_label="BOT", emphasis=True,
         )]
-        if perf.spy_points:
+        # EVERY TRACKED STOCK, EACH IN ITS OWN STORED COLOUR SLOT.
+        # Owner-asked 2026-09-12. The list always holds at least the
+        # synthesised SPY default, so the line that was here before this
+        # existed is still here - it just comes from the list now, which
+        # is why perf.spy_points is no longer drawn separately: drawing
+        # both would put two SPY lines on the chart.
+        drawn = set()
+        for cs in getattr(perf, "comparisons", None) or ():
+            if not cs.points:
+                continue
             series.append(charts.Series(
-                "SPY (total return, same start)",
+                f"{cs.ticker} ({dollars(cs.comparison.capital_cents)} from "
+                f"{cs.comparison.start_date})",
+                [(pt[0].toordinal(), pt[1]) for pt in cs.points],
+                charts.comparison_color(cs.slot),
+                dash=charts.comparison_dash(cs.slot),
+                end_label=cs.ticker,
+            ))
+            drawn.add(cs.ticker)
+        if perf.spy_points and "SPY" not in drawn:
+            # The account's own benchmark, when the owner has tracked
+            # other stocks and taken SPY out of the list. Every tile and
+            # alarm on this page is still computed from it, so a chart
+            # without it would disagree with the figures above it.
+            series.append(charts.Series(
+                "SPY (the account baseline)",
                 [(pt[0].toordinal(), pt[1]) for pt in perf.spy_points],
-                "var(--series-2)", dash="5 3",
+                charts.comparison_color(1), dash="5 3", end_label="SPY",
             ))
         xs = [pt[0] for pt in perf.bot_points]
         mid = xs[len(xs) // 2]
@@ -688,11 +711,16 @@ def _page_gist(body: str) -> str:
     if _HTML_DOC.search(body):
         title = _TITLE_TAG.search(body)
         named = " ".join((title.group(1) if title else "").split())
+        # DELIBERATELY TERSE. This page has a measured word budget - a
+        # words-per-figure ratio a test enforces, because the overview
+        # drifted into an essay once - and the fold immediately below is
+        # already labelled "the exact response from the server", so a
+        # sentence saying the response is below spends words to repeat a
+        # label the reader can see.
         return ("the server returned a web page instead of data"
-                + (f' (the page is titled "{named[:120]}")' if named else "")
-                + " - so this is an error or maintenance page at the "
-                  "source, not a problem at this end. The exact response "
-                  "is below.")
+                + (f' (titled "{named[:120]}")' if named else "")
+                + " - an error or maintenance page at the source, not a "
+                  "fault at this end.")
     visible = _visible_text(body)
     for marker, gist in _TRANSPORT_GISTS:
         if marker.lower() in visible.lower():
@@ -3678,9 +3706,138 @@ def benchmark_panel(db: Db, p: str = "bench", message: str = "",
                     "are the documented fallback, and the first broker read "
                     "or the form above replaces them.",
         ))
+    out.append(_tracked_stocks(v, p))
     return section(f"{p}-section",
                    "The SPY comparison: how much, from when, and why",
                    "".join(out))
+
+
+def _tracked_stocks(v, p: str) -> str:
+    """The up-to-ten stocks drawn beside the bot, and the form that edits
+    them.
+
+    OWNER-ASKED 2026-09-12: *"can you edit it a bit so i can track up to
+    10 stocks at once, I type the stock name exactly and set the date and
+    amount, set SPY as default, but then show as different colours on the
+    graph so I can track how we are beating multiple stocks."*
+
+    THE COLOUR SWATCH IS IN THE TABLE, beside the ticker, so the chart
+    and this list can be read against each other without counting lines.
+    It is never the only identifier: measured, a reader cannot reliably
+    tell ten of these apart (see render.py's palette note), so the chart
+    prints each ticker at the end of its own line and this table names
+    them in text.
+    """
+    from catalyst.benchmark import comparisons as _cmp
+
+    rows_out = []
+    tracked = list(getattr(v, "comparisons", None) or ())
+    for cs in tracked:
+        c = cs.comparison
+        swatch = (f'<span class="cmp-key" style="background:'
+                  f'{charts.comparison_color(cs.slot)}"></span>')
+        value = cs.value_cents
+        move = cs.move_pct
+        if value is None:
+            # HOUSE RULE 3: the raw reason beside the missing figure. A
+            # line absent because the ticker was mistyped and one absent
+            # because its bars arrive tonight look identical on a chart.
+            worth = "&mdash;"
+            why = cs.error or "no reason recorded"
+            # THE ADVICE BELONGS HERE, not in the loader. This is where a
+            # ticker the OWNER TYPED is shown, so "check the spelling" is
+            # sensible; the same loader also serves the account's own SPY,
+            # where it would be nonsense. Only offered when the cache has
+            # no file at all - a short window is a different answer and
+            # the loader already gives it.
+            if "no daily closes are cached" in why:
+                why += (" If you added it just now that is expected: the "
+                        "bot fetches a new stock's history on its next "
+                        "daily refresh and the line appears then. If it is "
+                        "still empty tomorrow, the ticker is probably not "
+                        "one Alpaca knows - check the spelling.")
+            detail = (f'<span class="prov">{esc(why)} Source tried: '
+                      f"{esc(cs.source)}.</span>")
+        else:
+            worth = dollars(value)
+            detail = (f'<span class="prov">{cs.rows} daily close(s) from '
+                      f"{esc(cs.source)}. Last real close "
+                      f"{esc(str(cs.last_real_day or 'none'))}.</span>")
+        rows_out.append([
+            swatch + f"<b>{esc(c.ticker)}</b>"
+            + (' <span class="prov">(the default)</span>'
+               if getattr(c, "is_default", False) else ""),
+            dollars(c.capital_cents), esc(str(c.start_date)), worth,
+            ("&mdash;" if move is None else
+             f'<span class="{"pos" if move >= 0 else "neg"}">{move:+.1f}%</span>'),
+            detail,
+        ])
+    out = [f'<h3 id="{p}-tracked-heading">Stocks tracked beside the bot</h3>']
+    out.append(table(
+        f"{p}-tracked",
+        ["stock", "money in", "bought on", "worth now", "move", "where the "
+         "figure came from"],
+        rows_out, numeric_cols={1, 3, 4}))
+    if getattr(v, "comparisons_unreadable", 0):
+        out.append(alarm(
+            f'<b id="{p}-tracked-unreadable">'
+            f"{v.comparisons_unreadable} tracked row(s) could not be read</b> "
+            "and are not drawn. The rest are listed above. Re-adding the "
+            "stock overwrites the bad row."))
+    if tracked and all(getattr(c.comparison, "is_default", False)
+                       for c in tracked):
+        out.append(note(
+            f'<span id="{p}-tracked-default">Nothing has been saved here '
+            "yet, so the list shows the default: SPY, bought with the "
+            "account baseline's own money on its own date &mdash; exactly "
+            "the comparison this page drew before the list existed. Adding "
+            "a stock below keeps SPY and puts the new one beside it."))
+    out.append(
+        f'<form class="inline" id="{p}-track-form" method="post" '
+        'action="/track-stock">'
+        '<label class="prov">ticker, exactly '
+        f'<input id="{p}-track-ticker" name="ticker" type="text" size="8" '
+        f'maxlength="{_cmp._MAX_TICKER_LEN}" placeholder="AAPL" required>'
+        "</label> "
+        '<label class="prov">dollars in '
+        f'<input id="{p}-track-amount" name="amount_usd" type="text" '
+        'inputmode="decimal" size="9" placeholder="2000" required></label> '
+        '<label class="prov">bought on '
+        f'<input id="{p}-track-date" name="start_date" type="date" '
+        f'value="{esc(str(v.baseline.start_date))}" '
+        f'min="{_cmp.EARLIEST_START}" required></label> '
+        '<label class="prov">why (optional) '
+        f'<input id="{p}-track-why" name="reason" type="text" maxlength="500" '
+        'size="24" placeholder="the obvious alternative"></label> '
+        f'<button id="{p}-track-submit" type="submit">Track this stock</button>'
+        "</form>")
+    if tracked:
+        out.append(
+            f'<form class="inline" id="{p}-untrack-form" method="post" '
+            'action="/untrack-stock">'
+            '<label class="prov">stop tracking '
+            f'<select id="{p}-untrack-ticker" name="ticker">'
+            + "".join(f'<option value="{esc(c.ticker)}">{esc(c.ticker)}'
+                      "</option>" for c in tracked)
+            + "</select></label> "
+            f'<button id="{p}-untrack-submit" type="submit">Remove</button>'
+            "</form>")
+    out.append(prov(
+        f"Up to {_cmp.MAX_COMPARISONS} stocks. Each is bought with its own "
+        "money on its own date, and every line is indexed to 100 at the "
+        "left-hand edge of the chart so they can be read against each other. "
+        "A stock keeps its colour when you correct its amount, and the "
+        "colour is freed for re-use when you remove it. Adding a stock "
+        "changes what the bot is COMPARED against and never what it may "
+        "spend, size or trade. Its daily closes are fetched by the bot's "
+        "own once-a-day refresh, so a stock added now has no line until "
+        "that runs - and if the ticker does not exist, that is what the "
+        "empty row above will say, with the exact upstream response. "
+        "Past about five lines a reader cannot tell two colours apart "
+        "reliably, which is measured rather than assumed, so each line "
+        "also carries its own dash pattern and its ticker printed at its "
+        "right-hand end."))
+    return "".join(out)
 
 
 # --------------------------------------------------------------------------
