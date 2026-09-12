@@ -940,9 +940,11 @@ def _sync_benchmark_baseline(conn, broker, daily_state: dict | None = None,
 def _selected_research_model(creds) -> str:
     """The model the owner picked, or the built-in default.
 
-    Never raises and never returns something unpriceable: a model the
-    cost table cannot price would record an unpriced row and block ALL
-    spend on the next authorize().
+    Never raises, and never returns something that cannot be costed:
+    `pricing.rates_for` seeds a model it has no published rate for
+    rather than refusing, so the only thing that could still record an
+    unpriced row - and so block ALL spend on the next authorize() - is
+    a call naming no model at all, which this cannot return.
     """
     try:
         from catalyst.setup.models import selected_model
@@ -1461,12 +1463,12 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
                          build_candidates_all, cluster,
                          account_mode=account_mode,
                          owner_monthly_cap_cents=owner_cap,
-                         # The owner's dropdown choice. selected_model
-                         # falls back to the built-in default whenever
-                         # the setting is absent or names a model this
-                         # bot cannot price - a stored value that has
-                         # since stopped being priceable must not be
-                         # able to halt the governor on start-up.
+                         # The owner's dropdown choice, used for research
+                         # AND for the position reviews - one selection,
+                         # so exactly one model bills on a day and
+                         # measured_rates._sole_model can still learn the
+                         # real rate from the bill. Two models on one day
+                         # makes the ratio a blend and it refuses.
                          research_model=_selected_research_model(creds),
                          # ITS OWN DIRECTORY, not the benchmark's. The SPY
                          # cache pins a feed and adjustment basis in its

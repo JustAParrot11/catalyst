@@ -95,10 +95,21 @@ class TestPricingOnEveryDate:
         for d in SWEEP:
             assert rates_stale(d) in (True, False)
 
-    def test_an_unknown_model_raises_on_every_date_never_returns_zero(self):
+    def test_an_unknown_model_is_seeded_on_every_date_never_zero(self):
+        """INVERTED 2026-09-12: it used to raise, which halted all
+        spending for a model Anthropic had released and nobody had typed
+        in. The never-zero property is what mattered and it holds."""
+        from catalyst.cost.pricing import cold_start_rates
+
+        for d in SWEEP[::37]:
+            got = rates_for("claude-does-not-exist", d)
+            assert got == cold_start_rates()
+            assert got[0] > 0 and got[1] > 0
+
+    def test_a_blank_model_still_raises_on_every_date(self):
         for d in SWEEP[::37]:
             with pytest.raises(UnknownModelError):
-                rates_for("claude-does-not-exist", d)
+                rates_for("", d)
 
 
 class TestTheGovernorOnEveryDate:

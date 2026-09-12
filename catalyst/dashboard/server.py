@@ -926,6 +926,28 @@ HTML_ROUTES = {
 # --------------------------------------------------------------------------
 
 
+def _price_correctable(conn, model: str) -> bool:
+    """Is `model` one whose rate the owner can usefully correct?
+
+    True when pricing.py publishes a rate for it, or when the ledger has
+    billed at least one call against it. Never raises: a missing
+    cost_events table simply means nothing has been billed yet.
+    """
+    from catalyst.cost.pricing import has_published_rate
+
+    if not (model or "").strip():
+        return False
+    if has_published_rate(model):
+        return True
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM cost_events WHERE model = ? LIMIT 1",
+            (model,)).fetchone()
+    except Exception:  # noqa: BLE001
+        return False
+    return row is not None
+
+
 def set_token_price(db_file: str, form: dict) -> tuple[bool, str]:
     """Record an owner-entered token rate, effective from a date.
 
@@ -949,6 +971,25 @@ def set_token_price(db_file: str, form: dict) -> tuple[bool, str]:
                        "keeps the rate it was priced at.")
     conn = sqlite3.connect(db_file)
     try:
+        # A MODEL THIS BOT KNOWS ABOUT - by the RULE, not by a list of
+        # names (house rule 7). "Is it in pricing.py's table" stopped
+        # being the rule on 2026-09-12, because a model released since
+        # anyone edited that table is exactly the one worth adopting.
+        # What the rule has to exclude is a rate stored against
+        # something this bot will never call, which would sit in the
+        # audit trail forever and price nothing: so it is either a
+        # model with a published rate, or one the ledger has actually
+        # spent money on. A newly selected model qualifies from its
+        # first call onward, and before that it does not need a hand-
+        # typed rate - the cold-start seed prices it and the bill
+        # corrects it.
+        if not _price_correctable(conn, model):
+            raise ValueError(
+                f"No such model {model!r} here. You can correct the rate "
+                "for a model this bot has a published price for, or one "
+                "it has already billed calls against - a rate stored "
+                "against anything else would never be consulted. Pick "
+                "one from the list.")
         set_override(conn, model, effective,
                      form.get("input_cents_per_mtok"),
                      form.get("output_cents_per_mtok"),

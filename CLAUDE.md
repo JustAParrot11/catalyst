@@ -147,6 +147,28 @@ remember:
 Floors are the owner's own earlier figures, so lowering a cap can never
 strangle the bot below what was already agreed.
 
+### Changing the model is a dropdown, and nothing is typed
+
+Owner-set 2026-09-12: *"i want nothing manual, i want it to auto add the
+models"*. Dashboard → **Setup**, "Which Claude model does the thinking",
+in the same form as the budget. The list is `GET /v1/models` on the
+regular key each time the page opens, so a model released after install
+appears on its own.
+
+A model with no published rate in `cost/pricing.py` is **still
+selectable**: it is priced at `cold_start_rates()` — twice the dearest
+known rate — and the first closed day's real bill replaces the guess.
+High on purpose, because over-pricing throttles while under-pricing
+overspends. A call naming **no** model still refuses and blocks the
+governor, which is correct.
+
+**The research model and the position-review model are one choice**, so
+exactly one model bills per day and `measured_rates._sole_model` can
+still learn the rate from the bill. Two models on a day makes the ratio
+a blend and it refuses to learn anything. See
+@docs/WHAT-WE-TRIED.md §12 — the four things that were wrong, three of
+them invisible from the module that owned them.
+
 ---
 
 ## Every number that touches money comes from a tool, never the model

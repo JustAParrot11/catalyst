@@ -992,7 +992,12 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
                     governor_profit_share=Decimal(
                         str(params["governor_profit_share"])),
                     cycle_id=cycle_id, kind=kind,
-                    owner_monthly_cap_cents=owner_monthly_cap_cents))
+                    owner_monthly_cap_cents=owner_monthly_cap_cents),
+        # THE SAME MODEL THE RESEARCH USES, deliberately. One model
+        # billed per day is what lets measured_rates learn the real rate
+        # from the bill; a second one makes the day's ratio a blend and
+        # it refuses to learn anything.
+        research_model=research_model)
 
     # ---- 3 + 4. reconcile, then stop duties and hard exits
     stops_ok, open_rows = _protective_duties(conn, broker, report, now,
@@ -1637,7 +1642,8 @@ def _jsonable(v):
 
 def _review_open_positions(conn, broker: Broker, transport,
                            report: "CycleReport", now: datetime,
-                           cost_context) -> None:
+                           cost_context,
+                           research_model: str | None = None) -> None:
     """Ask Claude whether each open position's thesis still holds.
 
     Runs BEFORE the hard-exit sweep, so a review that brings an exit
@@ -1688,7 +1694,8 @@ def _review_open_positions(conn, broker: Broker, transport,
             view = {"thesis": position.get("thesis"),
                     "invalidation": position.get("invalidation")}
             review = review_position(conn, position, view, market,
-                                     transport, cost_context, now=now)
+                                     transport, cost_context, now=now,
+                                     model=research_model)
             if review.skipped_reason:
                 report.drop_reasons.setdefault(
                     "positions_reviewed", []).append(

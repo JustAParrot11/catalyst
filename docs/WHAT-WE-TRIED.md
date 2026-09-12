@@ -637,3 +637,181 @@ holds of days to weeks caps the rate near ten trades a month whatever
 the account value. That covers the owner's stated want of five trades
 per week or two, but it is the ceiling, and raising it is a hard-bound
 decision rather than a tuning one.
+
+---
+
+## 12. Switching the model — what was manual, and what is now not
+
+Owner-asked 2026-09-12: *"how easy is it to change the model claude is
+using aswell? e.g. when sonnet 5 goes how easy can i switch to a later
+version and will pricing change accordingly"*, then *"i want nothing
+manual, i want it to auto add the models and also where can i actually
+change the dropdown to try a different model, e.g. i wanted to switch to
+opus 5, the pricing is ok as it calls per day doesnt it so it will just
+mark a higher price"*.
+
+**The answer before this change was "you cannot", and the code looked
+like it could.** Four separate things were wrong, and three of them were
+invisible from reading the module that owned them.
+
+| # | what was wrong | evidence | what changed |
+|---|---|---|---|
+| 1 | **`setup/models.list_models` had NO production caller.** The live dropdown rendered exactly one hard-coded option | `grep -rn "list_models\|render_setup_page" catalyst/` — the only call site was `render_setup_page(self.path_prefix)`, with no `models` argument, so `_field_input` fell through to its `if not opts` branch every time | `SetupApp._models_for_page()`, called on both pages; `tests/test_the_model_dropdown_is_reachable.py` asserts the **call site** |
+| 2 | **The dropdown only existed on the first-run form.** After setup, the only route was "open the full setup form" and re-pasting all three secrets | `render_configured_page` offered budget + billing key + key replacement, and no model field. Its own docstring describes rescuing the BUDGET from exactly this trap, which was still set for the model | the model dropdown is in the same settings form as the budget, saved by the same POST |
+| 3 | **A model with no published rate could not be selected at all**, so "auto add the models" was structurally impossible | `_field_input` rendered `disabled` for `not m.priceable`; `selected_model` silently replaced such a choice with the default | `pricing.cold_start_rates()`; nothing is disabled; the owner's choice is honoured verbatim |
+| 4 | **`REVIEW_MODEL` was a separate hard-coded constant** from the research model | `position_review.py:389` `REVIEW_MODEL = "claude-sonnet-5"`. Switching research alone would bill TWO models on one day, and `measured_rates._sole_model` returns None on a two-model day — so the new model's cold-start rate would **never** be corrected by the bill | the review takes the owner's selected model; `run_cycle` threads it through `_review_open_positions` |
+
+### The owner's own assumption, corrected
+
+*"the pricing is ok as it calls per day doesnt it so it will just mark a
+higher price"* — **almost right, and the gap was the blocker.** The daily
+reconciliation corrects a rate by **ratio**: Anthropic's charge for a
+closed day ÷ what the ledger priced that day locally. With no local rate
+there is nothing to divide. `rates_for` raised, `record_usage` wrote an
+**unpriced** row, and `governor.authorize` refuses *all* spend while one
+exists — so the bot halted before any bill could teach it anything.
+**The mechanism can correct a number; it cannot bootstrap from none.**
+
+### The seed, and why 2x
+
+An unknown model is priced at `max(published input) x 2` /
+`max(published output) x 2` — currently 1000/5000 cents per MTok.
+
+- **High on purpose.** Over-pricing throttles: fewer calls inside the
+  same cap, which costs opportunity and cannot overspend. Under-pricing
+  authorises calls the budget cannot afford, and the owner's one stated
+  hard requirement is *"a hard stop to stop bot using all the budget"*.
+- **2x and not 10x** because `measured_rates.SANITY_MULTIPLE` is 4: a
+  measured rate more than 4x from the one in force is refused as a
+  credit or a misread bill. A seed further out than that would be
+  rejected as impossible on every clean day and **never corrected**.
+  The two constants live in different files, so a test asserts the
+  relationship.
+- **Derived from the table, not typed.** Adding a dearer model raises
+  the seed with no second number for anyone to remember.
+
+What still refuses, and must: a call naming **no** model. There is no
+rate for "unnamed", and pooling that spend would also make a two-model
+day read as one to `_sole_model`.
+
+### The chain, verified end to end offline
+
+    a model nobody has billed us for
+      -> priced from cold_start_rates(), deliberately high
+      -> the row lands PRICED, so the governor keeps authorising
+      -> the closed day's real bill measures what it actually cost
+      -> set_override writes the measured rate for THAT model
+      -> the next call prices at the measured rate
+
+`set_override` **refused a model absent from the table** before this, so
+the measured rate was computed and thrown away and the guess stayed in
+force forever. That link was broken in the same direction as the others:
+everything was ready to self-correct except the one write that would
+have done it.
+
+### Recurring failure, fourth instance
+
+**A helper nobody calls passes its own tests.** `list_models` was
+written, tested, documented as "the dropdown is populated by asking
+Anthropic rather than from a list in this file that would go stale" —
+and never called. Section 6 of this file already carries three instances
+of this pattern. The check that catches it is asserting the **call
+site**, and it is now asserted for both pages.
+
+### Where the owner changes it
+
+Dashboard → **Setup** (`/setup`), the box titled *"Which Claude model
+does the thinking"*, in the same form as the monthly budget. The list
+comes from `GET /v1/models` on the regular Anthropic key each time the
+page opens, so a model released after Catalyst was installed appears on
+its own. Saving takes effect on the next research cycle; nothing is
+installed and no price is typed.
+
+**Unproven:** no model other than Sonnet 5 has ever been billed on this
+account, so the cold-start seed has never been corrected by a real bill
+in production. The chain is verified offline only.
+
+### The adversarial read found three defects in my own change
+
+House rule 5's written read, done by hand (the `risk-reviewer` subagent
+hit a rate limit mid-run). Two of the three would have shipped.
+
+**1. A cheap new model could never escape its own cold-start guess.**
+The worst of them, because it made "nothing manual" false. Measured:
+
+```
+seed for an unknown model  1000/5000   (2x the dearest known)
+a Haiku-class release       100/500
+ratio                       0.10  ->  beyond SANITY_MULTIPLE (4x)
+result before the fix       applied=False, rate still 1000/5000, forever
+```
+
+`SANITY_MULTIPLE` refuses a measured rate more than 4x from the one in
+force, on the reasoning that no published price has ever moved that far,
+so such a reading is a credit or a misread bill. **That reasoning depends
+on the rate in force being evidence.** Against a cold-start guess it is
+simply wrong: there was no price for the reading to be an implausible
+move away from. So the bot would have throttled itself at ten times the
+true price with a hand-typed rate the only way out.
+
+Fixed by `_is_cold_start_guess()` — no `pricing_overrides` row and no
+published entry means the day was priced at a guess, so the **first**
+measurement applies in full. The bound returns the instant a rate has
+been measured, and a test holds both halves. Verified: the same cheap
+model now corrects to exactly 100/500 on the first closed day, and an
+absurd second reading is refused.
+
+**2. A rate rounding to zero returned silently.** Only reachable once
+the bound stopped applying to a first measurement. `return None` left
+the seed in force with nothing anywhere saying why — the price-at-zero
+failure with no record, which is the shape TRAPS.md is entirely about.
+It is recorded as a refusal now. The branch is close to unreachable in
+production (`MIN_DAY_CENTS` refuses the billed side first — it needs a
+$1,000 day against a 30c bill), so this is defence against arithmetic,
+not against an expected input.
+
+**3. An empty pricing table raised a bare `ValueError`.** `max()` on an
+empty dict, and `UnknownModelError` is the *only* exception the
+recording path catches — so it would escape `record_usage`, abandon the
+cycle, and lose the record of spend that had already happened. Now
+raises `UnknownModelError`.
+
+**Also corrected while reading:** `backfill.py` matched `if not model:`
+without stripping, so a whitespace-only model skipped its own clear
+"refusing to treat it as free" message and surfaced as a raw
+`UnknownModelError` naming neither the day nor the group.
+
+**And the inverse direction, checked deliberately:** the backfill's
+unknown-model path used to *raise*, which was the **worse** direction
+there. Raising abandoned the whole day, so the ledger kept its hole and
+**under**-stated spend — the "$3.64 here, $2.95 in the console" class of
+report that module exists to answer. The usage report carries
+Anthropic's own model names, so an unrecognised one is a real model
+really billed: it is priced at the seed, which over-states and therefore
+throttles, and the next day's `cost_report` corrects the rate.
+
+**What the read cleared:** the review still cannot extend an exit date,
+size anything, or place an order — the `model` parameter reaches only
+the payload, the pre-call estimate and the recorded cost row, and all
+three take the same variable, so the estimate and the record cannot
+disagree about which model was billed. `model=None` and `model=""` both
+fall back to `DEFAULT_REVIEW_MODEL`, so a blank can never reach
+`record_usage` from the review path. And every consumer of the seed —
+`governor.authorize`, the `boundary` estimates, `hunts_per_day`,
+`research_per_cycle`, `observed_call_cents` — tightens on a higher
+number: fewer calls, less headroom. There is no consumer where a dearer
+estimate loosens a limit.
+
+**Sabotage: 19 breakages, all 19 caught red** (12 on the main change, 7
+on these three fixes), each verified to still import first.
+
+### The manual price form needed a new rule, not the old one
+
+"Is it in pricing.py's table" was the check the whole change removed, so
+the dashboard's hand-typed rate form could not keep using it — but
+dropping the check entirely let a rate be stored against `gpt-9`, which
+would sit in the audit trail forever and price nothing. The rule now is
+**a published rate, or a model the ledger has actually billed** — both
+checkable offline, and a newly selected model qualifies from its first
+call onward. Before that it does not need a hand-typed rate, which is
+the entire point.

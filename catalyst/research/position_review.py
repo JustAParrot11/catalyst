@@ -386,7 +386,26 @@ MIN_REVIEW_GAP_HOURS = 4
 #: A review asks a narrow question about a named company, so more
 #: searching does not sharpen it the way it does for a conjunction.
 REVIEW_SEARCHES = 2
-REVIEW_MODEL = "claude-sonnet-5"
+
+#: THE FALLBACK, NOT THE CHOICE. The model actually used is the one the
+#: owner selected for research, passed in per call; this is only what
+#: answers when nothing was passed.
+#:
+#: WHY IT FOLLOWS THE RESEARCH SELECTION (2026-09-12). This was a
+#: standalone constant, and that quietly broke the thing the owner asked
+#: for - *"i want nothing manual"*. Switching research to another model
+#: while reviews stayed here would bill TWO models on the same day, and
+#: `measured_rates._sole_model` refuses to learn a rate from a
+#: two-model day because the ratio would be a blend. So the new model's
+#: cold-start estimate - deliberately set high - would never be
+#: corrected by the bill, and the bot would throttle itself against a
+#: guess indefinitely. One selection keeps the whole cost chain closed.
+#:
+#: The reviews are also the same kind of judgement as the research: if a
+#: model is trusted to decide whether to open a position it should be
+#: the one deciding whether to keep it.
+DEFAULT_REVIEW_MODEL = "claude-sonnet-5"
+REVIEW_MODEL = DEFAULT_REVIEW_MODEL   # historical name, same value
 
 
 def last_reviewed_at(conn, position_id: str):
@@ -545,7 +564,8 @@ def due_for_review(conn, positions, now: datetime,
 
 
 def _review_turn_payload(prompt: str, searches: int, messages=None,
-                         forced: bool = False) -> dict:
+                         forced: bool = False,
+                         model: str | None = None) -> dict:
     from catalyst.research.boundary import MAX_EXPLORATION_TOKENS
 
     tools: list = [POSITION_REVIEW_TOOL]
@@ -553,7 +573,8 @@ def _review_turn_payload(prompt: str, searches: int, messages=None,
         tools = [{"type": "web_search_20250305", "name": "web_search",
                   "max_uses": int(searches)}] + tools
     payload = {
-        "model": REVIEW_MODEL, "max_tokens": MAX_EXPLORATION_TOKENS,
+        "model": model or DEFAULT_REVIEW_MODEL,
+        "max_tokens": MAX_EXPLORATION_TOKENS,
         "messages": messages or [{"role": "user", "content": prompt}],
         "tools": tools,
     }
@@ -584,8 +605,15 @@ def _tool_input(response: dict):
 
 def review_position(conn, position: dict, view: dict, market: dict,
                     transport, cost_context, *,
-                    now: datetime | None = None) -> PositionReview:
+                    now: datetime | None = None,
+                    model: str | None = None) -> PositionReview:
     """One governed review of one open position.
+
+    `model` is the one the owner selected for research (see
+    DEFAULT_REVIEW_MODEL for why they are the same choice). It is used
+    for the payload, for the pre-call estimate and for the recorded
+    cost row, so all three agree - a call billed as one model and
+    estimated as another is how a ledger stops reconciling.
 
     Same discipline order as the research boundary, for the same reason:
     validate the payload before spending, authorize, call, RECORD THE RAW
@@ -612,6 +640,7 @@ def review_position(conn, position: dict, view: dict, market: dict,
     )
 
     now = now or datetime.now(timezone.utc)
+    model = model or DEFAULT_REVIEW_MODEL
     position_id = str(position.get("id") or "")
     ticker = str(position.get("ticker") or "")
     prompt = render_prompt(position, view, market)
@@ -624,7 +653,7 @@ def review_position(conn, position: dict, view: dict, market: dict,
             invalidation_triggered=False,
             reasoning=f"no review was obtained: {reason}",
             reviewed_at=now, cost_cents=cost_cents, skipped_reason=reason)
-        record_review(conn, review, prompt=prompt, model=REVIEW_MODEL)
+        record_review(conn, review, prompt=prompt, model=model)
         return review
 
     def run(payload: dict):
@@ -635,10 +664,10 @@ def review_position(conn, position: dict, view: dict, market: dict,
         forced = (payload.get("tool_choice") or {}).get("type") == "tool"
         try:
             cents = (extraction_turn_estimate_cents(REVIEW_SEARCHES,
-                                                    model=REVIEW_MODEL)
+                                                    model=model)
                      if forced else
                      exploration_turn_estimate_cents(REVIEW_SEARCHES,
-                                                     model=REVIEW_MODEL))
+                                                     model=model))
         except UnknownModelError:
             cents = Decimal("60")
         decision = authorize(
@@ -660,7 +689,7 @@ def review_position(conn, position: dict, view: dict, market: dict,
         raw_usage = response["usage"] if "usage" in response else {
             UNPARSEABLE_USAGE_KEY: "response carried no usage object"}
         try:
-            event = record_usage(raw_usage, REVIEW_MODEL, cost_context.kind,
+            event = record_usage(raw_usage, model, cost_context.kind,
                                  "position_review", conn, api_call_id=call_id)
             if event.priced_cents is not None:
                 cost_cents += event.priced_cents
@@ -668,7 +697,8 @@ def review_position(conn, position: dict, view: dict, market: dict,
             return None, f"usage_unpriced_governor_blocked: {exc}"
         return response, None
 
-    response, error = run(_review_turn_payload(prompt, REVIEW_SEARCHES))
+    response, error = run(_review_turn_payload(prompt, REVIEW_SEARCHES,
+                                               model=model))
     if error is not None:
         return skip(error)
 
@@ -681,7 +711,7 @@ def review_position(conn, position: dict, view: dict, market: dict,
             review = make_review_from_tool_input(position_id, ticker, early)
             review = _with_cost(review, cost_cents)
             record_review(conn, review, prompt=prompt,
-                          raw_response=response, model=REVIEW_MODEL,
+                          raw_response=response, model=model,
                           position=position)
             return review
         except (KeyError, TypeError, ValueError):
@@ -694,7 +724,8 @@ def review_position(conn, position: dict, view: dict, market: dict,
         messages.append({"role": "user", "content": (
             "Submit your review now via submit_position_review.")})
     response, error = run(_review_turn_payload(
-        prompt, REVIEW_SEARCHES, messages=messages, forced=True))
+        prompt, REVIEW_SEARCHES, messages=messages, forced=True,
+        model=model))
     if error is not None:
         return skip(error)
     forced_input = _tool_input(response)
@@ -709,7 +740,7 @@ def review_position(conn, position: dict, view: dict, market: dict,
         return skip(f"invalid_review: {exc}")
     review = _with_cost(review, cost_cents)
     record_review(conn, review, prompt=prompt, raw_response=response,
-                  model=REVIEW_MODEL, position=position)
+                  model=model, position=position)
     return review
 
 

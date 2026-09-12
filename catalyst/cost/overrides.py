@@ -37,7 +37,7 @@ import uuid
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 
-from catalyst.cost.pricing import MODEL_RATES_CENTS_PER_MTOK, UnknownModelError, rates_for
+from catalyst.cost.pricing import UnknownModelError, rates_for
 
 
 def _as_rate(value, field: str) -> Decimal:
@@ -88,12 +88,23 @@ def set_override(
     note: str = "",
     allow_large_change: bool = False,
 ) -> str:
-    """Record a new rate for `model` from `effective_from` onward."""
-    if model not in MODEL_RATES_CENTS_PER_MTOK:
+    """Record a new rate for `model` from `effective_from` onward.
+
+    ACCEPTS A MODEL THE BUILT-IN TABLE HAS NEVER HEARD OF, since
+    2026-09-12. It used to refuse one, which quietly broke the
+    self-correction for exactly the models that need it most: a newly
+    released model is priced from `pricing.cold_start_rates()`, the
+    first closed day's bill measures what it really costs, and
+    `measured_rates` then calls this to record it. Refusing here meant
+    the measured rate was computed, discarded, and the cold-start guess
+    stayed in force forever. What is refused is a blank id, by
+    `rates_for` below - there is nothing to price for a call that does
+    not name a model.
+    """
+    if not str(model or "").strip():
         raise UnknownModelError(
-            f"No such model {model!r}. Add it to pricing.py first - an "
-            "override for a model the ledger does not know would never "
-            "be consulted.")
+            "An override needs a model id. A rate stored against a blank "
+            "model would never be consulted and would price nothing.")
     if not str(set_by).strip():
         raise ValueError("set_by is required: a rate change must carry who "
                          "made it")
@@ -119,13 +130,11 @@ def rates_for_on(conn, model: str, on_date: date) -> tuple[Decimal, Decimal]:
     """(input, output) cents/MTok for `model` on `on_date`.
 
     The newest override effective on or before that day wins; with none,
-    the built-in table answers - including its Sonnet 5 intro window.
-    An unknown model still raises rather than pricing at zero.
+    the built-in table answers - including its Sonnet 5 intro window,
+    and its cold-start seed for a model released since anyone last
+    edited that table. A call naming no model at all still raises
+    rather than pricing at zero.
     """
-    if model not in MODEL_RATES_CENTS_PER_MTOK:
-        raise UnknownModelError(
-            f"No pricing for model {model!r}. Add it to pricing.py - "
-            "an unknown model must never price itself at zero (TRAPS.md).")
     try:
         row = conn.execute(
             """SELECT input_cents_per_mtok, output_cents_per_mtok
