@@ -1648,6 +1648,21 @@ Worth recording because the word budget caught a **correctness** bug, not
 a style one: a guardrail against prose found a sentence being shown to
 the wrong reader.
 
+**A fourth, and it is the third one the same wrong reader.** Rendering a
+**brand-new install** — no baseline, no bars — showed the synthesised SPY
+default row saying *"the ticker is probably not one Alpaca knows - check
+the spelling."* The owner never typed SPY. Exactly the sentence just moved
+out of the loader for being shown to the account's own benchmark, back
+again one level up for the default row. The advice is now gated on the row
+NOT being the default, and the default gets its own shorter line saying
+when its line will appear.
+
+**The lesson, having now paid for it three times in one change:** a
+sentence that says "you typed this" must be gated on the reader having
+typed it, and the only reliable way to find where it leaks is to render
+every state the page has — including the empty one. Found by rendering a
+fresh install, not by a test.
+
 ### Recurring failure, and it was mine twice in one session
 
 **Killing a sabotage harness mid-run leaves the sabotage in the working
@@ -1665,8 +1680,8 @@ eight were clean.
 
 ### Verification
 
-- **39 sabotage breakages** (see the commit for the final count red),
-  each verified to still import first.
+- **46 sabotage breakages, 44 caught red**, each verified to still
+  import first.
 - **Three sabotages came back green as defence-in-depth pairs** —
   the stored slot is protected by `add` *and* by the `ON CONFLICT` clause
   not touching the column; the ten-stock cap by `add` *and* by
@@ -1700,7 +1715,7 @@ eight were clean.
   Ten stocks were then rendered together with one deliberately having no
   bars: nine value rows, one dash carrying its raw reason, and
   `labels_outside_viewbox` empty.
-- Full suite green offline (count in the commit).
+- Full suite green offline: **3959 tests**.
 
 ### What is NOT claimed
 

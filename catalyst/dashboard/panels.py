@@ -3750,12 +3750,24 @@ def _tracked_stocks(v, p: str) -> str:
             # where it would be nonsense. Only offered when the cache has
             # no file at all - a short window is a different answer and
             # the loader already gives it.
+            #
+            # AND ONLY FOR A TICKER THE OWNER ACTUALLY TYPED. On a fresh
+            # install the list holds the synthesised SPY default and no
+            # bars exist yet, so this row told the owner to check the
+            # spelling of a ticker they never entered - the same nonsense
+            # that was just moved out of the loader, reappearing one level
+            # up for the default row. Found by rendering a brand-new
+            # install, not by a test.
             if "no daily closes are cached" in why:
-                why += (" If you added it just now that is expected: the "
-                        "bot fetches a new stock's history on its next "
-                        "daily refresh and the line appears then. If it is "
-                        "still empty tomorrow, the ticker is probably not "
-                        "one Alpaca knows - check the spelling.")
+                why += (
+                    " The bot fetches its history on the next daily "
+                    "refresh and the line appears then."
+                    if getattr(c, "is_default", False) else
+                    " If you added it just now that is expected: the bot "
+                    "fetches a new stock's history on its next daily "
+                    "refresh and the line appears then. If it is still "
+                    "empty tomorrow, the ticker is probably not one Alpaca "
+                    "knows - check the spelling.")
             detail = (f'<span class="prov">{esc(why)} Source tried: '
                       f"{esc(cs.source)}.</span>")
         else:
