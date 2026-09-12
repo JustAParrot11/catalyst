@@ -65,6 +65,20 @@ Every 15 minutes, unattended:
 5. **Claude re-reads open positions**, and may bring an exit date
    forward — never push one out.
 
+**Weekends and holidays are not idle.** The cycle runs every fifteen
+minutes, seven days a week, and since 2026-09-12 **research runs while
+the market is shut** — against the newest cached daily close, which is
+good enough to reason about and is refused by `risk/evaluate.py` for
+sizing (`MarketSnapshot.priced_off` must be `live_nbbo`). Nothing is
+sized or placed until the market opens. On the next open, the stored
+view is sized **without a second paid call**, and code first checks the
+stock has not moved past its own 95th-percentile daily move since the
+view was formed — the owner's *"if price is less than this on monday
+buy"*, with the threshold measured rather than supplied by the model.
+Past it, the view is superseded and the candidate is researched again at
+the live price. EDGAR is shut at weekends, so what is live then is news
+and the hunt's own searches.
+
 Both candidate sources go through the identical research, pricing, risk
 and execution path. Nothing downstream knows which found it. They are
 stamped with their origin so the record can eventually say which is

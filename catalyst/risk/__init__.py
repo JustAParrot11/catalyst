@@ -99,4 +99,19 @@ class MarketSnapshot:
     #: number descends from one Alpaca reading; this is the only thing
     #: that ever disagrees with it.
     quote_check: object = None
+    #: WHERE `last_close` CAME FROM, and the only value sizing accepts
+    #: is "live_nbbo".
+    #:
+    #: Research may run while the market is shut (owner-asked 2026-09-12,
+    #: the weekend deep dive), and off-hours it is handed the newest
+    #: CACHED DAILY CLOSE instead of a live mid - good enough for the
+    #: model to reason about, and nowhere near good enough to size from.
+    #: risk review F5: "sizing and the spread gate off Friday's book is
+    #: not a decision, it's a guess".
+    #:
+    #: Defaults to the live case so every existing construction stays
+    #: valid, and `evaluate` refuses anything else outright rather than
+    #: relying on callers to remember. That refusal is the whole point of
+    #: the field: it is not a label, it is the gate.
+    priced_off: str = "live_nbbo"
 

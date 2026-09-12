@@ -220,13 +220,41 @@ class TestHappyPath:
                           "FROM equity_snapshots").fetchone()
         assert snap == ("2026-08-10", "1000", "broker_read")
 
-    def test_second_cycle_screens_out_researched_candidate(self, db):
+    def test_second_cycle_screens_out_a_candidate_already_DECIDED(self, db):
+        """CHANGED 2026-09-12: the screen used to drop anything with a
+        VIEW. That was right while research and sizing always happened in
+        the same iteration, and became a money loss the moment research
+        could run while the market was shut - a view formed on Saturday
+        would be dropped on Monday and the paid call would buy nothing.
+
+        What finishes a candidate is a RISK DECISION, and this cycle made
+        one, so the second cycle still screens it out."""
         broker, _ = broker_for()
         run(db, broker, model_transport(), [candidate()])
+        assert db.execute("SELECT COUNT(*) FROM risk_decisions").fetchone()[0] == 1
         report2 = run(db, broker, model_transport(), [candidate()])
         assert report2.funnel["screened"] == 0
-        assert any("already_researched" in r
+        assert any("already_decided" in r
                    for r in report2.drop_reasons["screened"])
+
+    def test_a_view_with_no_decision_is_NOT_screened_out(self, db):
+        """The property that makes the weekend worth paying for. A view
+        exists, no decision was ever reached, so the candidate is still
+        live work and must reach sizing - without a second paid call."""
+        broker, _ = broker_for()
+        run(db, broker, model_transport(), [candidate()])
+        # Wind the state back to "researched, never decided", which is
+        # exactly what a weekend pass leaves behind.
+        db.execute("DELETE FROM refusals")
+        db.execute("DELETE FROM limit_applications")
+        db.execute("DELETE FROM risk_decisions")
+        db.commit()
+        report2 = run(db, broker, model_transport(), [candidate()])
+        assert report2.funnel["screened"] == 1, (
+            "a researched-but-undecided candidate was dropped, so the "
+            "call that produced its view bought nothing")
+        assert not any("already_decided" in r
+                       for r in report2.drop_reasons.get("screened", []))
 
 
 class TestRefusalPath:

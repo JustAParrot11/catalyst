@@ -228,6 +228,37 @@ CREATE TABLE IF NOT EXISTS entry_market_context (
     recorded_at    TEXT NOT NULL
 );
 
+-- WHAT PRICE A VIEW WAS FORMED AT, AND WHETHER THAT PRICE WAS LIVE.
+--
+-- OWNER-ASKED 2026-09-12: "is there any harm in doing a deep dive into
+-- the news to find potential for monday... it says if price is less
+-- than this on monday buy, if not resume as normal?"
+--
+-- Research may now run while the market is shut, off the newest cached
+-- daily close, so a view can be formed on Saturday against Friday's
+-- close and sized on Monday against a live quote. Two things then have
+-- to be knowable that nothing recorded before:
+--
+--   1. WHICH PRICE the model was reasoning about, so Monday can measure
+--      how far the stock has moved since - the owner's condition.
+--   2. WHETHER that price was a live NBBO or a cached close, because
+--      only the first may ever reach sizing (risk review F5: sizing off
+--      Friday's book is a guess, not a decision).
+--
+-- Its own table, not columns on `research_views`: a side table is the
+-- house rule for exactly this, and the price is market context rather
+-- than part of the model's answer.
+CREATE TABLE IF NOT EXISTS research_view_context (
+    candidate_id  TEXT PRIMARY KEY REFERENCES candidates(id),
+    price_at_view TEXT NOT NULL,
+    -- 'live_nbbo' or 'daily_close'. Classified by the rule that built
+    -- the snapshot, never by guessing from the hour (house rule 7):
+    -- a holiday, a half day and an outage are all "closed" and none of
+    -- them is a weekday-hours test.
+    priced_off    TEXT NOT NULL,
+    formed_at     TEXT NOT NULL
+);
+
 -- THE SECOND OPINION ON THE ONE NUMBER EVERYTHING DESCENDS FROM.
 --
 -- Every traded figure - qty, stop, exposure - is derived from a single
