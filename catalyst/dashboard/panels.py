@@ -7989,3 +7989,328 @@ def conviction_panel(db: Db, p: str = "conv",
         "move already priced in. no_trade views are counted but not scored "
         "- they carry no directional call to compare against a bar."))
     return section(f"{p}-section", "Conviction against the bar", "".join(out))
+
+
+# ---------------------------------------------------------------------------
+# Arms: what each candidate source has actually produced, in money
+# ---------------------------------------------------------------------------
+
+
+def _pct_or_dash(value, places: int = 0) -> str:
+    """A ratio as a percentage, or a dash when there is no denominator.
+
+    NOT "0%". A conversion of zero out of zero calls is not a measurement
+    that failed, it is a measurement that has not happened - and printing
+    them the same way turns an absence of evidence into a verdict, which
+    is the single most repeated defect on this dashboard.
+    """
+    if value is None:
+        return DASH
+    try:
+        return f"{float(value) * 100:.{places}f}%"
+    except (TypeError, ValueError):
+        return DASH
+
+
+def _money(cents) -> str:
+    try:
+        return f"${float(cents) / 100:,.2f}"
+    except (TypeError, ValueError):
+        return DASH
+
+
+def _arm_money_table(d) -> str:
+    """Each arm from nomination to banked money, zeros included."""
+    head = ("<tr><th>arm</th><th class=\"num\">candidates</th>"
+            "<th class=\"num\">paid calls</th><th class=\"num\">spent</th>"
+            "<th class=\"num\">directional views</th>"
+            "<th class=\"num\">conversion</th>"
+            "<th class=\"num\">per view</th>"
+            "<th class=\"num\">orders</th><th class=\"num\">closed</th>"
+            "<th class=\"num\">hit rate</th>"
+            "<th class=\"num\">realised</th></tr>")
+    body = []
+    for r in d.rows:
+        body.append(
+            f"<tr><th>{esc(_ORIGIN_NAMES.get(r.origin, r.origin.replace('_', ' ')))}</th>"
+            f'<td class="num">{r.candidates}</td>'
+            f'<td class="num">{r.paid_calls}</td>'
+            f'<td class="num">{_money(r.cents)}</td>'
+            f'<td class="num">{r.directional}</td>'
+            f'<td class="num">{_pct_or_dash(r.conversion, 1)}</td>'
+            f'<td class="num">'
+            + (_money(r.cents_per_view) if r.cents_per_view is not None
+               else DASH)
+            + f'</td><td class="num">{r.orders}</td>'
+            f'<td class="num">{r.closed}</td>'
+            f'<td class="num">{_pct_or_dash(r.hit_rate)}</td>'
+            f'<td class="num">{_money(r.realised_cents)}</td></tr>')
+    return (f'<table class="kv arm-table"><thead>{head}</thead>'
+            f'<tbody>{"".join(body)}</tbody></table>')
+
+
+def _arm_graded_table(d) -> str:
+    """The live record beside the out-of-sample grade.
+
+    OWNER-ASKED 2026-09-12: *"how do we know if the form 4 and insider
+    data is actually helping or not?"*
+
+    This is the comparison that answers it, and the uncomfortable part is
+    the point: the arm doing all the work graded WORST out of sample,
+    and the best-graded arm has produced nothing this account could act
+    on. Out-of-sample only - in-sample is the figure every tuned variant
+    flattered itself with, and this project measured tuning making both
+    arms worse out of sample every single time.
+    """
+    head = ("<tr><th>arm</th><th class=\"num\">graded n</th>"
+            "<th class=\"num\">graded hit rate</th>"
+            "<th class=\"num\">graded max drawdown</th>"
+            "<th class=\"num\">graded excess vs SPY</th>"
+            "<th class=\"num\">live closed</th>"
+            "<th class=\"num\">live hit rate</th>"
+            "<th class=\"num\">live realised</th></tr>")
+
+    def _p(value) -> str:
+        if value is None:
+            return DASH
+        try:
+            return f"{Decimal(str(value)) * 100:.1f}%"
+        except Exception:  # noqa: BLE001
+            return DASH
+
+    body = []
+    for r in d.rows:
+        g = r.graded
+        name = esc(_ORIGIN_NAMES.get(r.origin, r.origin.replace("_", " ")))
+        if g is None:
+            body.append(
+                f"<tr><th>{name}</th>"
+                f'<td class="num" colspan="4">never replayed &mdash; there '
+                "is no graded edge to compare against</td>"
+                f'<td class="num">{r.closed}</td>'
+                f'<td class="num">{_pct_or_dash(r.hit_rate)}</td>'
+                f'<td class="num">{_money(r.realised_cents)}</td></tr>')
+            continue
+        body.append(
+            f"<tr><th>{name}</th>"
+            f'<td class="num">{g["n"]}</td>'
+            f'<td class="num">{_p(g["hit_rate"])}</td>'
+            f'<td class="num">{_p(g["max_drawdown"])}</td>'
+            f'<td class="num">{_p(g["excess"])}</td>'
+            f'<td class="num">{r.closed}</td>'
+            f'<td class="num">{_pct_or_dash(r.hit_rate)}</td>'
+            f'<td class="num">{_money(r.realised_cents)}</td></tr>')
+    return (f'<table class="kv arm-table"><thead>{head}</thead>'
+            f'<tbody>{"".join(body)}</tbody></table>')
+
+
+def _arm_reading(d) -> str:
+    """The plain-English answer, before any table.
+
+    The lesson that has now cost four owner reports: a number being
+    present is not the same as a question being answered. The question
+    brought to this page is "is the insider data helping", so a sentence
+    answers it and the tables are the working.
+    """
+    said: list[str] = []
+    total_dir = sum(r.directional for r in d.rows)
+    total_closed = sum(r.closed for r in d.rows)
+    total_orders = sum(r.orders for r in d.rows)
+    total_cents = sum(r.cents for r in d.rows)
+
+    if total_closed == 0:
+        said.append(
+            "<b>No arm has closed a trade yet, so nothing here can say "
+            "whether insider data is helping.</b> That is the honest "
+            "answer and it will stay the answer until trades close. "
+            "Everything below is counted from real rows and will fill in "
+            "on its own. ")
+    else:
+        best = max(d.rows, key=lambda r: r.realised_cents)
+        said.append(
+            f"<b>{total_closed} closed trade(s) across all arms.</b> The "
+            f"most profitable so far is <b>{esc(_ORIGIN_NAMES.get(best.origin, best.origin))}</b> "
+            f"at {_money(best.realised_cents)} realised. ")
+        if total_closed < 20:
+            said.append(
+                f"<b>{total_closed} is far too few to mean anything</b> - "
+                "at a few trades a month a real comparison takes months, "
+                "and any arm can look best over a handful. ")
+
+    if total_dir:
+        top = max(d.rows, key=lambda r: r.directional)
+        share = top.directional / total_dir * 100
+        said.append(
+            f"Of the <b>{total_dir}</b> directional views ever produced, "
+            f"<b>{top.directional}</b> came from "
+            f"<b>{esc(_ORIGIN_NAMES.get(top.origin, top.origin))}</b>"
+            + (f" ({share:.0f}%). " if share < 100 else " - all of them. "))
+        if share >= 90:
+            said.append(
+                "<b>So the comparison cannot be made yet</b>, and not "
+                "because the data is missing: three of the four arms have "
+                "produced nothing an engine could act on, so there is "
+                "only one arm to judge. ")
+    else:
+        said.append("<b>No arm has produced a directional view yet.</b> ")
+
+    graded_but_silent = [r for r in d.rows
+                         if r.graded is not None and r.directional == 0]
+    if graded_but_silent:
+        names = ", ".join(esc(_ORIGIN_NAMES.get(r.origin, r.origin))
+                          for r in graded_but_silent)
+        said.append(
+            f"Worth sitting with: <b>{names}</b> was graded and has "
+            "produced no tradeable view live. A measured edge that never "
+            "fires earns nothing. ")
+
+    if total_cents:
+        said.append(
+            f"<b>{_money(total_cents)}</b> of research spend has bought "
+            f"<b>{total_orders}</b> order(s) so far. ")
+    return figcap("".join(said))
+
+
+def _arm_feedback_loop(d) -> str:
+    """Whether the loop that would settle any of this has run yet."""
+    rows = []
+    for r in d.rows:
+        rows.append([
+            esc(_ORIGIN_NAMES.get(r.origin, r.origin.replace("_", " "))),
+            str(r.refusals), str(r.refusals_scored),
+            _pct_or_dash((r.refusals_scored / r.refusals)
+                         if r.refusals else None)])
+    out = [table("arms-refusals",
+                 ["arm", "candidates declined", "declines scored",
+                  "share scored"], rows, numeric_cols={1, 2, 3})]
+    total = sum(r.refusals for r in d.rows)
+    scored = sum(r.refusals_scored for r in d.rows)
+    if total and not scored:
+        out.append(figcap(
+            f"<b>{total} declines on record and none scored.</b> The build "
+            "brief calls this the single most important feedback loop in "
+            "the system: record the price when a candidate is declined, "
+            "then check what it went on to do. Until it produces numbers, "
+            "every adaptive threshold in the bot is sitting on an "
+            "estimate - so this row is the thing most worth watching on "
+            "the whole page."))
+    elif scored:
+        out.append(figcap(
+            f"<b>{scored} of {total} declines scored.</b> This is the first "
+            "real evidence the project has about whether its thresholds "
+            "are right, and it outranks every argument elsewhere."))
+    else:
+        out.append(figcap(
+            "Nothing has been declined yet, so there is nothing to score."))
+    return "".join(out)
+
+
+def arms_panel(db: Db, p: str = "arms") -> str:
+    """Is the Form 4 / insider data actually helping?
+
+    OWNER-ASKED 2026-09-12: *"how do we know if the form 4 and insider
+    data is actually helping or not? is it easy to determine this? Can we
+    get a trade purely from claude research and one as normal"* and,
+    when told a comparison page would be full of zeros, *"add the
+    comparison page 0s are fine if it means itll populate it it goes
+    on"*.
+
+    So it is built with zeros showing, and the zeros are labelled rather
+    than dressed up. The one thing deliberately NOT printed as zero is a
+    ratio with no denominator: "no calls yet" and "0% conversion" are
+    different facts and only one of them is a verdict.
+    """
+    d = queries.arm_records(db)
+    out: list[str] = []
+
+    out.append(note(
+        "<b>Four things produce candidates, and this page holds each of "
+        "them to its own record.</b> Two were graded against real price "
+        "history before being wired up - insider clusters (Form 4) and "
+        "earnings drift (XBRL) - so their measured edge means something. "
+        "Conjunctions were never graded. The hunt is Claude reading the "
+        "feed and going looking, which by construction cannot be graded "
+        "by a replay. All four go through the identical research, risk "
+        "and execution path, so nothing downstream knows which arm found "
+        "a candidate; they are stamped at nomination so this page can "
+        "tell them apart afterwards."))
+
+    out.append(_arm_reading(d))
+
+    out.append(section(
+        f"{p}-money", "From nomination to banked money",
+        _arm_money_table(d)
+        + figcap(
+            "Counted from rows, not modelled. <b>Conversion</b> is "
+            "directional views per paid research call - the only question "
+            "that matters before a trade exists, because an arm that "
+            "never produces a view a risk engine can act on is spending "
+            "money for nothing however good its reasoning reads. "
+            "<b>Realised</b> is closed trades only; an open position's "
+            "paper gain is not money.")
+        + _why_fold(
+            f"{p}-why-conversion",
+            "The monthly budget is fully committed, so this table is a "
+            "zero-sum split and not a scoreboard: every call on an arm "
+            "that does not convert is a call not spent on one that might. "
+            "That is how the conjunction arm was caught taking 48% of "
+            "paid calls at the highest price each for zero directional "
+            "views across 89 calls - visible only once the arms were "
+            "stamped separately, which they had not been for months.",
+            "why conversion matters more than reasoning")))
+
+    out.append(section(
+        f"{p}-graded", "The live record against the graded edge",
+        _arm_graded_table(d)
+        + figcap(
+            "Out-of-sample only, read from this database's own "
+            "<code>backtest_results</code> rows rather than copied from a "
+            "document. In-sample is the figure every tuned variant "
+            "flattered itself with: measured here, tuning made both "
+            "graded arms <b>worse</b> out of sample every time it was "
+            "tried, so the pre-registered version stands.")
+        + _why_fold(
+            f"{p}-why-graded",
+            "An arm can fail in two completely different ways and they "
+            "need opposite responses. It can be graded well and never "
+            "fire - which is a plumbing or threshold problem, and the "
+            "cheapest kind to fix. Or it can fire constantly and lose "
+            "money - which is a strategy problem, and means unwiring it. "
+            "Reading the two columns side by side is the only way to tell "
+            "which is happening.",
+            "why the grade and the live record are both here")))
+
+    out.append(section(
+        f"{p}-loop", "Has the feedback loop produced anything yet",
+        _arm_feedback_loop(d)))
+
+    # EVERY NUMBER SAYS WHERE IT CAME FROM (BUILD-BRIEF), and on a page
+    # this full of zeros that is the difference between "nothing has
+    # happened" and "the query is broken" - which look identical
+    # otherwise and telling them apart is repeatedly the whole diagnosis.
+    out.append(_arm_provenance(f"{p}-prov", [
+        ("candidates, views, conversion", d.funnel_q),
+        ("paid calls and spend", d.spend_q),
+        ("orders, closed trades, realised money", d.money_q),
+        ("declines and whether they were scored", d.refusals_q),
+        ("the out-of-sample grade", d.graded_q),
+    ]))
+    return "".join(out)
+
+
+def _arm_provenance(pid: str, named_queries: list) -> str:
+    """The SQL behind every figure on the page, and its row count."""
+    parts = []
+    for label, q in named_queries:
+        if q is None:
+            continue
+        if q.error:
+            parts.append(alarm(
+                f"<b>{esc(label)}: query FAILED</b> &mdash; "
+                f"{esc(q.error)}. The zeros above are NOT a measurement."))
+            continue
+        parts.append(
+            f"<p class=\"prov\"><b>{esc(label)}</b> &mdash; "
+            f"{q.row_count} row(s) from <code>{esc(q.sql)}</code></p>")
+    return _fold(pid, "Where every figure on this page came from",
+                 "".join(parts))

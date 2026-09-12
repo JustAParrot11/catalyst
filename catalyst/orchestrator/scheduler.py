@@ -985,23 +985,46 @@ def _owner_cap_cents(budget_usd):
     return cents
 
 
-#: A hunt is a DAILY act, not a per-cycle one. The feed does not change
-#: materially between 15-minute cycles, so hunting every cycle would pay
-#: to re-read the same digest ~26 times a day for the same nominations.
-#: The marker lives in the loop's once-a-day state dict, beside the
-#: benchmark refresh which works the same way.
+#: A hunt used to be a DAILY act bounded by a count, because the feed
+#: does not change materially between 15-minute cycles and hunting every
+#: cycle would pay to re-read the same digest ~26 times a day for the same
+#: nominations. That reasoning is right and the COUNT was the wrong shape
+#: for it - see `hunt.feed_changed_since_last_hunt`, which states it as a
+#: rule about the input instead. The daily allowance still bounds the
+#: SPEND; this now also refuses to pay for an identical digest.
 def _hunt_due(daily_state: dict | None, owner_cap, as_of, conn=None) -> bool:
-    """Has today's hunt allowance been used?
+    """Is a hunt worth paying for right now?
+
+    Two independent questions, and both have to answer yes:
+
+      1. CAN WE AFFORD IT - the daily allowance from `hunts_per_day`,
+         derived from the budget and bounded by the hunt's own record
+         (an arm with no directional view in 40+ paid calls drops to a
+         probe share, the same measured rule that cut the conjunction
+         allowance).
+      2. IS THERE ANYTHING NEW TO READ - at least one event has arrived
+         since the last hunt was billed. Zero new events is the identical
+         digest and paying for it twice buys the same nominations.
 
     Returns False when the budget affords none - a nomination nobody can
     afford to research is worse than no nomination, so a small budget
     spends everything judging what the screen already found.
     """
-    from catalyst.discovery.hunt import hunts_per_day
+    from catalyst.discovery.hunt import (
+        feed_changed_since_last_hunt, hunts_per_day,
+    )
 
     allowed = hunts_per_day(owner_cap, conn)
     if allowed <= 0:
         return False
+    if conn is not None:
+        changed, why = feed_changed_since_last_hunt(conn, now=as_of)
+        if not changed:
+            # ROUTINE ATTRITION, NOT DAMAGE (CLAUDE.md). A quiet feed is
+            # the system working; it must not read as a fault, and it
+            # must not consume the day's allowance either.
+            _log.info("Hunt not due: %s", why)
+            return False
     if daily_state is None:
         return True
     day = as_of.date().isoformat()
@@ -1010,6 +1033,9 @@ def _hunt_due(daily_state: dict | None, owner_cap, as_of, conn=None) -> bool:
         daily_state["hunt_count"] = 0
     if daily_state.get("hunt_count", 0) >= allowed:
         return False
+    # INCREMENTED LAST, after every reason to decline has been checked.
+    # Anything that consumed the allowance and then declined would spend
+    # the day's hunts on hunts that never ran.
     daily_state["hunt_count"] = daily_state.get("hunt_count", 0) + 1
     return True
 
@@ -1394,12 +1420,23 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
                 # use; hunt_tools.py bounds what they may cost.
                 from catalyst.discovery.hunt_tools import live_searchers
 
+                # IS THE EXCHANGE SHUT? Asked of the BROKER, not of
+                # `weekday() < 5`, because a market holiday is the case
+                # nobody thinks of and a weekday test calls it open
+                # (house rule 7). Unknown keeps the ordinary brief, which
+                # is what every hunt got before this existed.
+                market_open = None
+                try:
+                    market_open = broker.get_clock().get("is_open") is True
+                except Exception:  # noqa: BLE001 - a brief, not a gate
+                    market_open = None
                 res = hunt(raw_events, as_of, transport,
                            CostContext(conn=conn,
                                        governor_profit_share=share,
                                        cycle_id=None, kind="scheduled",
                                        owner_monthly_cap_cents=owner_cap),
                            already_known=known,
+                           market_open=market_open,
                            searchers=live_searchers(
                                getattr(creds, "alpaca_key", None),
                                getattr(creds, "alpaca_secret", None)))

@@ -156,10 +156,25 @@ remember:
 |---|---|---|---|
 | $20 | $5.00 | 3 | 0 |
 | $100 | $10.00 | 6 | 2 |
-| $300 | $30.00 | 12 | 4 |
+| $300 | $30.00 | 12 | 8 |
 
 Floors are the owner's own earlier figures, so lowering a cap can never
 strangle the bot below what was already agreed.
+
+**The hunts/day column is the COLD-START figure**, against
+`HUNT_ESTIMATE_CENTS`. Once eight hunts have been billed, the measured
+cost replaces the seed and the rate follows it: at the measured 11.6c a
+$100 cap affords **14 a day**, not 2. Two further rules bound it, both
+derived — a hunt runs at most once per cycle (so a day cannot hold more
+hunts than cycles), and an arm with no directional view in 40+ paid
+calls drops to a probe share, the same measured rule that cut the
+conjunction allowance. There is no typed ceiling: the `min(4, …)` that
+used to be here was capping the $300 row, so tripling the budget bought
+nothing.
+
+A hunt is also **only paid for when the feed has changed** since the
+last one — zero new events is the identical digest, and paying twice
+buys the same nominations.
 
 ### Changing the model is a dropdown, and nothing is typed
 
@@ -514,6 +529,13 @@ IP restricted. Credentials never in the repo.
 - **Every trade must be explainable after the fact** — what the model
   saw, what it concluded, what the risk engine did, what happened.
 - **Logs searchable from the dashboard.** No SSH required to troubleshoot.
+- **Every arm answerable for its own money.** The **Arms** tab
+  (`/arms`) runs each candidate source from nomination to realised P&L
+  and puts it beside its own out-of-sample grade, read from
+  `backtest_results` rather than copied from a doc. Zeros are shown
+  deliberately (owner-set 2026-09-12) — but a ratio with no denominator
+  renders as a dash, never `0%`, because "no calls yet" and "0%
+  conversion" are different facts and only one is a verdict.
 - **A zero is never left unexplained.** Print the raw upstream response
   beside any empty result.
 - **Routine attrition must not look like damage.** Drop reasons are

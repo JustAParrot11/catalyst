@@ -289,7 +289,161 @@ def hunts_per_day(owner_monthly_cap_cents=None, conn=None) -> int:
         if measured > 0:
             per_hunt = measured
     need = per_hunt * 2
-    return min(4, int(per_day // need))
+    affordable = int(per_day // need)
+
+    # THE HARD-CODED CEILING IS GONE, AND WHAT REPLACED IT IS THE RECORD.
+    #
+    # OWNER-ASKED 2026-09-12: "well surely the weekend search will be more
+    # purely agentic as it isnt influenced by SEC of insider trade info",
+    # and separately: "if we have 10 trades in 2 weeks at least 5 are
+    # fully claude research from news and trade deals etc".
+    #
+    # WHAT WAS ACTUALLY LIMITING IT, measured: at the owner's $100 cap
+    # this function returned min(4, 333c // 23.2c) = min(4, 14). The
+    # BUDGET afforded fourteen and a typed 4 was the limiter - the exact
+    # kind of number the 2026-09-11 cost audit was supposed to have
+    # removed, and the reason CLAUDE.md's throttle table still said "2 at
+    # $100" long after the measured 11.6c had moved it to 4.
+    #
+    # SO WHY NOT SIMPLY UNCAP IT? Because 14 hunts a day is 162c of a
+    # 333c daily allowance - 49% of the budget on an arm with ZERO
+    # directional views in two lifetime calls. That is precisely the
+    # conjunction mistake (48% of paid calls, 0 views in 89) which this
+    # project spent three weeks measuring and then fixed.
+    #
+    # THE ANSWER IS THE RULE THAT ALREADY EXISTS, applied one stage
+    # earlier. `cycle.demoted_arms` drops an arm to a probe share once
+    # its own record says it has never produced a directional view on a
+    # sample big enough to mean it (ARM_PROBE_MIN_CALLS = 40). That was
+    # bounding RESEARCH slots only, so a non-converting hunt kept
+    # nominating at full rate while its nominations were rationed - the
+    # spend continued and the bound did not reach it.
+    #
+    # Now it does. So the hunt gets a real run at proving itself - 40
+    # paid calls at the measured 11.6c is under $5 for the whole
+    # experiment - and if it does not convert, the same measured rule
+    # that killed the conjunction allowance throttles it without anybody
+    # choosing a number. Evidence buys budget; hope does not.
+    # AND A CEILING THAT IS DERIVED, NOT TYPED. Removing the old `4`
+    # outright removed the bound with it, and three tests caught that -
+    # correctly: a very cheap measured hunt returned 166 a day, and an
+    # absurd cap returned 277,777. "Bounded by the record" is not enough
+    # on its own, because the demotion only bites an arm that converts
+    # NOTHING; one early directional view would restore a full allowance
+    # and leave it unbounded.
+    #
+    # The structural limit is the CADENCE: a hunt runs at most once per
+    # cycle, so the day cannot hold more hunts than it holds cycles.
+    # That is a real ceiling rather than a guess at diminishing returns,
+    # and it moves on its own if the cycle interval ever changes. At the
+    # owner's $100 cap the budget binds long before it (14 against 96),
+    # so this only ever catches the pathological case the tests describe.
+    ceiling = _hunts_the_cadence_allows()
+    affordable = min(affordable, ceiling)
+
+    if conn is not None and _hunt_is_a_proven_non_converter(conn):
+        # The same 1-in-4 the research rotation uses, and never zero:
+        # an arm on a probe share must keep generating the evidence that
+        # would restore it.
+        from catalyst.orchestrator.cycle import ARM_PROBE_EVERY
+
+        return max(1, affordable // int(ARM_PROBE_EVERY))
+    return affordable
+
+
+def _hunts_the_cadence_allows() -> int:
+    """How many hunts a day the cycle interval physically permits.
+
+    A hunt is asked once per cycle at most, so this is the number of
+    cycles in a day. Read from the scheduler's own interval - including
+    the environment override the owner's VPS could be running - so the
+    ceiling cannot disagree with the loop that enforces it.
+
+    Never raises and never returns less than one: a misread interval must
+    not silently stop the bot hunting.
+    """
+    import os
+
+    from catalyst.orchestrator.scheduler import DEFAULT_CYCLE_SECONDS
+
+    try:
+        seconds = int(os.environ.get("CATALYST_CYCLE_SECONDS",
+                                     DEFAULT_CYCLE_SECONDS))
+    except (TypeError, ValueError):
+        seconds = int(DEFAULT_CYCLE_SECONDS)
+    if seconds <= 0:
+        seconds = int(DEFAULT_CYCLE_SECONDS)
+    return max(1, 86400 // seconds)
+
+
+def _hunt_is_a_proven_non_converter(conn) -> bool:
+    """Does the hunt's OWN RECORD say it has never produced a directional
+    view, on a sample large enough to mean it?
+
+    Reads `cycle.arm_conversion`/`demoted_arms` rather than reimplementing
+    the test, so discovery and research cannot end up demoting on
+    different rules. Recomputed every cycle: the hunt returns to a full
+    allowance on the cycle after it finally produces a view, because this
+    is a reading of the record and never a stored flag.
+
+    Never raises. A database that cannot answer demotes nothing, which is
+    the direction that keeps the arm alive rather than the one that
+    silently starves it.
+    """
+    try:
+        from catalyst.orchestrator.cycle import arm_conversion, demoted_arms
+
+        return "hunt" in demoted_arms(arm_conversion(conn))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def feed_changed_since_last_hunt(conn, *, now=None) -> tuple[bool, str]:
+    """(is there anything new to read, why). NEVER RAISES.
+
+    THE REASON A CEILING EXISTED AT ALL, stated as a rule instead of a
+    number. This function's older sibling comment said it plainly: "the
+    feed does not change materially between 15-minute cycles, so hunting
+    every cycle would pay to re-read the same digest ~26 times a day for
+    the same nominations." That is a real constraint and it is about the
+    INPUT, not about money - so bounding it with a spend-shaped constant
+    was answering the wrong question.
+
+    The rule: a hunt is worth paying for when the feed has gained at
+    least one event since the last hunt was billed. One new event is a
+    genuinely different digest; zero new events is the identical one.
+
+    A day with no hunt on record yet is worth paying for - that is the
+    first hunt of the day, not a repeat. And a weekend is where this
+    earns its keep in the other direction: EDGAR is shut, so if nothing
+    new arrived, nothing is paid for.
+    """
+    from datetime import datetime, timezone
+
+    try:
+        row = conn.execute(
+            "SELECT MAX(priced_at) FROM cost_events "
+            "WHERE component = 'hunt' AND priced_at IS NOT NULL").fetchone()
+    except Exception:  # noqa: BLE001 - an unanswerable ledger is not a veto
+        return True, "no hunt history could be read, so this is treated as "\
+                     "the first"
+    last = (row or [None])[0]
+    if not last:
+        return True, "no hunt has ever been billed, so there is nothing to "\
+                     "have already read"
+    try:
+        fresh = conn.execute(
+            "SELECT COUNT(*) FROM raw_events WHERE fetched_at > ?",
+            (str(last),)).fetchone()[0]
+    except Exception:  # noqa: BLE001
+        return True, "the feed could not be counted, so this is not treated "\
+                     "as a repeat"
+    if int(fresh or 0) > 0:
+        return True, f"{int(fresh)} event(s) arrived since the last hunt at "\
+                     f"{str(last)[:16]}"
+    return False, (f"no event has arrived since the last hunt at "
+                   f"{str(last)[:16]}, so this would pay to re-read the "
+                   "identical digest")
 
 
 def _digest(events: list, as_of: datetime) -> tuple[str, dict]:
@@ -362,14 +516,72 @@ def _tools_section(searchers: dict | None) -> str:
     )
 
 
+def closed_market_brief() -> str:
+    """The extra brief for a hunt run while the exchange is shut.
+
+    OWNER-ASKED 2026-09-12: *"well surely the weekend search will be more
+    purely agentic as it isnt influenced by SEC of insider trade info"* -
+    and that is exactly right, structurally. EDGAR does not file at
+    weekends or on holidays, so no new Form 4 and no new filing arrives.
+    The two mechanical screens have nothing new to match, which means
+    whatever a closed-market hunt produces is Claude's own reasoning
+    rather than a pattern found in a fresh filing.
+
+    ONE CORRECTION TO THE PREMISE, and it is in the model's favour: the
+    hunt still READS the week's stored filings. It is not blind to
+    insider data on a Saturday, it just gets no NEW filings - which suits
+    a second-order chain better, because the week's filings become
+    context to reason outward FROM rather than a pattern to match.
+
+    What this brief does NOT do is hand out more searches. Conjunctions
+    were given ten instead of three on the argument that "the answer
+    lives in reporting the feeds do not carry", and after 89 paid calls
+    at the larger allowance produced zero directional views the
+    allowance was cut back. Evidence buys budget; hope does not. So the
+    weekend gets a different JOB, at the same price.
+    """
+    return (
+        "THE EXCHANGE IS SHUT RIGHT NOW, AND THAT CHANGES YOUR JOB.\n"
+        "No new SEC filing has arrived and none will until it reopens, so "
+        "the two mechanical screens have nothing fresh to match and are "
+        "not competing with you. Everything you nominate now is your own "
+        "reasoning rather than a pattern in a new filing - which is the "
+        "half of this system nothing else can do.\n"
+        "- The filings below are the WEEK'S, and they are context to "
+        "reason outward FROM, not a list to pick from. Ask what a filing "
+        "implies about somebody else: a supplier, a customer, a "
+        "competitor, a company on the other side of the same shortage.\n"
+        "- Start from a cause in the world, not from a ticker. This is "
+        "when web_search earns its place: a route closing, a strike, a "
+        "tariff, a shortage, a ruling. Name the company and the mechanism "
+        "in one line, THEN find the dated event, because a consequence is "
+        "not a catalyst.\n"
+        "- The date rule is unchanged and it is the one that kills most "
+        "nominations: the event must resolve today or later. When the "
+        "market reopens is not itself an event - 'the price will react on "
+        "Monday' is not a catalyst, it is a market opening.\n"
+        "- Nothing is bought while the exchange is shut. What you "
+        "nominate is researched now and can only be acted on at the next "
+        "open, and code checks first that the price has not already moved "
+        "past the setup. So an idea that only works if you get filled in "
+        "the next ten minutes is not worth nominating.")
+
+
 def render_hunt_prompt(events: list, as_of: datetime,
                        already_known: set | None = None,
-                       searchers: dict | None = None) -> str:
-    """Ask for a short list, from evidence that exists."""
+                       searchers: dict | None = None,
+                       market_open: bool | None = None) -> str:
+    """Ask for a short list, from evidence that exists.
+
+    `market_open=False` adds `closed_market_brief()`. None means unknown,
+    which keeps the ordinary brief - the conservative direction, since
+    that is what every hunt got before this existed.
+    """
     digest, _ = _digest(events, as_of)
     known = ", ".join(sorted(already_known or set())) or "none"
     tools_text = _tools_section(searchers)
     return "\n\n".join([part for part in [
+        closed_market_brief() if market_open is False else "",
         "You are the discovery step of an automated trading system. You "
         "are reading a day of raw regulatory filings and market news, "
         "and choosing which of them are worth paying to research "
@@ -599,7 +811,8 @@ MAX_HUNT_TURNS = 10
 
 def hunt(events: list, as_of: datetime, transport, cost_context,
          already_known: set | None = None, model: str | None = None,
-         searchers: dict | None = None) -> HuntResult:
+         searchers: dict | None = None,
+         market_open: bool | None = None) -> HuntResult:
     """One hunt: read the feed, nominate, validate, return candidates.
 
     NEVER RAISES. Discovery is upstream of everything, so a hunt that
@@ -629,7 +842,7 @@ def hunt(events: list, as_of: datetime, transport, cost_context,
         result.skipped_reason = "no_raw_events_carried_a_source_id"
         return result
     result.prompt = render_hunt_prompt(events, as_of, already_known,
-                                       searchers)
+                                       searchers, market_open=market_open)
 
     conn = cost_context.conn
     call_id = str(uuid.uuid4())

@@ -543,9 +543,14 @@ class TestTheHuntRateIsNotTheLever:
         assert hunts_per_day(None) == 0 and hunts_per_day(0) == 0
 
     def test_it_is_still_bounded_however_large_the_cap(self):
-        from catalyst.discovery.hunt import hunts_per_day
+        """Bounded by the CADENCE since 2026-09-12, not by a typed 4 -
+        see test_no_cost_is_hard_coded for why that 4 had to go and why
+        the bound could not go with it."""
+        from catalyst.discovery.hunt import (
+            _hunts_the_cadence_allows, hunts_per_day,
+        )
 
-        assert hunts_per_day(10 ** 9) <= 4
+        assert hunts_per_day(10 ** 9) <= _hunts_the_cadence_allows()
 
     def test_the_estimate_stays_pessimistic(self):
         """The governor authorises against it, so an estimate that

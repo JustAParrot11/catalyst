@@ -4469,3 +4469,230 @@ def api_desk(db: Db, days: int = 14, now=None) -> ApiDesk:
             d.cache_write_tokens += u.cache_creation_input_tokens
             d.web_searches += u.web_search_requests
     return d
+
+
+# ---------------------------------------------------------------------------
+# Per-arm record: nomination through to realised money, beside the grade
+# ---------------------------------------------------------------------------
+
+#: THE TWO NAMING CONVENTIONS, AND THIS IS A TRANSLATION BETWEEN THEM
+#: RATHER THAN A LIST OF KNOWN CASES.
+#:
+#: The live arms stamp `candidate_origin.origin` with 'screen',
+#: 'earnings_drift', 'conjunction' or 'hunt'. The backtest records
+#: `backtest_results.strategy_name` as e.g.
+#: "C-insider-cluster-pre(2x10d,50k,hold12,liq5/1M)|oos|api8|c15bp",
+#: because that is what `scripts/run_bakeoff.py` passes. Neither name can
+#: be derived from the other, so the mapping is stated - and an arm with
+#: no entry here is reported as NEVER GRADED, which is the true and
+#: important answer for conjunctions and the hunt.
+ARM_BACKTEST_SLUG = {
+    "screen": "insider-cluster",
+    "earnings_drift": "earnings-drift",
+}
+
+
+@dataclass
+class ArmRecord:
+    """One candidate source, from what it nominated to what it banked."""
+
+    origin: str = ""
+    candidates: int = 0
+    researched: int = 0
+    directional: int = 0
+    #: Paid research calls, and cents spent on them. Paid only: a call
+    #: the governor skipped spent nothing and must not be charged here.
+    paid_calls: int = 0
+    cents: float = 0.0
+    orders: int = 0
+    closed: int = 0
+    wins: int = 0
+    realised_cents: int = 0
+    refusals: int = 0
+    refusals_scored: int = 0
+    #: Out-of-sample grade from `backtest_results`, or None for an arm
+    #: nothing has ever replayed.
+    graded: dict | None = None
+
+    @property
+    def conversion(self) -> float | None:
+        """Directional views per paid call. None with no paid calls -
+        NOT zero, which would read as "measured, and it fails"."""
+        return (self.directional / self.paid_calls) if self.paid_calls else None
+
+    @property
+    def cents_per_view(self) -> float | None:
+        return (self.cents / self.directional) if self.directional else None
+
+    @property
+    def hit_rate(self) -> float | None:
+        return (self.wins / self.closed) if self.closed else None
+
+
+@dataclass
+class ArmRecords:
+    rows: list = field(default_factory=list)
+    funnel_q: QueryResult | None = None
+    spend_q: QueryResult | None = None
+    money_q: QueryResult | None = None
+    refusals_q: QueryResult | None = None
+    graded_q: QueryResult | None = None
+    #: Arms with a live record but nothing graded, and vice versa. Both
+    #: are findings, not gaps to paper over.
+    ungraded: list = field(default_factory=list)
+
+
+def arm_records(db: Db) -> ArmRecords:
+    """Every arm's whole record, so "is the insider data helping" stops
+    being an argument.
+
+    OWNER-ASKED 2026-09-12: *"how do we know if the form 4 and insider
+    data is actually helping or not? is it easy to determine this?"* and
+    *"add the comparison page 0s are fine if it means itll populate it it
+    goes on"*.
+
+    Every figure is COUNTED FROM ROWS, and a stage with no rows shows
+    zero rather than being hidden - the owner asked for that explicitly.
+    What is NOT shown as zero is a ratio with no denominator: conversion
+    and hit rate come back None so the page can say "no calls yet"
+    instead of "0%", which are different facts and one of them is a
+    verdict.
+
+    Never raises: a database predating any of these tables yields the
+    rows it can and leaves the rest at zero.
+    """
+    d = ArmRecords()
+    by_origin: dict = {}
+
+    # EVERY WIRED ARM APPEARS FROM DAY ONE, even with nothing on its
+    # record. Owner-asked: "0s are fine if it means itll populate it it
+    # goes on" - and an arm missing from the page is indistinguishable
+    # from an arm that does not exist, which is the question this page is
+    # here to answer. Read from `cycle.ARM_ROTATION` rather than a second
+    # list, so wiring or unwiring an arm changes this page with it.
+    try:
+        from catalyst.orchestrator.cycle import ARM_ROTATION
+
+        for arm in ARM_ROTATION:
+            by_origin[arm] = ArmRecord(origin=arm)
+    except Exception:  # noqa: BLE001 - the rows below still populate
+        pass
+
+    d.funnel_q = db.q(
+        "SELECT o.origin, COUNT(*) AS candidates, "
+        "  SUM(CASE WHEN v.candidate_id IS NOT NULL THEN 1 ELSE 0 END) "
+        "    AS researched, "
+        "  SUM(CASE WHEN v.direction IN ('long','short') THEN 1 ELSE 0 END) "
+        "    AS directional "
+        "FROM candidate_origin o "
+        "LEFT JOIN research_views v ON v.candidate_id = o.candidate_id "
+        "GROUP BY o.origin")
+    for row in d.funnel_q.rows:
+        r = dict(row)
+        origin = str(r.get("origin") or "unstamped")
+        rec = by_origin.setdefault(origin, ArmRecord(origin=origin))
+        rec.candidates = int(r.get("candidates") or 0)
+        rec.researched = int(r.get("researched") or 0)
+        rec.directional = int(r.get("directional") or 0)
+
+    d.spend_q = db.q(
+        "SELECT o.origin, COUNT(*) AS calls, "
+        "       SUM(CAST(c.cost_cents AS REAL)) AS cents "
+        "FROM research_calls c "
+        "JOIN candidate_origin o ON o.candidate_id = c.candidate_id "
+        "WHERE c.skipped_reason IS NULL GROUP BY o.origin")
+    for row in d.spend_q.rows:
+        r = dict(row)
+        origin = str(r.get("origin") or "unstamped")
+        rec = by_origin.setdefault(origin, ArmRecord(origin=origin))
+        rec.paid_calls = int(r.get("calls") or 0)
+        rec.cents = float(r.get("cents") or 0.0)
+
+    # ORDERS AND REALISED MONEY. The join back to the arm is long because
+    # nothing stores the origin on a position: closed_trades -> positions
+    # -> the FIRST entry order -> its decision -> the candidate -> the
+    # origin stamp. json_extract with a json_valid guard, the same shape
+    # build_portfolio_state uses, so a malformed entry_order_ids column
+    # drops the row rather than failing the page.
+    d.money_q = db.q(
+        "SELECT o2.origin, "
+        "  COUNT(DISTINCT ord.id) AS orders, "
+        "  COUNT(DISTINCT ct.position_id) AS closed, "
+        "  SUM(CASE WHEN ct.realized_pnl_cents > 0 THEN 1 ELSE 0 END) AS wins, "
+        "  SUM(COALESCE(ct.realized_pnl_cents, 0)) AS realised "
+        "FROM orders ord "
+        "JOIN risk_decisions rd ON rd.id = ord.decision_id "
+        "JOIN candidate_origin o2 ON o2.candidate_id = rd.candidate_id "
+        "LEFT JOIN positions p ON p.id = ("
+        "    SELECT p2.id FROM positions p2 WHERE ord.id = json_extract("
+        "        CASE WHEN json_valid(p2.entry_order_ids) "
+        "             THEN p2.entry_order_ids ELSE '[]' END, '$[0]')) "
+        "LEFT JOIN closed_trades ct ON ct.position_id = p.id "
+        "GROUP BY o2.origin")
+    for row in d.money_q.rows:
+        r = dict(row)
+        origin = str(r.get("origin") or "unstamped")
+        rec = by_origin.setdefault(origin, ArmRecord(origin=origin))
+        rec.orders = int(r.get("orders") or 0)
+        rec.closed = int(r.get("closed") or 0)
+        rec.wins = int(r.get("wins") or 0)
+        rec.realised_cents = int(r.get("realised") or 0)
+
+    # WHETHER THE FEEDBACK LOOP HAS PRODUCED ANYTHING, per arm. The brief
+    # calls the refusal tracker "the single most important feedback loop
+    # in the system"; with ~0 of 291 scored, every adaptive number is
+    # still sitting on an estimate, and that belongs on this page rather
+    # than in a doc.
+    d.refusals_q = db.q(
+        "SELECT o.origin, COUNT(*) AS n, "
+        "  SUM(CASE WHEN r.scored_at IS NOT NULL THEN 1 ELSE 0 END) AS scored "
+        "FROM refusals r "
+        "JOIN candidate_origin o ON o.candidate_id = r.candidate_id "
+        "GROUP BY o.origin")
+    for row in d.refusals_q.rows:
+        r = dict(row)
+        origin = str(r.get("origin") or "unstamped")
+        rec = by_origin.setdefault(origin, ArmRecord(origin=origin))
+        rec.refusals = int(r.get("n") or 0)
+        rec.refusals_scored = int(r.get("scored") or 0)
+
+    # THE GRADE, READ FROM THE DATABASE rather than copied off a doc.
+    # Out-of-sample only: the in-sample figure is the one every tuned
+    # variant flattered itself with, and this project measured tuning
+    # making both arms WORSE out of sample every time it was tried.
+    d.graded_q = db.q(
+        "SELECT b.strategy_name, b.excess_return_net, s.sample_size, "
+        "       s.hit_rate, s.max_drawdown, b.created_at, s.sample_kind "
+        "FROM backtest_results b "
+        "JOIN backtest_sample_stats s ON s.result_id = b.id "
+        "WHERE s.sample_kind = 'out_of_sample' "
+        "ORDER BY b.created_at DESC")
+    graded_rows = [dict(r) for r in d.graded_q.rows]
+    for origin, slug in ARM_BACKTEST_SLUG.items():
+        rec = by_origin.setdefault(origin, ArmRecord(origin=origin))
+        for r in graded_rows:          # newest first, so the first wins
+            name = str(r.get("strategy_name") or "")
+            if slug in name and "|oos|" in name:
+                # SAMPLE KIND CARRIED, not assumed. A test asserting
+                # "the out-of-sample figure was used" by checking the
+                # sample SIZE passes by coincidence the moment both kinds
+                # are in the result set - found by sabotage, which
+                # widened the WHERE clause and stayed green.
+                kind = str(r.get("sample_kind") or "")
+                if kind != "out_of_sample":
+                    continue
+                rec.graded = {
+                    "name": name, "n": int(r.get("sample_size") or 0),
+                    "hit_rate": r.get("hit_rate"),
+                    "max_drawdown": r.get("max_drawdown"),
+                    "excess": r.get("excess_return_net"),
+                    "sample_kind": kind,
+                    "run_at": str(r.get("created_at") or "")[:10]}
+                break
+
+    order = {a: i for i, a in enumerate(
+        ("earnings_drift", "screen", "hunt", "conjunction"))}
+    d.rows = sorted(by_origin.values(),
+                    key=lambda r: (order.get(r.origin, 99), r.origin))
+    d.ungraded = [r.origin for r in d.rows if r.graded is None]
+    return d

@@ -1039,6 +1039,8 @@ NAV_GROUPS = [
         ("/next", "What happens next",
          "When Claude next re-reads each thesis, and what closes when"),
         ("/funnel", "Pipeline", "Raw filings through to orders"),
+        ("/arms", "Arms",
+         "Which candidate source earns its money \u2014 against its graded edge"),
         ("/capital", "Capital in use",
          "How much of the account is deployed, and what caps it"),
     ]),
