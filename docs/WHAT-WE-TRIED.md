@@ -1408,3 +1408,128 @@ because cause 1 was what ate it.
   `test_unreadable_capital_cents_is_unreadable_not_absent`. A test
   asserting the broken behaviour is why this shipped.
 - Full suite green offline: **3871 tests**.
+
+---
+
+## 17. A Google font loader where the explanation belongs
+
+Owner-reported 2026-09-12, with a screenshot of the Pipeline page:
+
+```
+NEEDS ATTENTION
+FEEDS THAT COULD NOT BE READ
+1  Insider trades (SEC Form 4) could not be read
+   WebFontConfig = { google: { families: [ 'Raleway:300,400,500,600:latin' ] } };
+   (function() { var wf = document.createElement('script');
+   wf.src = '//ajax.googleapis.com/ajax/libs/webfont/1/webfont.js'; ...
+```
+
+listed **twice**, with "1" beside each.
+
+### Reproduced character for character, offline, before anything changed
+
+```
+>>> _fault_gist(a_sec_error_page)
+"SEC.gov | Site Temporarily Unavailable WebFontConfig = { google: {
+ families: [ 'Raleway:300,400,500,600:latin' ] } }; (function() { var wf =
+ document.createElement('script'); wf.src = '//ajax.googleap..."
+```
+
+**This was guaranteed, not unlucky.** `_fault_gist` stripped HTML *tags*
+with `re.sub(r"<[^>]+>", " ", text)`, which leaves the **contents** of a
+`<script>` untouched — and sec.gov puts its Google WebFont loader at the
+very top of `<head>`, ahead of any prose. So for **any** sec.gov page not
+in a four-entry marker table, the "one readable sentence" was that
+loader. Every time.
+
+### Four defects, and the second one is why no dashboard work could fix it
+
+| # | defect | measured |
+|---|---|---|
+| 1 | tags stripped, `<script>`/`<style>` **contents** kept | the reproduction above |
+| 2 | **`cycle.py` recorded `exc.raw_text` ALONE** | the exception was carrying `message="HTTP 503 after 4 attempts"`, `status_code=503`, the URL and `attempts=4`. All four were discarded **at the point of writing**, so the database never had them. `FeedError.__str__` formats exactly that summary and **nothing had ever called it** |
+| 3 | a `RateLimitBlocked` wrote **no row at all** — it logged and returned `[]` | so the panel's own **first** fault sentence, the one for a rate-limit block, was **unreachable for this feed**. A block was visible only to somebody reading the log file, which is the SSH-free troubleshooting the brief rules out |
+| 4 | the count beside each row was the literal `1` | "once" and "forty times" rendered identically, and the owner's two rows each claimed 1 |
+
+### What changed
+
+**House rule 7 throughout: classify by the rule.** An HTML **document**
+where an `.idx` file or a filing's text was expected is an upstream error
+page, *whatever it says* — so it now reads *"the server returned a web
+page instead of data (the page is titled "SEC.gov | Site Temporarily
+Unavailable") — so this is an error or maintenance page at the source,
+not a problem at this end."* The marker table is only for pages whose
+sentence should say what to **do** (the rate-limit block, an undeclared
+User-Agent, an unpublished index).
+
+Machinery elements are removed **contents and all**, including an
+unclosed one, so no JavaScript or CSS can ever be presented as prose.
+
+The recorded `error_text` now carries **the diagnosis first, the verbatim
+body after it**, separated by a marker, in the same column — no schema
+change, and a row written before this still reads. **House rule 3 is
+unchanged**: the raw response is still kept in full; it moves *below* a
+sentence instead of *being* the sentence. The fold labelled "the exact
+response from the server" shows only the server's half, because putting
+our own summary in it labels our words as theirs.
+
+Faults are grouped on `sources.fault_key` — the exception type and
+message **without** the per-attempt facts, because the URL carries the
+day's date and keying on the whole line would put each day's identical
+outage in its own group and count 1 forever. And *"N feed(s) failed to
+read"* counts **sources**: one feed failing forty times is one feed, and
+saying "40 feeds failed" sends the reader hunting for thirty-nine that do
+not exist.
+
+### The generic-word trap, found while writing the rule
+
+`"timeout"` was one of the four markers and was matched against the
+**raw** body, so a maintenance page whose own prose happened to use the
+word reported as a network timeout — which sends the reader to look at
+the wrong thing entirely. Page **identities** (distinctive phrases that
+appear only in the page they name) are now checked first, the HTML rule
+second, and ordinary English words last.
+
+### My own fix had a defect, and my own test caught it
+
+The first version decided "is this a body or a summary?" by **"does it
+look like a whole HTML document"**. A markup **fragment** — a truncated
+page, or a body starting mid-document — has no `<html>`, fell to the
+summary branch, and was printed as prose *markup and all*. Found by this
+module's own test failing, not by reasoning about it. The rule is now
+simply: **no marker means no recorded diagnosis, so the whole thing is
+the body** — which handles a document, a fragment and plain text alike.
+
+### Verification
+
+- **22 sabotage breakages, 21 caught red**, each verified to still import
+  first.
+- **Two of my tests could not fail**, both found by sabotage and both the
+  same cause: they used a full `<html>` document, so the HTML-document
+  rule returned early and `_visible_text` — the thing under test — was
+  never reached. Rewritten against fragments, and a third test added that
+  distinguishes the two paths by **behaviour** (an `AccessDenied`
+  fragment must produce the actionable "not published" sentence, which
+  only the body path can give it) rather than by both merely coming out
+  clean.
+- **One sabotage stays green alone and is recorded as such** in the code:
+  sanitising the summary half has no reachable input today, because the
+  head is only ever text this project's own writer produced. Its pair
+  covers it; breaking **both** goes red. Same as §14's pair — the right
+  way to show defence in depth is load-bearing.
+- **A process lesson, cost about ten minutes:** re-running the sabotage
+  script piped to `head` killed it with SIGPIPE **mid-round**, leaving a
+  sabotage applied in the working tree. The next full-suite run failed
+  for a reason unrelated to the code. A sabotage harness that restores in
+  a `finally` would have survived it; piping its output to `head` is the
+  thing not to do.
+- Full suite green offline: **3904 tests**.
+
+### What is NOT claimed
+
+**Which sec.gov page the owner actually hit is unknown**, and this change
+does not need to know. The recorded row now names the status code, the
+URL and the attempt count, so the *next* occurrence answers that
+question from the dashboard — which is the point: the diagnosis was
+never stored, so it could not be read out afterwards no matter how the
+panel was written.

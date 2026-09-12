@@ -11,6 +11,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+from catalyst.data import sources
 from catalyst.dashboard import charts, queries
 from catalyst.dashboard.db import Db, jload
 from catalyst.discovery.conjunctions import sector_band
@@ -612,7 +613,9 @@ def performance_panel(db: Db, p: str = "perf") -> str:
 # --------------------------------------------------------------------------
 
 
-#: Upstream failures the owner should read as sentences, not as markup.
+#: Upstream pages that IDENTIFY THEMSELVES, and whose sentence should say
+#: what to do about it. These are page identities, not keyword guesses -
+#: each phrase appears only in the page it names.
 _FAULT_GISTS = (
     ("Request Rate Threshold Exceeded",
      "sec.gov rate-limited this machine. The bot stops calling SEC "
@@ -624,24 +627,133 @@ _FAULT_GISTS = (
     ("AccessDenied",
      "the file is not published (a weekend, a holiday, or before the "
      "evening publish). Not a fault."),
-    ("timeout", "the source did not answer in time."),
+    ("NoSuchKey",
+     "the file is not published (a weekend, a holiday, or before the "
+     "evening publish). Not a fault."),
 )
+
+#: Checked only AFTER the HTML rule below, because these are ordinary
+#: English words. "timeout" matched inside a web page's own prose used to
+#: report a maintenance page as a network timeout, which sends the reader
+#: looking at the wrong thing.
+_TRANSPORT_GISTS = (
+    ("timeout", "the source did not answer in time."),
+    ("ConnectError", "the source could not be reached at all."),
+)
+
+#: Elements whose CONTENTS are machinery, never prose.
+#:
+#: OWNER-REPORTED 2026-09-12: a Form 4 failure was explained to the owner
+#: as `WebFontConfig = { google: { families: [ 'Raleway:...' ] } };`.
+#: Stripping only TAGS (`<[^>]+>`) leaves the BODY of a <script> intact,
+#: and sec.gov puts its Google WebFont loader at the very top of <head> -
+#: so for ANY sec.gov page nobody had enumerated, the "readable sentence"
+#: was that loader. Not sometimes: always, by construction.
+_MACHINERY = re.compile(
+    r"<(script|style|noscript|template|svg)\b[^>]*>.*?</\1\s*>",
+    re.IGNORECASE | re.DOTALL)
+#: A machinery element left unclosed would otherwise leak its whole tail.
+_OPEN_MACHINERY = re.compile(r"<\s*(?:script|style)\b", re.IGNORECASE)
+_TITLE_TAG = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+#: CLASSIFY BY THE RULE, NOT BY ENUMERATION (house rule 7). A response
+#: that is an HTML DOCUMENT, where an .idx file or a filing's text was
+#: expected, is an upstream error or maintenance page - whatever it says,
+#: and whatever status it arrived with. The four identities above are for
+#: pages whose sentence should say what to DO; this is the honest answer
+#: for every page nobody thought of, which is the case that produced the
+#: owner's report.
+_HTML_DOC = re.compile(r"<\s*(?:!doctype\s+html|html)\b", re.IGNORECASE)
+#: Any markup at all - an opening or closing tag, or a doctype. Used to
+#: decide whether a body is worth offering as "the exact response",
+#: because a recorded diagnosis with no body is already the sentence.
+_MARKUP = re.compile(r"<\s*[/!]?[A-Za-z]")
+
+
+def _visible_text(text: str) -> str:
+    """The prose in a response, with markup machinery removed - contents
+    and all, not merely the tags around them."""
+    without = _MACHINERY.sub(" ", text)
+    without = _OPEN_MACHINERY.split(without, maxsplit=1)[0]
+    return " ".join(re.sub(r"<[^>]+>", " ", without).split())
+
+
+def _page_gist(body: str) -> str:
+    """What the upstream BODY says, as a sentence. "" if it says
+    nothing."""
+    if not body.strip():
+        return ""
+    for marker, gist in _FAULT_GISTS:
+        if marker.lower() in body.lower():
+            return gist
+    if _HTML_DOC.search(body):
+        title = _TITLE_TAG.search(body)
+        named = " ".join((title.group(1) if title else "").split())
+        return ("the server returned a web page instead of data"
+                + (f' (the page is titled "{named[:120]}")' if named else "")
+                + " - so this is an error or maintenance page at the "
+                  "source, not a problem at this end. The exact response "
+                  "is below.")
+    visible = _visible_text(body)
+    for marker, gist in _TRANSPORT_GISTS:
+        if marker.lower() in visible.lower():
+            return gist
+    return (visible[:200] + "...") if len(visible) > 200 else visible
+
+
+def _fault_raw(detail) -> str:
+    """Just the upstream body, for the fold labelled "the exact response
+    from the server".
+
+    The recorded text now carries the diagnosis first, and the sentence
+    above the fold already says it - so repeating it inside a fold that
+    promises the server's own response would be labelling our words as
+    theirs. Returns "" when the failure had no body, so an empty fold is
+    never drawn.
+    """
+    text = str(detail or "")
+    _head, marker, body = text.partition(sources.RAW_RESPONSE_MARKER)
+    if marker:
+        return body.strip()
+    # No recorded diagnosis to separate out, so the whole thing is the
+    # upstream body - IF it is markup. A recorded diagnosis with no body
+    # ("ValueError: nothing in the payload") is already the sentence
+    # above, and folding it under "the exact response from the server"
+    # would repeat it and misattribute it.
+    return text if _MARKUP.search(text) else ""
 
 
 def _fault_gist(detail) -> str:
     """One readable sentence for an upstream failure.
 
-    A raw body is evidence, not an explanation. sec.gov's block page is
-    a 4KB HTML document; printing it where a sentence belongs is how
-    the panel became unreadable.
+    A raw body is evidence, not an explanation. Two things are said, in
+    this order, and either may be missing: **what the feed recorded went
+    wrong** (the status code, the URL, how many attempts) and **what the
+    upstream body was**. Older rows hold only a body, so they still read.
     """
     text = str(detail or "")
-    for marker, gist in _FAULT_GISTS:
-        if marker.lower() in text.lower():
-            return gist
-    stripped = " ".join(re.sub(r"<[^>]+>", " ", text).split())
-    return (stripped[:200] + "...") if len(stripped) > 200 else (
-        stripped or "no detail was returned")
+    head, marker, body = text.partition(sources.RAW_RESPONSE_MARKER)
+    if marker:
+        head, body = head.strip(), body.strip()
+    else:
+        # NO MARKER MEANS NO RECORDED DIAGNOSIS TO SEPARATE OUT, so the
+        # whole thing goes through the body path - which handles a
+        # document, a bare fragment and plain text alike.
+        #
+        # The first version of this decided by "does it look like a whole
+        # HTML document", and a fragment with no <html> - a truncated
+        # page, or a body that starts mid-document - fell to the summary
+        # branch and was printed as prose, markup and all. Found by this
+        # module's own test, not by reasoning about it.
+        head, body = "", text
+    # `_visible_text` on the head is belt and braces with no reachable
+    # input today - the head is only ever text this project's own
+    # `sources.error_text` wrote, which is never markup. Kept because it
+    # costs nothing if that format ever changes, and recorded as
+    # unreachable because sabotaging it alone stays green: its pair (the
+    # body rule above) covers it, and breaking BOTH goes red.
+    summary = _visible_text(head)
+    parts = [s for s in (summary[:300], _page_gist(body)) if s]
+    return " - ".join(parts) if parts else "no detail was returned"
 
 
 def funnel_panel(db: Db, p: str = "funnel") -> str:
@@ -925,8 +1037,12 @@ def funnel_panel(db: Db, p: str = "funnel") -> str:
     feed.append(tiles(f"{p}-feed-tiles", [
         ("Raw items fetched", f"{data.feed_events:,}",
          "everything every feed has returned"),
-        ("Feeds that failed", str(len(data.feed_faults)),
-         "each with the upstream error text below"),
+        # THE OCCURRENCES, not the number of groups. Once faults are
+        # grouped, a tile reading "3" beside a list whose counts sum to
+        # four is the panel disagreeing with itself.
+        ("Failed reads", str(sum(n for _r, n, _d in data.feed_faults)),
+         f"{len(data.feed_faults)} distinct failure(s), each with the "
+         "upstream response below"),
     ]))
     if data.feed_faults:
         # THE UPSTREAM BODY CAN BE A 4KB HTML PAGE. sec.gov's rate-limit
@@ -945,9 +1061,10 @@ def funnel_panel(db: Db, p: str = "funnel") -> str:
             f'<li><span class="funnel-why-n">{esc(n)}</span>'
             + '<span class="funnel-why-text">' + esc(reason)
             + (f'<span class="prov">{esc(_fault_gist(detail))}</span>'
-               f'<details class="raw-fold"><summary>the exact response '
-               f'from the server</summary><pre>{esc(str(detail)[:4000])}'
-               "</pre></details>" if detail else "")
+               if detail else "")
+            + (f'<details class="raw-fold"><summary>the exact response '
+               f'from the server</summary><pre>{esc(_fault_raw(detail)[:4000])}'
+               "</pre></details>" if _fault_raw(detail) else "")
             + "</span></li>"
             for reason, n, detail in data.feed_faults)
         feed.append(

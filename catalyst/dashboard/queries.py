@@ -14,6 +14,7 @@ from decimal import Decimal, InvalidOperation
 from urllib.parse import quote
 
 from catalyst import benchmark
+from catalyst.data import sources
 from catalyst.dashboard.db import Db, QueryResult, START_CAPITAL_CENTS, bars_path, jload
 
 
@@ -1182,22 +1183,40 @@ def funnel(db: Db) -> Funnel:
         "WHERE attempted_at >= ? ORDER BY attempted_at DESC LIMIT 20",
         ((datetime.now(timezone.utc) - timedelta(days=FEED_FAULT_WINDOW_DAYS)
           ).isoformat(),))
+    # THE SAME FAILURE TWICE IS ONE FAULT WITH A COUNT OF TWO. Every row
+    # used to be listed separately with a hard-coded count of 1, so the
+    # owner's screen read "1 Insider trades (SEC Form 4) could not be
+    # read" twice over (reported 2026-09-12) - the count column existed
+    # and carried no information. Grouped on what makes two failures the
+    # same failure (`sources.fault_key`), newest detail shown.
+    grouped: dict = {}
     feed_faults, feed_healed = [], []
     for r in err_q.rows:
         source, when = str(r["source"]), str(r["attempted_at"])
+        detail = str(r["error_text"] or "")
         ok_since = db.q(
             "SELECT COUNT(*) AS n FROM raw_events WHERE source = ? "
             "AND fetched_at > ?", (source, when))
         n_ok = int(ok_since.rows[0]["n"]) if ok_since.rows else 0
-        entry = (f"{source_label(source)} could not be read", 1,
-                 str(r["error_text"] or ""))
         if n_ok > 0:
             feed_healed.append(
                 (f"{source_label(source)} failed, then recovered", 1,
                  f"{n_ok} successful read(s) since {when[:16]} - "
                  "resolved, shown for the record"))
+            continue
+        key = (source, sources.fault_key(detail))
+        if key in grouped:
+            # Rows arrive newest first, so the detail already stored is
+            # the newest one. Only the count and the earliest time move.
+            count, first_detail, _oldest = grouped[key]
+            grouped[key] = (count + 1, first_detail, when)
         else:
-            feed_faults.append(entry)
+            grouped[key] = (1, detail, when)
+    for (source, _k), (count, detail, oldest) in grouped.items():
+        reason = f"{source_label(source)} could not be read"
+        if count > 1:
+            reason += f", {count} times since {oldest[:16]}"
+        feed_faults.append((reason, count, detail))
 
     # --- the funnel proper, over candidate ids
     cand_ids, cand_q = _ids(db, "SELECT id FROM candidates")
@@ -1411,7 +1430,12 @@ def funnel(db: Db) -> Funnel:
                      "built yet: nothing has reached the pipeline at all. "
                      "That is a question about the feeds, not the strategy.")
             if feed_faults:
-                blame += (f" {len(feed_faults)} feed(s) failed to read - "
+                # "feed(s)" means FEEDS, so count sources - not rows and
+                # not fault groups. One feed failing forty times is one
+                # feed, and saying "40 feeds failed" sends the reader
+                # hunting for thirty-nine sources that do not exist.
+                n_feeds = len({src for src, _k in grouped})
+                blame += (f" {n_feeds} feed(s) failed to read - "
                           "listed under Feed health.")
         else:
             st = next((s for s in stages if s.entered > 0 and s.count == 0),
