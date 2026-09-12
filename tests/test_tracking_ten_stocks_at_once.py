@@ -432,9 +432,15 @@ class TestAMissingLineSaysWhy:
         # measured words-per-figure budget, which is how this was found.
         block = html[html.find("bench-tracked"):][:8000]
         assert "next daily refresh" in block
-        assert "check the spelling" in block, (
-            "a mistyped ticker and a stock added a minute ago look the same, "
-            "so the row has to cover both")
+        # A mistyped ticker and a stock added a minute ago look the same, so
+        # the row has to cover both - and since the owner asked (2026-09-12)
+        # it must name the OTHER cause of an unknown symbol too: a London
+        # listing such as VUAG has no bars from a US broker.
+        assert "spelling" in block
+        assert "US-listed" in block, (
+            "the row must say why a real, correctly spelled symbol can still "
+            "have no prices")
+        assert "VOO" in block, "and what to use instead"
 
     def test_the_DEFAULT_row_is_not_told_to_check_its_spelling(self, tmp_path,
                                                                monkeypatch):
@@ -460,7 +466,7 @@ class TestAMissingLineSaysWhy:
             d.close()
         block = html[html.find("bench-tracked"):][:4000]
         assert "SPY" in block and "the default" in block
-        assert "check the spelling" not in block, (
+        assert "the spelling is wrong" not in block, (
             "the default row was told to check the spelling of a ticker the "
             f"owner never typed: {block[:400]!r}")
         assert "next daily refresh" in block, (
@@ -486,7 +492,7 @@ class TestAMissingLineSaysWhy:
         block = html[html.find("bench-tracked"):][:9000]
         row = block[block.find("NVDA"):]
         row = row[:row.find("</tr>") + 5] if "</tr>" in row else row
-        assert "check the spelling" not in row, (
+        assert "the spelling is wrong" not in row, (
             f"a short window was told to check its spelling: {row[:400]!r}")
 
     def test_the_account_benchmark_is_not_told_to_check_its_spelling(
@@ -997,6 +1003,89 @@ class TestNothingHereCanSizeSpendOrTrade:
              "catalyst/benchmark/comparisons.py"],
             capture_output=True, text=True)
         assert out.stdout.strip() == ""
+
+    @staticmethod
+    def _regions(html):
+        """The three places the US-listed rule has to appear, as separate
+        strings.
+
+        SEPARATE ON PURPOSE. The first version of these tests asserted
+        "US-listed" was in the panel SOMEWHERE - and it appears in the
+        label, the note and the empty row, so deleting any one of them
+        left the others and every sabotage came back green. A test that
+        cannot tell which of three copies it found is not testing any of
+        them.
+        """
+        block = html[html.find("bench-tracked"):]
+        label = re.search(
+            r'<label class="prov">([^<]*)<input[^>]*id="[^"]*track-ticker"',
+            block)
+        note = re.search(r"Up to \d+ stocks.*?</p>", block, re.DOTALL)
+        return (label.group(1) if label else ""), (note.group(0) if note else "")
+
+    def test_the_INPUT_LABEL_says_US_listed_before_anything_is_typed(self, db):
+        """OWNER-ASKED 2026-09-12: *"Can we make it clear only add US
+        stocks that are listed if not already"*.
+
+        On the label itself, in visible text - not in a `title` attribute
+        a mouse has to hover to find, and not only in the note below.
+        """
+        from catalyst.dashboard import panels
+        from catalyst.dashboard.db import Db
+
+        d = Db(db)
+        try:
+            label, _note = self._regions(panels.benchmark_panel(d))
+        finally:
+            d.close()
+        assert label, "the ticker input has no label at all"
+        assert "US-listed" in label, (
+            f"the field the owner types into does not say so: {label!r}")
+
+    def test_the_NOTE_states_the_rule_and_names_the_trap(self, db):
+        from catalyst.dashboard import panels
+        from catalyst.dashboard.db import Db
+
+        d = Db(db)
+        try:
+            _label, note = self._regions(panels.benchmark_panel(d))
+        finally:
+            d.close()
+        assert note, "the tracked-stocks note is missing"
+        assert "US-listed" in note
+        assert "VUAG" in note, (
+            "name the trap the owner actually asked about, not just the rule")
+        assert "VOO" in note, "and what to use instead"
+        # And it must not promise a check the code does not make: the
+        # ticker is validated by SHAPE so a brand-new listing is never
+        # wrongly refused, which means an unknown symbol IS accepted.
+        assert "does not exist is accepted" in note, (
+            "saying US-listed only, where nothing enforces it, is a promise "
+            "the code does not keep - the note has to say a bad symbol is "
+            "taken and reports itself")
+
+    def test_the_EMPTY_ROW_names_the_non_US_cause_too(self, db, bars):
+        """A correctly spelled, real symbol can still have no prices. The
+        row is where the owner looks when a line does not appear, so
+        "check the spelling" alone sends them after the wrong thing."""
+        from catalyst.dashboard import panels, server
+        from catalyst.dashboard.db import Db
+
+        write_bars(bars, "SPY")
+        server.track_stock(db, {"ticker": "VUAG", "amount_usd": "2000",
+                                "start_date": "2026-08-14"})
+        d = Db(db)
+        try:
+            html = panels.benchmark_panel(d)
+        finally:
+            d.close()
+        block = html[html.find("bench-tracked"):]
+        i = block.find("VUAG")
+        row = block[i:block.find("</tr>", i) + 5]
+        assert "no daily closes are cached" in row
+        assert "US-listed" in row, (
+            f"the row blames only the spelling: {row[-500:]!r}")
+        assert "VOO" in row, "and says what to use instead"
 
     def test_the_success_message_says_it_changes_only_the_comparison(self, db):
         from catalyst.dashboard import panels
