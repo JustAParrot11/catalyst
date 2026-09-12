@@ -1218,3 +1218,112 @@ after `upgrade.sh` pulls:
 | tables lost | none |
 | existing rows preserved | yes |
 | the weekend → Monday chain under `foreign_keys = ON` | research 1, context recorded `daily_close` at 50.5, no orders, no proposals; then at +5.2% the gate fired `moved_up_past_view_price`, no orders, **no second research call** |
+
+---
+
+## 15. The weekend researched for half an hour, not all weekend
+
+Owner-asked 2026-09-12: *"ok so when over the weekend should it research
+and where can i see evidence of this"* — and answering it honestly meant
+measuring it, which found the feature barely working.
+
+### Measured: eight consecutive closed-market cycles, 30 candidates, belt of 6
+
+```
+cycle 1: researched 6      cycle 3: researched 0, 12 skipped market_closed
+cycle 2: researched 6      cycles 4-8: researched 0
+```
+
+**Twelve candidates got a weekend view and then it stopped forever.** The
+eighteen behind them were never looked at.
+
+**Cause.** A candidate holding a weekend view has to stay in `fresh` —
+that is the whole point, it is how the view reaches sizing on Monday
+without paying for a second call. But it also kept its place in
+`fresh[:max_research]`, was skipped as `market_closed` for nothing, and
+occupied a slot it could not use while the market was shut. So the belt
+filled with candidates that had already been judged.
+
+**Fix.** The belt is filtered by what *this cycle can actually give a
+candidate*, which is a different question from what the screen let
+through: while the market is shut, a candidate that already holds a view
+is not asking for a research slot. It stays in `fresh` when the market is
+**open**, because then it is exactly the candidate that needs a slot — to
+be sized, not researched. After the fix, all 30 got a view in three
+cycles and then it correctly went quiet.
+
+**So the honest answer to "when over the weekend":** in the first few
+cycles after Friday's close, working through the backlog the screens
+built from the week's filings, and then **quiet** — because EDGAR is shut
+and the only new candidates a weekend can produce are the hunt's own
+nominations. Not "all weekend". A few cycles, then as fast as the hunt
+feeds it.
+
+### The funnel would have been red all weekend
+
+`skip_kind` defaults an unrecognised reason on the `researched` stage to
+**FAULT** (`UNKNOWN_IS_FAULT_ON = ("researched", "orders")`). None of the
+three new reasons was classified, so every closed-market cycle would have
+painted the funnel red for a bot that had just done its job — the
+"routine attrition reading as damage" failure CLAUDE.md says has already
+cost real debugging time twice. The owner would have opened the dashboard
+on Monday to a weekend of red.
+
+Now classified:
+
+| reason | kind | why |
+|---|---|---|
+| `researched_while_closed_awaiting_open` | ROUTINE | the feature working |
+| `has a view already, waiting for the open` | ROUTINE | not asking for a slot |
+| `market_closed_and_no_cached_close` | ROUTINE | bars are cached on first research, so a new ticker legitimately has none |
+| `moved_up_past_view_price` | LIMIT | a gate doing its job, and worth counting |
+| `moved_down_past_view_price` | LIMIT | same |
+| `view_price_move_unmeasurable` | LIMIT | same |
+| `price_not_live_cannot_size` | LIMIT | risk review F5, by design |
+
+### And the decisions page said the opposite of the truth
+
+A weekend research call **succeeds** — it writes a view and no
+`skipped_reason` at all. `_why_not_researched` looks for a skip row,
+found none, and fell through to **"not researched yet"**: the exact
+opposite of what happened. It now checks for a view first, and
+distinguishes a view formed off a cached close ("researched while the
+market was shut … will be sized at the next open") from one formed at a
+live mid ("waiting for the risk engine"), because telling the owner the
+market was shut about a Tuesday afternoon is simply false.
+
+### A test that would have hidden this, caught immediately
+
+The first version of the label test grepped the module source behind an
+`if`:
+
+```python
+said = panels._research_state(...) if hasattr(panels, "_research_state") else None
+if said is None:
+    assert "researched while the market was shut" in inspect.getsource(panels)
+```
+
+The helper did not exist under that name, so the test took the grep
+branch, found the string in the friendly map, and **passed while the
+string was unreachable**. Rewritten to call the real function, it failed
+on the first run and exposed the "not researched yet" bug. Section 6's
+first row, again: a test that cannot fail is not a test — and a
+conditional fallback inside a test is one of the ways it happens.
+
+### Verification
+
+- 8 sabotage breakages. 2 came back green: one because no test covered
+  the intraday branch (added, re-sabotaged red), one because the grep
+  test above could not fail (rewritten).
+- Full suite green offline: **3856 tests**.
+
+### Where the evidence appears
+
+| what to look at | what it shows |
+|---|---|
+| **Pipeline** (`/funnel`) | `researched` climbing on Saturday, with `researched_while_closed_awaiting_open` beside it, tagged ROUTINE not FAULT |
+| **Decisions** (`/decisions`) | per candidate: "researched while the market was shut, against the last cached close" |
+| **Arms** (`/arms`) | paid calls and spend rising for the arms that ran, hunt included |
+| **Cost** (`/costs`) | weekend spend as its own days; the monthly cap is what bounds it |
+| **Logs** (`/logs`) | `Researched <TICKER> while the market was shut, against the cached close of <price>`, and `Hunt not due: no event has arrived since the last hunt at …` |
+| **Monday, Pipeline** | either an order, or `moved_up_past_view_price` tagged LIMIT with the price on the refusals page |

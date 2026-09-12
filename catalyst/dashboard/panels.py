@@ -2065,7 +2065,35 @@ def _why_not_researched(db: Db, candidate_id: str) -> str:
     A research_call row with a skipped_reason is the bot's own record of
     why it did not spend; without one, nothing has reached the model yet
     at all, which usually means the cycle has not got to it.
+
+    EXCEPT WHEN IT HAS ALREADY BEEN RESEARCHED AND IS WAITING FOR THE
+    MARKET (2026-09-12). A weekend research call SUCCEEDS - it writes a
+    view and no skipped_reason at all - so this function found no skip
+    row and reported "not researched yet", which is the opposite of the
+    truth: it was researched, the view is held, and it is waiting for a
+    live quote to be sized against.
     """
+    # A VIEW EXISTS, SO IT WAS RESEARCHED. Checked before the skip rows,
+    # because a successful call leaves no skip row to find and the
+    # fall-through said the work had not happened.
+    view = db.q("SELECT direction FROM research_views WHERE candidate_id = ?",
+                (candidate_id,))
+    if view.rows:
+        decided = db.q(
+            "SELECT 1 FROM risk_decisions WHERE candidate_id = ? LIMIT 1",
+            (candidate_id,))
+        if not decided.rows:
+            ctx = db.q("SELECT priced_off FROM research_view_context "
+                       "WHERE candidate_id = ?", (candidate_id,))
+            off = str(ctx.rows[0]["priced_off"]) if ctx.rows else ""
+            if off == "daily_close":
+                return ("researched while the market was shut, against the "
+                        "last cached close - the view is held and will be "
+                        "sized at the next open, once code has checked the "
+                        "price has not already moved past the setup")
+            return ("researched - the view is in hand and waiting for the "
+                    "risk engine on the next cycle")
+
     res = db.q("SELECT skipped_reason FROM research_calls "
                "WHERE candidate_id = ? AND skipped_reason IS NOT NULL "
                "ORDER BY called_at DESC LIMIT 1", (candidate_id,))
@@ -2074,6 +2102,15 @@ def _why_not_researched(db: Db, candidate_id: str) -> str:
     reason = str(res.rows[0]["skipped_reason"] or "")
     friendly = {
         "market_closed": "not researched - market shut",
+        # The weekend, in the owner's words rather than a key.
+        "researched_while_closed_awaiting_open":
+            "researched while the market was shut - the view is held and "
+            "will be sized at the next open, once code has checked the "
+            "price has not already moved past the setup",
+        "market_closed_and_no_cached_close":
+            "not researched - the market is shut and no daily close is "
+            "cached for this ticker, so there was no price to reason "
+            "about. It waits for a live quote",
         "market_clock_unavailable": "not researched - broker clock unreadable",
         "unprotected_position_blocks_entries":
             "not researched - an unprotected position blocks new entries",

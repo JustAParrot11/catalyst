@@ -559,3 +559,176 @@ class TestAnUnmeasurableMoveRefuses:
         assert state["posts"] == []
         assert any("view_price_move_unmeasurable" in r
                    for r in report2.drop_reasons["proposed"])
+
+
+class TestTheWeekendDoesNotBlockItsOwnBelt:
+    """MEASURED, and it was wrong: a candidate holding a weekend view
+    kept its place in `fresh[:max_research]` and was skipped as
+    `market_closed` for nothing, starving everything behind it.
+
+    Eight consecutive closed-market cycles, 30 candidates, belt of 6:
+
+        cycle 1: researched 6     cycle 3: researched 0, 12 skipped
+        cycle 2: researched 6     cycles 4-8: researched 0
+
+    So the weekend researched twelve and then stopped forever - half an
+    hour of work out of sixty. It must stay in `fresh` when the market is
+    OPEN, because that is how a weekend view reaches sizing without
+    paying twice, so the belt is filtered by what THIS cycle can give a
+    candidate rather than by what the screen let through.
+    """
+
+    def _run_weekend(self, db, tmp_path, n=12, cycles=6):
+        bars = tmp_path / "bars"
+        bars.mkdir(exist_ok=True)
+        for i in range(n):
+            bars_for(tmp_path, ticker=f"T{i}")
+        cands = [candidate(cid=f"c{i}", ticker=f"T{i}") for i in range(n)]
+        shut, _ = broker_for(market_open=False)
+        seen = []
+        for _ in range(cycles):
+            rep = run(db, shut, model_transport(
+                view={**GOOD_VIEW, "direction": "no_trade"}), cands,
+                bars_dir=str(bars))
+            seen.append(rep.funnel.get("researched", 0))
+        return seen
+
+    def test_it_works_through_more_than_one_beltful(self, db, tmp_path):
+        researched = self._run_weekend(db, tmp_path, n=12, cycles=6)
+        total = db.execute(
+            "SELECT COUNT(*) FROM research_views").fetchone()[0]
+        assert total == 12, (
+            f"only {total} of 12 candidates got a weekend view across six "
+            f"cycles (per cycle: {researched}) - the belt is blocked by "
+            "candidates that already hold one")
+
+    def test_a_candidate_holding_a_view_is_named_not_silently_skipped(
+            self, db, tmp_path):
+        """Routine attrition must not read as damage (CLAUDE.md), and
+        'market_closed' on a candidate that has already been researched
+        is the wrong reason recorded."""
+        bars = bars_for(tmp_path)
+        shut, _ = broker_for(market_open=False)
+        run(db, shut, model_transport(), [candidate()], bars_dir=bars)
+        rep = run(db, shut, model_transport(), [candidate()], bars_dir=bars)
+        assert any("waiting for the open" in r
+                   for r in rep.drop_reasons.get("researched", [])), (
+            rep.drop_reasons.get("researched"))
+
+    def test_it_stops_once_there_is_nothing_left_to_research(
+            self, db, tmp_path):
+        """The other half. Freeing the belt must not turn into paying for
+        the same candidates again - EDGAR is shut, so once the backlog is
+        judged the weekend should go quiet."""
+        calls = []
+        bars = tmp_path / "bars"
+        bars.mkdir(exist_ok=True)
+        for i in range(3):
+            bars_for(tmp_path, ticker=f"T{i}")
+        cands = [candidate(cid=f"c{i}", ticker=f"T{i}") for i in range(3)]
+        shut, _ = broker_for(market_open=False)
+        for _ in range(4):
+            run(db, shut, model_transport(
+                view={**GOOD_VIEW, "direction": "no_trade"}, calls=calls),
+                cands, bars_dir=str(bars))
+        forced = [p for p in calls
+                  if (p.get("tool_choice") or {}).get("type") == "tool"]
+        assert len(forced) == 3, (
+            f"{len(forced)} paid research calls for 3 candidates across "
+            "four cycles - the weekend is paying twice for the same view")
+
+    def test_an_open_market_still_lets_a_stored_view_reach_sizing(
+            self, db, tmp_path):
+        """THE PROPERTY THE FILTER MUST NOT BREAK. Removing a viewed
+        candidate from the belt is correct only while the market is shut;
+        when it opens, that candidate is exactly the one that needs a
+        slot - to be sized, not researched."""
+        bars = bars_for(tmp_path)
+        shut, _ = broker_for(market_open=False)
+        run(db, shut, model_transport(), [candidate()], bars_dir=bars)
+        open_broker, state = broker_for(market_open=True, mid="50")
+        rep = run(db, open_broker, model_transport(), [candidate()],
+                  bars_dir=bars)
+        assert rep.funnel["proposed"] == 1, (
+            "the weekend view never reached sizing on the open")
+        assert state["posts"], "no order was placed from the weekend view"
+
+
+class TestTheWeekendDoesNotReadAsDamAGE:
+    """CLAUDE.md: "Routine attrition must not look like damage... A
+    working bot reading as a broken one has cost real debugging time
+    twice."
+
+    An unrecognised reason on the `researched` stage defaults to FAULT in
+    red (`UNKNOWN_IS_FAULT_ON`), so without this every closed-market
+    cycle would paint the funnel red for a bot that had just done its job
+    - and the owner would open the dashboard on Monday to a weekend of
+    red.
+    """
+
+    def test_the_weekend_reasons_are_routine_not_faults(self):
+        from catalyst.dashboard.queries import skip_kind
+
+        for reason in ("researched_while_closed_awaiting_open",
+                       "c1: has a view already, waiting for the open",
+                       "market_closed_and_no_cached_close"):
+            assert skip_kind(reason, "researched") == "ROUTINE", (
+                f"{reason!r} reads as a fault, so a working weekend looks "
+                "broken")
+
+    def test_the_monday_gate_reads_as_a_limit_not_a_fault(self):
+        """A gate doing its job is a decision, not a failure - and not
+        routine either, because it is worth seeing how often it fires."""
+        from catalyst.dashboard.queries import skip_kind
+
+        for reason in ("moved_up_past_view_price",
+                       "moved_down_past_view_price",
+                       "view_price_move_unmeasurable",
+                       "price_not_live_cannot_size"):
+            assert skip_kind(reason, "proposed") == "LIMIT", reason
+
+    def test_the_weekend_reason_has_a_plain_english_label(self, db, tmp_path):
+        """A key is not an explanation. This is the string the decisions
+        page shows the owner, and 'researched_while_closed_awaiting_open'
+        is not a sentence.
+
+        Asserted through the real function, not by grepping the module -
+        a first version did the latter behind an `if`, which is a test
+        that can pass without the code being reached at all."""
+        from catalyst.dashboard.db import Db
+        from catalyst.dashboard.panels import _why_not_researched
+
+        bars = bars_for(tmp_path)
+        shut, _ = broker_for(market_open=False)
+        run(db, shut, model_transport(), [candidate()], bars_dir=bars)
+        db.commit()
+        said = _why_not_researched(Db(str(tmp_path / "t.db")), "cand-1")
+        assert "market was shut" in said, said
+        assert "sized at the next open" in said, said
+        assert "researched_while_closed" not in said, (
+            "the raw key leaked to the page instead of the sentence")
+
+    def test_a_view_formed_at_a_live_mid_does_not_claim_the_weekend(
+            self, db, tmp_path):
+        """The other branch, and a sabotage found it untested. A view with
+        no decision yet is not necessarily a weekend view - it also
+        happens intraday when something after research refuses, and
+        telling the owner "the market was shut" about a Tuesday afternoon
+        is simply false."""
+        from catalyst.dashboard.db import Db
+        from catalyst.dashboard.panels import _why_not_researched
+
+        bars = bars_for(tmp_path)
+        open_broker, _ = broker_for(market_open=True, mid="50")
+        run(db, open_broker, model_transport(), [candidate()], bars_dir=bars)
+        # Wind back to "researched at a live mid, not yet decided", which
+        # is what a mid-cycle failure after research leaves behind.
+        # Children first: three tables reference risk_decisions, and with
+        # foreign keys ON (as production has them) the order matters.
+        for table in ("refusals", "limit_applications",
+                      "limit_application_notes", "risk_decisions"):
+            db.execute(f"DELETE FROM {table}")
+        db.commit()
+        said = _why_not_researched(Db(str(tmp_path / "t.db")), "cand-1")
+        assert "market was shut" not in said, said
+        assert "waiting for the risk engine" in said, said
