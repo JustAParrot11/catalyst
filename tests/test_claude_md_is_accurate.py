@@ -36,7 +36,10 @@ class TestTheThrottleTableMatchesTheCode:
     @pytest.mark.parametrize("monthly,daily,per_cycle,hunts", [
         (2000, "5.00", 3, 0),
         (10000, "10.00", 6, 2),      # 1 -> 2 on 2026-09-05 (supply, not budget, was binding)
-        (30000, "30.00", 12, 4),
+        # 4 -> 8 on 2026-09-12: the hard-coded min(4) was capping this
+        # row, so raising the cap from $100 to $300 tripled the budget
+        # and bought nothing. Throttles derive from the budget.
+        (30000, "30.00", 12, 8),
     ])
     def test_each_row_is_what_the_code_returns(
             self, monthly, daily, per_cycle, hunts):

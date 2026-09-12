@@ -978,3 +978,179 @@ lost was being told which thing had happened. An id collision means the
   them is wasted and the honest response is to stop — which the funnel
   will show, per arm, because the refusal reasons are named.
 - The weekend has never actually run this way. Zero weekend views exist.
+
+---
+
+## 14. Which arm earns its money, and the typed number that was capping the hunt
+
+Owner-asked 2026-09-12: *"how do we know if the form 4 and insider data
+is actually helping or not? is it easy to determine this? Can we get a
+trade purely from claude research and one as normal, e.g. if we have 10
+trades in 2 weeks at least 5 are fully claude research from news and
+trade deals etc"*, then, when told a comparison page would be full of
+zeros: *"add the comparison page 0s are fine if it means itll populate
+it it goes on"*.
+
+### The honest answer to "is the insider data helping": it cannot be told yet
+
+Not because the data is missing, but because **three of the four arms
+have produced nothing an engine could act on.** There is one arm to
+judge, so there is no comparison. And the uncomfortable part is on the
+record: the arm doing all the work graded **worst** out of sample
+(49.3%, 41.2% max drawdown) while the best-graded arm (57.1%, 8.8%) has
+produced nothing this account could take.
+
+### Where the hunt was really being limited — measured
+
+At the owner's $100 cap `hunts_per_day` returned:
+
+```
+min(4, per_day // (per_hunt x 2))  =  min(4, 333c // 23.2c)  =  min(4, 14)
+```
+
+**The budget afforded fourteen. A hard-coded `4` was the limiter** — and
+the same `4` was capping the $300 row, so *tripling the cap bought
+nothing*, which breaks the project's own rule that throttles derive from
+the budget. It is also why CLAUDE.md's table still said "2 at $100" long
+after the measured 11.6c had moved it to 4: the table was written against
+the 60c seed and nothing updated it.
+
+The `x 2` research reserve that a test correctly protected on 09-11 was
+**not** what was binding at this cap. Two different bounds, and the wrong
+one was blamed.
+
+### Removing the ceiling removed the bound — caught by three tests
+
+Uncapping returned **166 hunts/day** on a 1c measured cost and **277,777**
+on an absurd cap. "Bounded by the record" is not enough on its own,
+because the demotion only bites an arm that converts *nothing* — one
+early directional view restores a full allowance and leaves it unbounded.
+
+So two derived bounds replaced the typed one:
+
+| bound | what it is | why it is not a guess |
+|---|---|---|
+| **cadence** | a day cannot hold more hunts than cycles (96 at 900s) | a hunt is asked once per cycle; read from the scheduler's own interval, including the env override, so it moves on its own |
+| **the arm's own record** | no directional view in 40+ paid calls → probe share (1 in 4, never zero) | the same measured rule that cut the conjunction allowance. It was bounding RESEARCH slots only, so a non-converting hunt kept nominating at full rate while its nominations were rationed — the spend continued and the bound never reached it |
+
+At $100 the budget binds first (14 against 96), so the cadence only ever
+catches the pathological case. **40 paid hunt calls at the measured 11.6c
+is under $5 for the whole experiment**, which is what makes giving the
+hunt a real run at it cheap rather than reckless.
+
+### And a hunt is only paid for when the feed has changed
+
+The old ceiling's reasoning was right and its *shape* was wrong: "the
+feed does not change materially between 15-minute cycles, so hunting
+every cycle would pay to re-read the same digest ~26 times a day for the
+same nominations." That is a statement about the **input**, so bounding
+it with a spend-shaped constant answered the wrong question.
+`feed_changed_since_last_hunt` states it as a rule: at least one event
+must have arrived since the last hunt was billed. Zero new events is the
+identical digest.
+
+Also fixed while there: `_hunt_due` **incremented the day's counter
+before** every reason to decline had been checked, so a declined hunt
+consumed the allowance.
+
+### The weekend gets a different job, not a bigger allowance
+
+Owner: *"well surely the weekend search will be more purely agentic as it
+isnt influenced by SEC of insider trade info"* — correct, structurally.
+EDGAR does not file at weekends or holidays, so the mechanical screens
+have nothing new to match and whatever a closed-market hunt produces is
+Claude's own reasoning. **One correction, in the model's favour:** the
+hunt still *reads* the week's stored filings, so it is not blind to
+insider data on a Saturday — it just gets no *new* filings, which suits a
+second-order chain better because the week's filings become context to
+reason outward *from*.
+
+**What the brief deliberately does NOT do is hand out more searches.**
+That is the conjunction mistake exactly: ten searches instead of three,
+justified by "the answer lives in reporting the feeds do not carry", and
+after 89 paid calls at the larger allowance and zero directional views
+the allowance was cut back. Evidence buys budget; hope does not. A test
+asserts the brief grants no extra searches, and another asserts it still
+states the date rule — 88% of hunt nominations were once rejected for a
+past catalyst date, and *"the price will react on Monday"* is precisely
+the shape of nomination a weekend brief could invite.
+
+The market state comes from **the broker clock, not `weekday() < 5`** — a
+market holiday is the case nobody thinks of and a weekday test calls it
+open (house rule 7). A test asserts `weekday` does not appear in that
+code path.
+
+### The Arms page
+
+One tab, built with zeros showing because the owner asked for that:
+
+1. **A plain sentence first** answering "is insider data helping" —
+   today that sentence says it cannot be told yet, and why.
+2. **Nomination to banked money per arm**: candidates, paid calls,
+   spend, directional views, conversion, cost per view, orders, closed,
+   hit rate, realised P&L. Every figure counted from rows.
+3. **The live record beside the out-of-sample grade**, read from this
+   database's own `backtest_results` rows rather than copied off a
+   document. An arm with no run says **"never replayed"**, which is the
+   true answer for conjunctions and the hunt.
+4. **Whether the feedback loop has produced anything**, per arm —
+   because with ~0 of 291 declines scored, every adaptive threshold in
+   the bot is still sitting on an estimate, and that belongs on a page
+   rather than in a doc.
+
+**The one thing NOT shown as zero is a ratio with no denominator.** "No
+calls yet" and "0% conversion" are different facts and only one is a
+verdict; conversion and hit rate come back `None` and render as a dash.
+A failed query is flagged as a failure rather than rendering as zeros —
+on a page this full of zeros, "nothing happened" and "the query is
+broken" look identical otherwise, and telling them apart is repeatedly
+the whole diagnosis.
+
+**Why a graded arm that never fires gets its own sentence:** an arm can
+fail two ways needing opposite responses. Graded well and never fires is
+a plumbing or threshold problem, the cheapest kind to fix. Fires
+constantly and loses money is a strategy problem, and means unwiring it.
+
+### Two tests that could not fail, both found by sabotage
+
+Worth recording because both are the pattern §6 opens with.
+
+1. **"a declined hunt does not consume the allowance"** used an empty
+   `state` dict. Empty is falsy, so a regression written as
+   `daily_state or {}` would operate on a throwaway dict and the test
+   would pass for the wrong reason. Fixed by seeding a non-empty dict.
+2. **"an in-sample run is not used as the grade"** inserted both sample
+   kinds for the *same* run and asserted the sample size. The
+   out-of-sample row happened to be inserted first, so the assertion held
+   whatever the query did — unfailable from the day it was written.
+   Rebuilt as two runs where the **newer** one carries only in-sample
+   stats, so `ORDER BY created_at DESC` puts it first and correct code
+   must skip past it. `sample_kind` is now carried in the result and
+   asserted directly rather than inferred from a number that can
+   coincide.
+
+Also learned: two of the sabotages came back GREEN because each was
+neutralised by the *other's* guard — the WHERE clause and the
+`sample_kind` check are defence in depth. Breaking **both at once** goes
+red, which is the right way to show a pair is load-bearing.
+
+### Verification
+
+- **19 sabotage breakages.** 17 red on the first pass; the 2 that were
+  green were a flawed sabotage and a genuinely weak test, both fixed and
+  re-run red (the pair above needing both removed).
+- Full suite green offline: **3848 tests**.
+
+### What is NOT claimed
+
+- **No arm has closed a trade, so every money column is a zero** and
+  the page says so in a sentence before any table.
+- **Whether more hunt calls produce more tradeable views is unmeasured.**
+  The hunt has 2 lifetime paid calls. The bound is that 40 calls costs
+  under $5 and the demotion rule then throttles it automatically — not
+  that it will work.
+- **The owner's "5 of 10 trades from Claude's own research" is not
+  guaranteed by this.** Research slots already rotate one per arm per
+  round, so the allocation exists; what was missing was hunt supply, and
+  this removes the cap on supply. Whether supply converts is the open
+  question.

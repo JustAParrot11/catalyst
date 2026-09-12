@@ -247,11 +247,27 @@ class TestTheThrottlesUseIt:
             "a hunt measured at $3 did not reduce the hunt rate")
 
     def test_the_hunt_rate_is_still_bounded_however_cheap(self, db):
-        from catalyst.discovery.hunt import hunts_per_day
+        """THE BOUND IS DERIVED NOW, not the typed 4 it used to be.
+
+        Measured 2026-09-12: at the owner's $100 cap that 4 was the
+        limiter, not the budget - `min(4, 333c // 23.2c)` = min(4, 14).
+        Removing it removed the bound with it: a 1c measured hunt
+        returned 166 a day. So the ceiling is the CADENCE - a hunt runs
+        once per cycle at most, so a day cannot hold more hunts than
+        cycles - which is a real limit rather than a guess, and moves on
+        its own if the interval changes.
+
+        What this test holds is the PROPERTY, not the number: a cheap
+        measurement must not buy unbounded hunting."""
+        from catalyst.discovery.hunt import (
+            _hunts_the_cadence_allows, hunts_per_day,
+        )
 
         for _ in range(MIN_OBSERVED_CALLS):
             spend(db, "hunt", 1)
-        assert hunts_per_day(10000, db) <= 4, (
+        ceiling = _hunts_the_cadence_allows()
+        assert 0 < ceiling <= 96, f"the cadence ceiling is {ceiling}"
+        assert hunts_per_day(10000, db) <= ceiling, (
             "a cheap measurement bought unbounded hunting")
 
     def test_the_belt_is_still_bounded_however_cheap(self, db):

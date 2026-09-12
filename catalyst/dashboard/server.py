@@ -184,6 +184,16 @@ def route_trades(db: Db, params: dict) -> str:
                        "/trades", db.path, db=db)
 
 
+def route_arms(db: Db, params: dict) -> str:
+    """Is the Form 4 / insider data actually helping? (owner-asked
+    2026-09-12). Its own tab rather than a section of the Pipeline
+    page, because the question it answers - which candidate source is
+    worth the money - is asked about the STRATEGY, not about a stage of
+    the funnel."""
+    return render_page("Arms", panels.arms_panel(db, p="arms"),
+                       "/arms", db.path, db=db)
+
+
 def route_capital(db: Db, params: dict) -> str:
     return render_page("Capital in use", panels.capital_panel(db, p="cap"),
                        "/capital", db.path, db=db)
@@ -927,6 +937,7 @@ HTML_ROUTES = {
     "/next": route_next,
     "/capital": route_capital,
     "/funnel": route_funnel,
+    "/arms": route_arms,
     "/costs": route_costs,
     "/decisions": route_decisions,
     "/decision": route_decision,
