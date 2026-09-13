@@ -567,6 +567,7 @@ def investigate(
     graph_context: str | None = None,
     signals: list | None = None,
     market=None,
+    now=None,
 ) -> ResearchCallLog:
     """`signals` is what each independent feed said about this ticker.
 
@@ -575,6 +576,16 @@ def investigate(
     insider cluster priced in" to "do these unrelated things connect",
     and it earns a larger search budget because that question is open.
     None means an ordinary single-feed candidate, unchanged.
+
+    `now` is the decision time and reaches THE PROMPT TEXT ONLY. It is
+    rendered so the model knows what day it is (owner-asked 2026-09-13;
+    see `prompts.render_as_of_section` for the measurement). Nothing in
+    this module reads it back, nothing arithmetic touches it, and no
+    gate, estimate, size or order depends on it: a wrong value here can
+    only produce a wrong-headed OPINION, which is the same exposure
+    every other sentence in the prompt already has. None means the
+    prompt renderer uses the real clock, which is strictly better than
+    the no-date prompt this replaces.
     """
     call_id = str(uuid.uuid4())
     conn = cost_context.conn
@@ -587,7 +598,7 @@ def investigate(
 
     prompt = prompts.render_research_prompt(
         candidate, graph_context=graph_context, signals=signals,
-        market=market, record=recent_record(conn))
+        market=market, record=recent_record(conn), now=now)
     # The schema tool is offered DURING exploration as well as in the
     # forced turn. If the model submits its view while it still has the
     # search results in hand, the extraction turn - which re-sends the

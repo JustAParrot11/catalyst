@@ -2041,3 +2041,411 @@ fallback is the worst of both, because the fallback silently wins.
 - The first measurement to look at is `cache_read_input_tokens` on the
   Cost page. If it stays at zero across a day with research calls, a
   silent invalidator is at work and this change bought nothing.
+
+---
+
+## 22. The bot did not know what day it was
+
+Owner-asked 2026-09-13: *"is the bot 100% aware of the active current
+date and time it is making these searches?"*
+
+**No. None of the three prompts it pays for said what today was.**
+Measured from the owner's own bundle (`catalyst-logic-7d-20260913-125402`),
+the verbatim `prompt_rendered` for `conj-b3caf562223b246f8844` — CHYM,
+called 2026-09-13T00:06 — carried `2026-09-08`, `2026-09-10` and
+`Newest signal: 2026-09-10`, and **nowhere the current date**. `grep -n
+"today\|now(\|date.today" catalyst/research/prompts.py` returned nothing.
+
+| prompt | what it asked | what it was never told |
+|---|---|---|
+| research | question 6: *"has the market already consumed these filings?"* | today's date — the question is **entirely** about elapsed time |
+| hunt | *"the event must resolve today or later"*, enforced by code against `as_of.date()` | the date `as_of` actually is |
+| position review | `next_check_in_days`, *"number of days from today"*; `CLOSES: <date> (fixed)` | today, so also how many days were left |
+
+The hunt case is the sharpest: `as_of` has been a parameter of
+`render_hunt_prompt` since it was written and went only to `_digest` and
+`_validate`. So the **gate** was measured from a date the **prompt**
+never named. §3 row 12 fixed the 88%-rejection defect by stating the
+RULE; it did not supply the date the rule is measured against. Both
+halves were needed and only one had shipped.
+
+**Why this is quiet rather than dramatic.** The model reasons fluently
+about "Sept 10" without knowing whether Sept 10 was yesterday or last
+month, and nothing in the reply reveals which it assumed. Read the CHYM
+thesis: it argues confidently about a Sept 10 pullback and a Sept 2
+acquisition rally and never once states how long ago either was. It is
+not possible to tell from the output whether the dating was right.
+
+### What changed
+
+- **Every prompt opens with `RIGHT NOW`**: the ISO date, the weekday and
+  the UTC time. The weekday matters — "this is a Saturday" carries that
+  EDGAR has filed nothing and the market has been shut for a day.
+- **The research prompt states the evidence's age in days**, computed from
+  `now - candidate.catalyst_date`. That is the arithmetic `priced_in`
+  turns on, done rather than left to the model. A future-dated catalyst
+  (every hunted one, by rule) reads `N day(s) in the FUTURE`, never
+  `-N day(s) ago`.
+- **The market state is stated**, derived from `MarketSnapshot.priced_off`
+  rather than from a new parameter — one source of truth, and house
+  rule 7: anything that is not `live_nbbo` is not live, including a
+  provenance invented later. **`None` is not "closed"**: a missing
+  snapshot means nobody looked, and saying the market is shut when nobody
+  looked is the same class of error in the other direction.
+- **The review prompt says how long it has been held and how many days
+  remain.** Six days left and one day left want different answers, and
+  it was printing the exit date with no distance to it. An unreadable
+  date produces **no day count at all** rather than a confident wrong
+  one.
+- **`now` is passed in, never read from the clock inside a renderer**, so
+  a prompt is reproducible and a test can pin it (house rule 6). It
+  falls back to the real clock because *no* date is the defect being
+  fixed — a caller that forgets must not silently reintroduce it.
+
+### THE SECOND DEFECT, and this one was a falsehood rather than a gap
+
+`build_closed_market_snapshot` sets `half_spread_bp = 100000` on purpose:
+a closed book has no spread, and **zero** is the one value that would
+sail through the owner's 20bp hard bound as the tightest book ever
+measured (§13, risk review F5). Correct for the risk engine, which
+refuses the snapshot on `priced_off` anyway.
+
+**It was going straight into the prompt.** Verbatim, on every
+closed-market research call:
+
+```
+  - half-spread now: 100000 bp. This is what it costs to get in and out;
+    a thesis worth less than the round trip is not a trade.
+```
+
+A 1000% round trip kills every thesis that exists, stated under a
+heading that claims the number was measured. All four closed-market
+calls on record returned `no_trade`. **That is not proof of causation** —
+their theses argue coincidence, not cost — but the prompt was asserting
+a falsehood about the single number most likely to end the conversation.
+
+Fixed by reporting it as **unmeasurable**, not by hiding it: silence
+would be filled by the model, and the round trip is a real cost on the
+microcaps this screen surfaces (BWFG measured 99.2bp half-spread and was
+correctly refused). The sentinel itself is untouched, and a test asserts
+the risk engine still sees `100000`.
+
+### The generalising lesson
+
+**A value chosen to be refused by one consumer was displayed as a
+measurement by another.** The docstring explains at length why the number
+must be absurd, and the renderer two modules away read it as data. This
+is the same shape as §17 (a diagnosis discarded at the point of writing)
+and §14 (`orders.decision_id` holding a candidate id): *a field's meaning
+lived in one module's comments and every other reader took it at face
+value.* When a sentinel is introduced, grep for who renders the field.
+
+### Verification
+
+- Full suite green offline: **4014 tests**.
+- **29 sabotage breakages, all 29 caught red**, each verified to still
+  import first — 25 in round one (22 red) and the 3 that came back GREEN
+  re-run after fixes, plus a fourth for the same wiring.
+
+**The three that were GREEN, and two of them were real test weaknesses
+of exactly the kind §6 opens with.** Worth recording because the cause is
+general and it will recur wherever a parameter has a sensible default:
+
+| sabotage | why it passed | the fix |
+|---|---|---|
+| `investigate` stops passing the clock | `render_research_prompt(now=None)` falls back to the real clock, so "the date is present" stayed true with the wiring cut | a behavioural test that passes a date the wall clock cannot produce (`2019-03-14`) and asserts it in the prompt actually sent |
+| `run_cycle` stops passing the clock | the call-site grep `"now=now)" in src` found the **other** one, `ensure_history(..., now=now)` | a whole cycle is run with the harness clock and the recorded `prompt_rendered` is read back |
+| the hunt clock moved after the hard date rule | **a flawed sabotage** — it deleted the `RIGHT NOW` heading rather than moving the block, so the ordering property was never exercised | rewritten as two edits that genuinely relocate the text to the end of the parts list; it then goes red |
+
+**THE DEFAULT HIDES THE WIRING.** `now=None` reading the real clock is the
+right behaviour — a caller that forgets must not silently reintroduce the
+defect — and it is exactly what makes "the date is in the prompt" a test
+of the renderer rather than of the plumbing. §6's rule (*assert the call
+site, not just the function*) needs a corollary: **a substring that also
+occurs elsewhere in the same function is not a call-site assertion.**
+
+**And a new process failure: a stale `.pyc` survived the restore.** The
+harness rewrote the original bytes, but the `__pycache__` entry had been
+written in the **same second** with the same source size, so Python's
+mtime+size validity check accepted the sabotaged bytecode and the suite
+failed against a source file `git status` reported clean. Ten minutes lost
+hunting a phantom. **A sabotage harness must clear `__pycache__` after
+restoring**, not merely restore the source.
+
+### What is NOT claimed
+
+- **Whether knowing the date changes any judgement is unmeasured.** The
+  claim is narrower and checkable: the model was answering a question
+  about elapsed time without being given the time elapsed, and now it is.
+  Whether `priced_in` stops being set on 95% of candidates is the number
+  to watch, per arm, on the Pipeline page.
+- **No production call has been billed with the clock in the prompt.**
+
+---
+
+## 23. The card cut off at the risk engine, and nothing said what was queued
+
+Owner-reported 2026-09-13, on the CHYM decision card and the AAPL
+tracked-stock row:
+
+> *"I can see the graph its made but stops at what the deterministic
+> engine did and what happened at the broker it just seems to cut off"*
+>
+> *"the graph is looking good however, these references dont actually
+> mean anything to me"*
+>
+> *"I can see it was doing active research and finding potential stocks
+> on 12/09, this is good. What did it do, are any queued up its not clear
+> anywhere what it is doing."*
+>
+> *"why cant it just make the API call to immediately get the historical
+> predicted data for tracking on the graph, why do i need to wait a day
+> when the data is available"*
+
+### 1. It cut off because there were three arms and the third was the risk engine
+
+Literally. `_spider_groups` returned `saw / concluded / did`, and
+`decision_spider` hard-capped `groups[:3]`. **The story of a decision
+does not end at the risk engine** — it ends at a fill, or at a sentence
+saying why there was never going to be one.
+
+**And the declined case is not an edge case, it is 293 of 294 decisions.**
+So "nothing was sent, the risk engine declined" plus "here is what the
+stock did without us, or that it is not scored yet" *is* the outcome in
+almost every card. Drawing nothing there is what made the page look
+truncated.
+
+**A fourth arm needed a fourth colour, and the note in the code said
+three was the cap.** So it was measured rather than argued — CIE76 ΔE in
+Lab, Vienot LMS simulation for deuteran/protan/tritan, against this
+dashboard's own two surfaces:
+
+| | worst normal ΔE | worst CVD ΔE | min contrast |
+|---|---|---|---|
+| light, 3 arms | 94.2 | 22.5 | 2.82:1 |
+| **light, 4 arms** | 42.8 | **22.5** | 2.82:1 |
+| dark, 3 arms | 87.2 | 7.8 | 4.66:1 |
+| **dark, 4 arms** | 25.5 | **7.8** | 4.66:1 |
+
+**The worst CVD pair is unchanged in both themes** — it is series-1
+against series-3, which was already the binding pair and which the fourth
+colour does not come between. Normal-vision worst pair falls and stays
+well clear of 14.9, the last figure §18 measured as reliable. The fourth
+is `--cmp-2`, an **existing** token, so there is no second palette to
+drift out of step. Slate was not considered: §18 already rejected it for
+reading as chrome.
+
+**The cap is now `[:len(SPIDER_SLOTS)]`, not `[:3]`.** The colour index is
+`gi % len(SPIDER_SLOTS)`, so a typed cap and the palette could disagree —
+and a fifth arm would have silently redrawn in the first arm's hue.
+
+### 2. The references were machine references, and the describer already existed
+
+| where | was | is |
+|---|---|---|
+| spider leaf | `Market news (Alpaca)`, accession in the hover | `Chime Financial Stock Pulls Back Thursday`, reference in the hover |
+| spider leaf | `edgar fts` | `"credit agreement" "amendment"` |
+| unnamed graph entity | `3f9c1ab24e7d4c8fa1b25e6d9c704f11` | dropped from the picture, still in the verbatim table |
+| full-record fold | `source event edgar_fts:0001193125-26-385383:credit_amendment fetched …` | the headline, the feed, the time — and a link to the source the feed actually fetched |
+
+**`queries._describe_source` has read those payloads since §10b** — for
+the **trade card alone**, which exists for one candidate in seven
+thousand. §6's "a helper nobody calls", in its other form: a helper only
+*one* caller reaches, on the page almost nobody opens. It is `describe_source`
+now, takes the payload as stored or as JSON text, and the spider and the
+full record both call it.
+
+**`edgar_fts` had no entry in `SOURCE_LABELS`,** so it read as
+`edgar fts` — and it is the feed behind the conjunction arm, which took
+48% of the research budget. The one machine name most likely to be on the
+page was the one missing from the table. Found by rendering the owner's
+own card, not by a test.
+
+**Readability is a RULE, not a list of id formats** (house rule 7): a
+label whose letters do not carry it, or which contains no word of three
+letters, is a machine reference whatever scheme produced it. A hand-written
+list of formats mislabels the first format nobody thought of.
+
+**And the rule's first version was wrong, found by rendering.** It
+required `word.isalpha()`, and an EDGAR full-text match is stored as
+`"credit agreement" "amendment"` — **every word carries a quote**, so
+`isalpha()` was False for all of them and a perfectly readable phrase was
+thrown away in favour of the feed's machine name. It counts letters
+*inside* each word now.
+
+### 3. "What is it doing" — the figures were all on disk and nothing assembled them
+
+The Pipeline page counts a **lifetime** population: 6,999 candidates,
+299 researched. That answers *what has happened* and structurally cannot
+answer *what is happening*. And its largest single drop reason is
+**`deferred_max_research_per_cycle` at 6,581** — that IS the queue,
+named, counted, and never once described as one. The owner read a
+six-thousand-line loss with nothing anywhere saying those candidates were
+still in the running.
+
+`working_on()` now sits **above** the funnel on `/funnel` and answers four
+questions in the order a reader asks them:
+
+1. **When did it last spend anything, and when was the newest candidate
+   built** — two separate facts, because discovering-but-not-researching
+   is a different problem from doing neither, and one number cannot say
+   which.
+2. **Queued / judged-and-waiting-for-the-open / finished / paid calls
+   today**, each counted from rows. The weekend state gets its own count:
+   it is not queued (it has been judged and costs nothing more) and not
+   finished (no risk decision).
+3. **The rate, stated as arithmetic the reader can check** — slots per
+   cycle × cycle length — and explicitly **not a countdown**, because the
+   screens rebuild the candidate list every cycle so the queue grows while
+   it drains. Plus that nothing in the queue is discarded.
+4. **The next eight names.**
+
+**TRIED AND CORRECTED BEFORE SHIPPING:** the first version ordered the
+next-in-line list by `discovered_at DESC` and captioned it *"the order
+the belt takes them in"*. **That was an unverified claim about code, and
+`interleave_by_arm`'s own docstring contradicts it** — the belt
+round-robins one per arm per round, and within an arm it preserves the
+live builder's order, which the database cannot replay. So the rotation
+is now applied **by calling the cycle's own function**, and the caption
+admits what cannot be reproduced instead of papering over it. Caught by
+reading the function before describing it (house rule 1).
+
+### 4. The new stock is fetched on the add, and the wait was already not a day
+
+§19 had cut it from a day to **one cycle** by keying the refresh marker on
+the tracked SET as well as the date. But one cycle is up to fifteen
+minutes of an empty row, and **an empty row is indistinguishable from a
+mistyped ticker** — the state this dashboard has been reported for twice.
+
+So `track_stock` now fetches immediately, through the **same**
+`refresh_comparisons` the scheduler calls. Three things make that safe
+rather than clever:
+
+- `refresh_benchmark` promises not to raise and `refresh_comparisons`
+  wraps it again, so a failed fetch cannot cost the row.
+- **The row is committed before the fetch runs.** A failure, a timeout or
+  a dead process leaves the stock tracked and the scheduler picks it up
+  next cycle exactly as before — this is an accelerator, never the only
+  path. A test asserts that with a fetch that raises.
+- It writes a bar cache file and nothing else. `grep` over `risk/`,
+  `execution/` and `cost/` for the function returns nothing, and a test
+  holds that.
+
+The sentence the owner gets says **what happened**, not what was
+attempted: bars written and the feed, or the refusal with the raw upstream
+response and *"either the spelling is wrong, or it is not US-listed"* —
+which is where a London ticker such as VUAG reports itself, since the form
+accepts it by shape on purpose (§20).
+
+### The generalising lesson, and it is the fourth time
+
+**A fact the system already had, one caller away from the page that needed
+it.** §17 (the diagnosis discarded at the point of writing), §14
+(`orders.decision_id`), §22 (the spread sentinel), and now the source
+describer reachable only from the trade card. In every case the work was
+done and the wiring was missing. **When a panel is reported as confusing,
+grep for whether the fact already exists somewhere else in the codebase
+before writing anything new.**
+
+### Verification
+
+- Full suite green offline: **4087 tests**.
+- **36 sabotage breakages, all 36 caught red**, each verified to still
+  import first. 31 red on the first pass; **four of the five greens were
+  real test weaknesses** and one was a flawed sabotage.
+
+| green | why it passed | the fix |
+|---|---|---|
+| the uuid guard (mindmap) | asserted against `trace_simple`, which does not render the mindmap at all | re-asserted on the FULL record, reading the SVG's `<text>` elements |
+| the uuid guard (spider) | the spider reads `subject_label` only, so `subject_entity_id` **cannot reach it** | the same defect wearing the other hat is reachable — an entity whose stored `display_name` IS a machine reference. Seeded, and the guard is now load-bearing |
+| the weekend-view count | no LIVE view in the fixture, so `priced_off != 'live_nbbo'` → `1=1` changed nothing | a live view with no decision — an ordinary Tuesday — seeded; the counts moved 54/6 → 53/7 because of it |
+| dash-not-zero | used a MISSING database, which returns early and never reaches the per-count handler | a database that opens with one table present does reach it, and the error must name the table that was not there |
+| "nothing is discarded" | **a flawed sabotage**: it blanked the last string fragment while the sentence lives in an earlier one | retargeted at the sentence, then red |
+
+### AND PINNING THAT TEST FOUND A REAL DEFECT IN MY OWN RULE
+
+Worth its own heading because it is the second time in one change that a
+readability rule was wrong, and the first version of the fixture could
+not have caught it.
+
+The fixture used entity ids `g1`..`g4`. **Production writes
+`uuid.uuid4().hex`.** With realistic ids the mindmap fallback drew a box
+reading `a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6` — and measured, that string is
+**sixteen letters in thirty-two characters**, because its digits happen to
+be mostly `a`–`f`. The rule at that point was *"letters carry at least
+half the string, plus a token containing three letters"*, and a hex id
+like that clears **both** halves.
+
+The rule is now about **word shape**: a word is a run of letters with
+punctuation stripped from its ends, and a label is readable when it has at
+least one word **and** words carry at least half the characters. No hex
+case and no list of id formats (house rule 7), so:
+
+| label | readable |
+|---|---|
+| `"credit agreement" "amendment"` | yes |
+| `Bern Richard (CEO) bought 141,000 shares at $70.96` | yes |
+| `a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6` | no |
+| `61720763:CHYM` | **no** — a reference with a real word stuck to it is still a reference |
+| `0001193125-26-385383` | no |
+
+**Three defects in this change were found by running it, none by
+inspection:** `isalpha()` discarding the quoted EDGAR phrase, the missing
+`edgar_fts` label, and the hex id clearing the letter-fraction rule. Plus
+the unverified claim about the belt's order, found by reading
+`interleave_by_arm` before describing it.
+
+**A fixture that cannot produce the input the owner reported cannot test
+the fix.** `g1` is unreadable under every version of the rule, so the
+fixture agreed with the bug — the same shape as §14's foreign-keys-off
+fixture, in miniature.
+
+### AND THE UPGRADE CHECK FOUND A FOURTH, which no test could have
+
+Run rather than assumed: a database built from the schema at `e7d4961`
+(before this session), then today's `init_db` over it — what the service
+does on start after `upgrade.sh` pulls.
+
+| check | result |
+|---|---|
+| tables added by this session | **none** |
+| tables lost | none |
+| existing rows preserved | every one |
+| `PRAGMA foreign_keys` | 1 |
+| every page this session touched | rendered, no exception |
+
+**What it found:** a view written before `research_view_context` existed
+has no provenance row — so on the new panel it was in **neither** the
+weekend count, **nor** the finished count, **nor** the queue. It fell out
+of the arithmetic entirely, and every candidate on that database is in
+that state. That is the shape of every "the numbers do not add up" report
+this dashboard has had.
+
+Fixed by counting `awaiting_decision` — any view with no risk decision —
+and keeping the weekend figure as its **named subset** rather than as a
+stand-in for it. A test now asserts
+`queued + judged + finished == candidates`, so a fourth state added later
+cannot quietly fall out of the total. And an unrecorded provenance is
+**not** read as "the market was shut": unknown and closed are different
+facts, the same asymmetry §22 needed for `market_is_live`.
+
+**38 sabotage breakages, all 38 caught red.** Full suite green offline:
+**4089 tests**.
+
+Two of the original 37 came back **NOT APPLIED** on the final pass, and
+that is recorded as not applied rather than as caught (§18): they targeted
+the *old* readability rule, which the hex-id defect above replaced. They
+were retargeted at the word-shape rule — drop the guard entirely, drop the
+words-carry-half condition, and count a token with digits in it as a word
+— and all three go red. **A sabotage suite rots when the code it points at
+changes**, and the tell is a NOT APPLIED count, which is why the harness
+asserts every replacement's expected occurrence count.
+
+### What is NOT claimed
+
+- **No tracked stock has ever been fetched from the dashboard in
+  production.** The chain is verified offline with an injected transport.
+- **Whether four arms is more readable than three is a judgement the
+  owner will make by looking at it.** The ΔE table says only that the
+  fourth colour costs nothing measurable in separability, and every arm
+  carries a visible text label, so colour is never the identifier.

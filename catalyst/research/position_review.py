@@ -318,18 +318,58 @@ def apply_review(review: PositionReview, position: dict,
         "reviewed with no opinion reached - the exit date is unchanged")
 
 
-def render_prompt(position: dict, view: dict, market: dict) -> str:
+def _days_between(a, b) -> int | None:
+    """(b - a) in whole days, or None if either is not a readable date.
+
+    Both come from the database as text, so this parses rather than
+    trusts - an unreadable date must produce no sentence at all, never a
+    confident wrong number of days.
+    """
+    try:
+        start = date.fromisoformat(str(a)[:10])
+        end = date.fromisoformat(str(b)[:10])
+    except (TypeError, ValueError):
+        return None
+    return (end - start).days
+
+
+def render_prompt(position: dict, view: dict, market: dict,
+                  now: datetime | None = None) -> str:
     """What the model sees. Facts only; it is never told the P&L in a
     way that invites loss aversion, but it IS told the price move,
     because a thesis that predicted a move which did not happen is
-    evidence about the thesis."""
+    evidence about the thesis.
+
+    `now` is rendered into the prompt. IT WAS NOT, AND THIS PROMPT ASKS
+    TWO QUESTIONS THAT NEED IT: it prints a fixed exit date without
+    saying how far away it is, and it asks for `next_check_in_days` as a
+    "number of days from today" while never naming today. A model that
+    does not know the date cannot tell a position with six days left
+    from one with one day left, and those want different answers.
+    Owner-asked 2026-09-13. Defaults to the real clock because no date
+    is the defect.
+    """
+    now = now or datetime.now(timezone.utc)
+    opened = position.get('opened_at_date', '?')
+    closes = position.get('planned_exit_date', '?')
+    held = _days_between(opened, now.date().isoformat())
+    left = _days_between(now.date().isoformat(), closes)
     lines = [
         "REVIEWING AN OPEN POSITION. Your job is to say whether the "
         "original thesis still holds, and nothing else.",
         "",
+        f"RIGHT NOW: today is {now.date().isoformat()}, a "
+        f"{now.strftime('%A')}, {now.strftime('%H:%M')} UTC.",
         f"TICKER: {position.get('ticker', '?')}",
-        f"OPENED: {position.get('opened_at_date', '?')}  "
-        f"CLOSES: {position.get('planned_exit_date', '?')} (fixed)",
+        f"OPENED: {opened}  CLOSES: {closes} (fixed)",
+        (("Held " + (f"{held} day(s)" if held is not None else "an "
+                     "unrecorded number of days"))
+         + ("; " + (f"{left} day(s) remain before that exit date."
+                    if left is not None and left > 0 else
+                    "the exit date is TODAY." if left == 0 else
+                    f"the exit date passed {-left} day(s) ago."
+                    if left is not None else
+                    "the days remaining could not be computed."))),
         "",
         "THE THESIS WRITTEN AT ENTRY",
         str(view.get("thesis") or "(none recorded)"),
@@ -643,7 +683,7 @@ def review_position(conn, position: dict, view: dict, market: dict,
     model = model or DEFAULT_REVIEW_MODEL
     position_id = str(position.get("id") or "")
     ticker = str(position.get("ticker") or "")
-    prompt = render_prompt(position, view, market)
+    prompt = render_prompt(position, view, market, now=now)
     call_id = str(uuid.uuid4())
     cost_cents = Decimal("0")
 

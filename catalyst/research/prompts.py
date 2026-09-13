@@ -22,6 +22,7 @@ Design rules, enforced by tests/test_discovery.py:
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from catalyst.discovery import Candidate
@@ -105,6 +106,99 @@ def _signals_block(signals: list) -> str:
     return "\n".join(lines)
 
 
+#: What `MarketSnapshot.priced_off` means about the book being open.
+#: Classified by the RULE rather than by a list of provenance strings
+#: (house rule 7): the one value that means a live two-sided quote is
+#: `live_nbbo`, and anything else - today's or a later session's cached
+#: close - means the book was shut when the number was taken.
+LIVE_PROVENANCE = "live_nbbo"
+
+
+def market_is_live(market) -> bool | None:
+    """True, False, or None when there is no snapshot to ask.
+
+    None is NOT "closed". A missing snapshot means nobody looked, and
+    telling the model the market is shut when nobody looked is the same
+    class of mistake as telling it the spread is 1000%.
+    """
+    if market is None:
+        return None
+    priced_off = str(getattr(market, "priced_off", "") or "")
+    if not priced_off:
+        return None
+    return priced_off == LIVE_PROVENANCE
+
+
+def render_as_of_section(now: datetime | None = None, market=None,
+                         candidate: Candidate | None = None) -> str:
+    """WHAT DAY IT IS. The prompt did not say, and it was being asked to.
+
+    OWNER-ASKED 2026-09-13: *"is the bot 100% aware of the active current
+    date and time it is making these searches?"*
+
+    IT WAS NOT, AND THE ANSWER IT WAS BEING ASKED FOR DEPENDS ON IT.
+    Measured from the owner's own bundle - the verbatim prompt for
+    candidate `conj-b3caf562223b246f8844` (CHYM, 2026-09-13T00:06) - the
+    rendered text carried "2026-09-08", "2026-09-10" and "Newest signal:
+    2026-09-10", and **nowhere said what today was**. Nor did the hunt
+    prompt, whose one hard rule is that a nominated catalyst date must be
+    "today or later"; nor did the position-review prompt, which asks for
+    a check-in "number of days from today".
+
+    So the model had to infer the current date from the evidence dates
+    plus its own training cut-off, and then answer question 6 -
+    "has the market already consumed these filings?" - which is
+    ENTIRELY a question about how much time has passed. A filing two
+    days old and a filing five weeks old get opposite answers, and the
+    difference was not on the page.
+
+    It is a frequent, quiet failure rather than a dramatic one: the
+    model reasons fluently about "Sept 10" without knowing whether Sept
+    10 was yesterday or last month, and nothing in the reply reveals
+    which it assumed.
+
+    THE TIME IS PASSED IN, never read from the clock here, so a rendered
+    prompt is reproducible and a test can pin it (house rule 6). It
+    falls back to the real clock because a prompt with no date is the
+    defect being fixed - a caller that forgets must not silently
+    reintroduce it.
+    """
+    now = now or datetime.now(timezone.utc)
+    lines = ["RIGHT NOW",
+             f"Today is {now.date().isoformat()}, a "
+             f"{now.strftime('%A')}, and the time is "
+             f"{now.strftime('%H:%M')} UTC. Every date in this prompt is "
+             "a real calendar date; this one is today. Judge how stale a "
+             "piece of evidence is against it rather than against your "
+             "own sense of when 'now' is."]
+    live = market_is_live(market)
+    if live is True:
+        lines.append(
+            "The US equity market is OPEN, and the price below is a live "
+            "quote taken moments ago.")
+    elif live is False:
+        lines.append(
+            "The US equity market is SHUT right now. The price below is "
+            "the newest CACHED DAILY CLOSE, not a live quote, and no "
+            "order can be placed until the next open - so your view will "
+            "be sized against the price at that open, not this one. If "
+            "the stock gaps past its own normal daily range before then, "
+            "code discards this view and asks again at the real price. "
+            "Weekend and holiday evidence is still worth judging: EDGAR "
+            "does not file, so what is new is news and what you find "
+            "yourself.")
+    if candidate is not None and candidate.catalyst_date is not None:
+        days = (now.date() - candidate.catalyst_date).days
+        lines.append(
+            "The newest piece of evidence on this candidate is dated "
+            f"{candidate.catalyst_date.isoformat()}, which is "
+            + ("today" if days == 0 else
+               f"{days} day(s) ago" if days > 0 else
+               f"{-days} day(s) in the FUTURE")
+            + ".")
+    return "\n".join(lines)
+
+
 def render_market_section(market) -> str:
     """The numbers the model is asked to reason about.
 
@@ -127,16 +221,53 @@ def render_market_section(market) -> str:
         return ("MARKET DATA\nUnavailable for this candidate at decision "
                 "time. Treat any claim about what the price has already "
                 "done as unverified.")
+    live = market_is_live(market)
     lines = ["MARKET DATA, measured at decision time (not from the model)"]
     last = getattr(market, "last_close", None)
     if last is not None:
-        lines.append(f"  - last close: ${last}")
+        lines.append(
+            f"  - last close: ${last}" if live is not False else
+            f"  - newest cached daily close: ${last} (the market is shut; "
+            "this is not a live quote)")
+    # THE SPREAD WAS A REFUSING SENTINEL, RENDERED AS A MEASUREMENT.
+    #
+    # `build_closed_market_snapshot` sets `half_spread_bp = 100000`
+    # deliberately: a closed book has no spread, and ZERO is the one
+    # value that would sail through the owner's 20bp hard bound as the
+    # tightest book ever measured. That is right for the risk engine,
+    # which refuses the snapshot on `priced_off` anyway.
+    #
+    # IT WAS ALSO GOING STRAIGHT INTO THE PROMPT. Measured from the
+    # owner's 2026-09-13 bundle, every weekend research call read:
+    #
+    #     - half-spread now: 100000 bp. This is what it costs to get in
+    #       and out; a thesis worth less than the round trip is not a
+    #       trade.
+    #
+    # A 1000% round trip kills every thesis that exists. The four
+    # closed-market calls on record all came back `no_trade`, which is
+    # not proof of causation - their theses argue coincidence - but the
+    # prompt was stating a falsehood about the single number most likely
+    # to end the conversation, under a heading claiming it was measured.
+    #
+    # So an unmeasurable spread is reported as unmeasurable. Silence is
+    # not an option either: the model would fill it, and the round trip
+    # genuinely is a real cost on the microcaps this screen surfaces
+    # (BWFG measured 99.2bp half-spread and was refused).
     spread = getattr(market, "half_spread_bp", None)
-    if spread is not None:
+    if spread is not None and live is not False:
         lines.append(
             f"  - half-spread now: {spread} bp. This is what it costs to "
             "get in and out; a thesis worth less than the round trip is "
             "not a trade.")
+    elif spread is not None:
+        lines.append(
+            "  - half-spread: NOT MEASURABLE while the market is shut - "
+            "there is no live book to read one from, so treat the round "
+            "trip as unknown rather than as cheap or expensive. Code "
+            "measures it at the open and refuses the entry outright if "
+            "it is too wide, so do not try to guess the number; if this "
+            "name is plausibly thin, say so in the thesis.")
     # WHAT THE PRICE HAS ALREADY DONE. Question 6 below asks exactly
     # this and the block used to carry none of it, leaving a web search
     # as the only route to an answer the cached bars can state exactly.
@@ -247,9 +378,16 @@ def render_research_prompt(candidate: Candidate,
                            graph_context: str | None = None,
                            signals: list | None = None,
                            market=None,
-                           record: str | None = None) -> str:
+                           record: str | None = None,
+                           now: datetime | None = None) -> str:
     """`record` is the bot's own recent outcomes, rendered by
-    research/record.py, or None when there is nothing to say yet."""
+    research/record.py, or None when there is nothing to say yet.
+
+    `now` is the decision time. It is rendered into the prompt - see
+    `render_as_of_section` for the measurement that made that necessary -
+    and defaults to the real clock so a caller that forgets gets a
+    correct date rather than none.
+    """
     searches = searches_for(candidate, signals)
     sections: list[str] = []
     sections.append(
@@ -259,6 +397,11 @@ def render_research_prompt(candidate: Candidate,
         "trade, or name order types, entries, stops or exits — none of "
         "that is yours to decide."
     )
+    # SECOND, not first. The opening paragraph is the stable standing
+    # instruction; the clock goes immediately after it so it is read
+    # before any dated evidence, and well before question 6 asks how
+    # much of the move has already happened.
+    sections.append(render_as_of_section(now, market, candidate))
     if signals:
         # A CONJUNCTION IS A DIFFERENT QUESTION, so it gets a different
         # brief. The insider-cluster framing below asks "is this cluster

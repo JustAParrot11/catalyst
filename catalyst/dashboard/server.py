@@ -214,8 +214,15 @@ def route_funnel(db: Db, params: dict) -> str:
     # says candidates stopped at the model; this says how far short they
     # were, which is the difference between a floor two points too high
     # and a strategy with nothing to say.
+    # WHAT IT IS DOING *NOW*, ABOVE THE LIFETIME FUNNEL. Owner-asked
+    # 2026-09-13: "are any queued up its not clear anywhere what it is
+    # doing". The funnel is a lifetime population and cannot answer that
+    # - its largest single row, `deferred_max_research_per_cycle` at
+    # 6,581, IS the queue and was never described as one. First, because
+    # it is the question the reader arrived with.
     return render_page("Funnel",
-                       panels.funnel_panel(db, p="funnel")
+                       panels.working_on(db, p="doing")
+                       + panels.funnel_panel(db, p="funnel")
                        + panels.conviction_panel(db, p="conv")
                        + panels.origin_panel(db, p="origin"),
                        "/funnel", db.path, db=db)
@@ -1194,11 +1201,80 @@ def track_stock(db_file: str, form: dict) -> tuple[bool, str]:
                        f"{type(exc).__name__}: {exc}")
     finally:
         conn.close()
+    note = _fetch_one_comparison_now(added.ticker)
     return True, (
         f"Tracking {added.ticker}: ${added.capital_cents / 100:,.2f} bought "
-        f"on {added.start_date}. Its line appears on the performance chart "
-        "once the bot's next daily refresh has cached its closes; until then "
-        "the row above says so, with the exact upstream response.")
+        f"on {added.start_date}. {note}")
+
+
+def _fetch_one_comparison_now(ticker: str) -> str:
+    """Fetch this symbol's closes immediately, and say what happened.
+
+    OWNER-ASKED 2026-09-13: *"why cant it just make the API call to
+    immediately get the historical predicted data for tracking on the
+    graph, why do i need to wait a day when the data is available"*.
+
+    THE WAIT WAS ALREADY DOWN TO ONE CYCLE, NOT A DAY - §19 keyed the
+    refresh marker on the tracked SET as well as the date, so adding a
+    stock stops the marker matching and the next pass fetches it. But one
+    cycle is up to fifteen minutes of an empty row, and an empty row is
+    indistinguishable from a mistyped ticker, which is the state this
+    dashboard has been reported for twice.
+
+    So the fetch happens here, on the add, using the SAME function the
+    scheduler calls. Three reasons that is safe rather than clever:
+
+      - `refresh_benchmark` promises not to raise, and
+        `refresh_comparisons` wraps it again for the day that promise is
+        broken by an edit. A failed fetch has to leave the row written.
+      - The row is already committed before this runs. If the fetch
+        fails, is slow, or the process dies mid-request, the stock stays
+        tracked and the scheduler picks it up on the next cycle exactly
+        as it did before - this is an accelerator, never the only path.
+      - It reads nothing and writes nothing in the database. It writes a
+        bar cache file, and `grep` over `risk/` and `execution/` for this
+        function returns nothing.
+
+    Returns the sentence to show the owner, which always says what
+    actually happened rather than what was attempted - house rule 2 in
+    the one place the owner reads directly.
+    """
+    from catalyst.dashboard.db import bars_path
+
+    later = ("Its line appears once the bot's next cycle has cached its "
+             "closes; until then the row above says so, with the exact "
+             "upstream response.")
+    try:
+        from catalyst.data.benchmark import refresh_comparisons
+        from catalyst.setup.credentials import load_credentials
+
+        creds = load_credentials()
+    except Exception as exc:  # noqa: BLE001 - shown, never raised
+        return (f"The closes were not fetched now ({type(exc).__name__}: "
+                f"{exc}). {later}")
+    if not creds.alpaca_key or not creds.alpaca_secret:
+        return ("No Alpaca credentials are saved, so there is nothing to "
+                "fetch the closes with. Save them on the Setup page and "
+                "the next cycle will fill this line in.")
+    results = refresh_comparisons(bars_path(), creds.alpaca_key,
+                                  creds.alpaca_secret, [ticker])
+    result = results.get(str(ticker or "").strip().upper())
+    if result is None:
+        # The one symbol refresh_comparisons skips by design.
+        return later
+    if result.skipped_reason and result.skipped_reason != "already_current":
+        # HOUSE RULE 3: the raw upstream response beside the zero. This is
+        # also where a London ticker such as VUAG reports itself - the
+        # form accepts it by shape on purpose (house rule 7), and this is
+        # the moment it can say it has no US bars.
+        return (f"Its closes could NOT be fetched: "
+                f"{result.skipped_reason}. Upstream said, unedited: "
+                f"{(result.raw_response or '(nothing)')[:300]}. Either the "
+                "spelling is wrong, or it is not US-listed. The line will "
+                "stay empty until that is fixed.")
+    return (f"Its closes were fetched immediately on the "
+            f"{result.feed or 'default'} feed, {result.written} bar(s) "
+            "written, so its line is on the performance chart now.")
 
 
 def untrack_stock(db_file: str, form: dict) -> tuple[bool, str]:
