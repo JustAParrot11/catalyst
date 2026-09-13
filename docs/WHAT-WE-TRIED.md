@@ -1883,3 +1883,161 @@ test caught it before the owner did.
 - **5 sabotage breakages, all 5 caught red** after the tests were pinned
   to regions; all 5 green before. Each verified to still import first.
 - Full suite green offline: **3963 tests**.
+
+---
+
+## 21. The prompt cache was never asked for, and the fix is narrower than it looks
+
+Owner-reported 2026-09-13: an Anthropic usage tip offered a **57% saving**
+with the warning *"Your prompt cache hit rate is low"*, and asked whether
+that is unavoidable given what the bot does.
+
+**It was not unavoidable, and it was not subtle: `cache_control` appeared
+NOWHERE in the request path.** The bot already *measured* cache tokens for
+costing — `cache_read_input_tokens`, `cache_creation_input_tokens`, even
+`ephemeral_1h_input_tokens` — and never set the flag that creates an
+entry. The hit rate was zero by construction.
+
+### Measured before building: the cross-call saving is IMPOSSIBLE, and must stay that way
+
+Two candidates' rendered prompts were diffed:
+
+```
+prompt A: 5,705 chars   prompt B: 5,705 chars
+COMMON PREFIX: 300 chars (~75 tokens) = 5.3% of the prompt
+  diverges at: "...CANDIDATE\nTicker: " >>> "AAPL" / "NVDA"
+```
+
+The ticker is the **third line**. The cacheable minimum is **1024 tokens
+on Sonnet 5** (512 on Opus 5, 4096 on Opus 4.6/Haiku 4.5 — *not*
+monotonic across generations), so a cross-call breakpoint would silently
+never cache.
+
+**The obvious fix is to reorder the prompt** — standing brief first,
+candidate last — and it is **deliberately refused**. That changes what the
+model reads first, which changes the judgement this entire project exists
+to measure, and would make the live record incomparable with its own
+history. A cost saving does not buy that. `test_the_prompt_cache_is_asked_for.py`
+asserts the shared prefix is *still* under the minimum, so if someone
+reorders the prompt later the suite tells them they have made a
+judgement-affecting change rather than a cost one.
+
+### Where the money actually is: WITHIN one call
+
+One research call is **up to four requests** — two exploration turns, a
+forced extraction, and a repair — and `messages` **accumulates**, so every
+turn resends the whole conversation including web-search results measured
+at **34k input tokens median, 166k max**. The prompt is byte-identical
+across all of them.
+
+| | cost |
+|---|---|
+| cache write, 5-min TTL | 1.25× input |
+| cache write, 1-hour TTL | 2.0× input |
+| cache read | **0.10× input** |
+
+A write costs **+0.25×** once; each read saves **0.90×**. Break-even is
+two requests (1.25 + 0.10 = 1.35 vs 2.0); the normal call is three or
+four.
+
+**One explicit breakpoint, on the prompt, and nothing else.** Three
+reasons, each from the caching reference rather than preference:
+
+- **The growing tail needs no marker from us.** Once a request uses
+  caching at all, the API inserts its own 5-minute write after
+  server-tool results — so the search output, the expensive part, is
+  covered without this code guessing where a second breakpoint belongs.
+- **Marking the tail ourselves is the documented way to waste money**: a
+  write premium on bytes nothing reads back. Not done until the ledger
+  says otherwise.
+- **Four breakpoints is the API limit and a call runs up to four turns.**
+  One marker that moves nowhere cannot drift into a fifth.
+
+**The 5-minute TTL, not 1-hour.** A read refreshes the timer free, and a
+call's turns are seconds apart. The 1-hour TTL doubles the write to 2× and
+would only pay *across* cycles — and the cycle is 15 minutes, so each
+cycle's first call would write at 2× to serve reads that may never come.
+Revisit with a number if the ledger shows enough calls landing inside an
+hour.
+
+### The owner's question: does this affect the bot's memory of prior decisions?
+
+**No, and the two are unrelated in a way worth writing down.** Prompt
+caching is a **byte-exact prefix match** on the rendered request. It
+stores nothing the bot can read back; it is a billing and latency
+optimisation, not a memory.
+
+The bot's memory of prior decisions is entirely database-backed —
+`research/record.py` renders closed trades and scored refusals into the
+prompt, position reviews live in `position_review_checkins`, decisions in
+`risk_decisions`. Caching neither adds to nor removes from any of it.
+
+**And caching can never serve stale content.** Because the key is the
+exact bytes, the moment the record changes — a trade closes, a refusal is
+scored — the prefix differs, the cache misses, and fresh tokens are sent.
+There is no mechanism by which a cached entry could feed the model an
+out-of-date record. That is the reassurance, and it is structural rather
+than something this change had to be careful about.
+
+### Over a long period
+
+Nothing accumulates: entries are ephemeral, there is no storage cost and
+no cleanup. As the record grows the prompt grows, so caching becomes
+*relatively* more valuable — and each record change is one miss on that
+cycle, then warm again. Self-limiting and correct.
+
+**And it helps the thing the owner cares most about.** Searches are the
+dominant cost and they are not reduced by any of this; the same searches
+simply cost less to carry across a call's turns. The governor's
+pre-call estimates are measured from the ledger (§5), so a lower real
+cost per call self-corrects downward and **the same $100 cap affords more
+research**.
+
+### The change found a regression in the guard it passed through
+
+Wrapping the prompt in a content block **smuggled an empty prompt past
+`invalid_payload_reason`**. The string branch had always refused empty
+content; the list branch only checked that each block had a `type`. So a
+research call with no prompt would have been authorised, paid for, and
+refused by the API. Found by this change's own test, not by reasoning
+about it. The guard now refuses an empty `text` block.
+
+### Verification
+
+- **8 sabotage breakages, all 8 caught red** — the marker removed, the
+  1-hour TTL substituted, the prompt text altered by the wrapper, the role
+  changed, a second breakpoint added, the empty-block guard reverted, and
+  the "why not across calls" reasoning deleted from the docstring — each
+  verified to still import first.
+- One existing test reached into `messages[0]["content"]` as a **string**.
+  Its intent (the graph context reaches the prompt) still held, so it
+  asserts through a shared `_prompt_text()` helper now: **a test pinned to
+  the container shape breaks on a change that alters nothing the model
+  sees**, which is exactly what happened.
+- Full suite green offline: **3979 tests**.
+
+### RECURRING FAILURE, third instance in two days — and this one was new
+
+§18 records killing a sabotage harness mid-run twice. This time the
+harness **completed** and still destroyed the work: its `finally` ran
+`git checkout -- <file>`, which restores to **HEAD**, not to the edited
+state — so it reverted the uncommitted change it was supposed to be
+protecting. The tell was `restored: RED` under `8 of 8 caught red`.
+
+**The rule that actually works: commit before sabotaging.** A git-based
+safety net only restores what git knows about, so uncommitted work must be
+committed (or stashed) first — in-memory backups plus a `git checkout`
+fallback is the worst of both, because the fallback silently wins.
+
+### What is NOT claimed
+
+- **No production call has been billed with caching on.** The chain is
+  verified offline: the marker is present on every turn, the payload
+  passes its guard, the prompt bytes are identical across turns, and the
+  ledger records the cache fields. Whether the hit rate actually rises is
+  a number the Cost panel will report, and **the 57% in the tip is a
+  generic estimate** — the realistic win here is on re-sent context, which
+  is most of the input cost but not all of it.
+- The first measurement to look at is `cache_read_input_tokens` on the
+  Cost page. If it stays at zero across a day with research calls, a
+  silent invalidator is at work and this change bought nothing.
