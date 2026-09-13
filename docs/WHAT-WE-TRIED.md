@@ -2693,18 +2693,54 @@ helper could be satisfied by a search that reads no files.
 ### The generalising guard, stated as a rule rather than a list
 
 `test_no_file_names_this_checkout_by_absolute_path` walks `tests/`,
-`catalyst/` and `scripts/` and fails on any **non-docstring** string
-literal starting with either this repository's own resolved location or
-the running user's home directory. Both facts are **derived at runtime**
-— house rule 7, because no enumeration of `/home`, `/Users`, `/root`
-generalises: the offending path is whatever directory the checkout
-happens to live in, which is only knowable by asking. Docstrings are
-excluded on purpose, so this file and `source_guard.py` can quote the
-offending line as documentation.
+`catalyst/` and `scripts/` and fails on any string literal that **is**
+this checkout's own resolved location, or that points **inside** it or
+inside the running user's home directory. Both facts are **derived at
+runtime** — house rule 7, because no enumeration of `/home`, `/Users`,
+`/root` generalises: the offending path is whatever directory the
+checkout happens to live in, which is only knowable by asking.
 
 **It found a second offender immediately:** `scripts/fetch_sic.py:22`
 carried `REPO = pathlib.Path("/home/user/catalyst")`, four lines under a
 correctly derived `ROOT`. Now derived too.
+
+The assertion is **vacuous today** — there is nothing left to find,
+which is the same shape as the assertion that caused all this. So the
+rule is exercised against synthetic input separately: a literal that is
+the checkout, one deeper inside it, one under home, and four that must
+NOT be flagged.
+
+### TRIED AND REJECTED: matching the root ANYWHERE in a literal
+
+The first version matched a root anywhere in the string, reasoning that
+`"cd /the/checkout && pytest"` is exactly as unportable as the `cwd=`
+that broke the upgrade. **Measured, it flagged two things that are not
+bugs:**
+
+| flagged | what it actually is |
+|---|---|
+| `catalyst/dashboard/render.py:88` | a **CSS comment**, inside the one big style literal, quoting a path the sidebar once rendered badly. Prose embedded in a large literal is not something an AST can separate from code |
+| `tests/test_scaffold.py` | **this guard's own fixture**, writing `"/root"` while explaining why short roots need different treatment — because on this machine `Path.home()` **is** `/root` |
+
+Section 17's generic-word trap in a new coat: a rule that cries wolf
+gets silenced by the next reader rather than obeyed. A docstring
+exclusion was tried as the fix for the first row and does not reach it —
+the offending text is a comment inside a CSS string, not a docstring.
+So the rule is start-anchored, and:
+
+- **a root must be followed by a separator** to count, which also stops
+  `/some/where/catalyst-backup` reading as being inside
+  `/some/where/catalyst`;
+- **the checkout counts on exact equality too**, because
+  `cwd="/home/user/catalyst"` is precisely the literal that failed;
+- **a bare home directory does not**, because it is not a path into
+  anything and is what a fixture naturally writes.
+
+The docstring exclusion was then **removed as machinery no test could
+make load-bearing**: under a start-anchored rule no docstring in this
+repository is flagged, since `source_guard.py`'s own explanation
+mentions the path mid-sentence. Sabotaging it came back GREEN, which is
+how it was caught.
 
 ### Why no sabotage round caught this, and the rule that follows
 
@@ -2737,8 +2773,11 @@ see the file you just added.**
 
 ### Verification
 
-- **7 sabotage breakages, all 7 caught red**, each verified to still
-  import first.
+- **11 sabotage breakages, all 11 caught red**, each verified to still
+  import first. The harness **refuses to run against a dirty working
+  tree** — section 21's lesson made mechanical, because a `git checkout`
+  restore only restores what git knows about, and it stopped this round
+  twice while the rule was still being changed.
 - Both defects of the old guard reproduced by running them, not argued:
   the `FileNotFoundError` against a path that does not exist here, and
   the vacuous pass with its `returncode 2` and empty stdout.
