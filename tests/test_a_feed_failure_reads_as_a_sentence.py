@@ -300,7 +300,18 @@ class TestTheSameFailureTwiceIsCountedTwice:
             "the same failure on two days rendered as two rows, each "
             f"claiming a count of 1. Got {[f[0] for f in form4]}")
         assert form4[0][1] == 2
-        assert "2 times since" in form4[0][0]
+        # BOTH ENDS OF THE RANGE, not only the first. This used to read
+        # "2 times since <first>", which the owner reported (2026-09-13)
+        # on a feed whose last failure was that same evening: two blips,
+        # over, and unreadable as over.
+        said = form4[0][0]
+        assert "2 times" in said, said
+        first = (datetime.now(timezone.utc) - timedelta(hours=5)
+                 ).isoformat()[:16]
+        last = (datetime.now(timezone.utc) - timedelta(hours=4)
+                ).isoformat()[:16]
+        assert first in said, f"the first failure time is missing: {said}"
+        assert last in said, f"the last failure time is missing: {said}"
 
     def test_two_different_failures_stay_two_rows(self, db):
         from catalyst.dashboard import queries

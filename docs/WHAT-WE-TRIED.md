@@ -2826,3 +2826,141 @@ to tell was to re-run them once nothing was moving.
   `tests/`, `catalyst/` or `scripts/` without failing the suite.
 - **The other 21 test files using raw `sqlite3.connect`** (§14) are
   still a known blind spot. Untouched here on purpose.
+
+---
+
+## 26. A quiet feed read as a broken one all weekend, and the hold-longer question
+
+Two things, 2026-09-13. The owner asked whether a high-conviction
+position can hold past its exit date if the bot re-evaluates, and
+reported the Pipeline page still showing:
+
+> *"2 Insider trades (SEC Form 4) could not be read, 2 times since
+> 2026-09-12T17:02 — the server returned a web page instead of data
+> (titled "SEC.gov | File Unavailable")"*
+
+### The hold-longer answer: yes at entry, no after it, and the asymmetry is the point
+
+| when | who decides | bound |
+|---|---|---|
+| **at entry** | **Claude**, via `view.expected_holding_days` | clamped to 1 day minimum and `HARD_BOUNDS.max_hold_days` = **31** |
+| **after entry** | nobody — `bring_exit_forward` refuses any `new_date >= original` | two independent checks, in `apply_review` and again at the point of writing |
+
+So a thesis saying "this resolves in 25 days" already gets 25 days
+rather than a fixed default, and the dashboard says whether the date came
+from the model or from the measured per-catalyst fallback. What cannot
+happen is a live position being extended.
+
+**Recommended against changing that, on this project's own evidence.** A
+candidate here scored **0.82 conviction** on a compelling thesis whose
+conclusion was *do not trade* (§13). Persuasiveness and correctness are
+different properties, and the position that most wants more time is the
+one that has not worked yet — a losing position always has a story
+attached. It also holds one of five slots, which is what caps the rate
+near ten trades a month (§11).
+
+**The right lever is the entry estimate, not a live extension.**
+`holding_period_estimate` is adaptive: bounded 1–21 days, minimum 15
+closed trades, at most 2 days per adjustment, on closed scored outcomes
+only. Evidence moves it; a thesis cannot talk it up.
+
+**And the measurement that would settle it does not exist.** Audited:
+nothing tracks what a position did *after* a hard exit
+(`grep -rn "after_exit\|post_exit\|would_have"` → nothing). That is the
+exact analogue of the refusal tracker, and without it "should it have
+held longer?" is unanswerable. One closed trade on record, exited by the
+clock. **Open, and cheap: score hard exits against what the stock did
+next.**
+
+`max_hold_days = 31` is a hard bound, so raising it is the owner's. Not
+proposed — there is no evidence either way.
+
+### The feed fault: the SENTENCE was right, the STATE was wrong
+
+§17's fix shipped the day before and the diagnosis it produced is
+correct. What was wrong is that the row was still under NEEDS ATTENTION
+more than a day later for a feed that was working.
+
+**Measured against the real SEC before changing anything**, because the
+first guess — "this is the weekend index, already handled" — was wrong:
+
+| request | result |
+|---|---|
+| Friday's daily index | HTTP 200, real data |
+| **Saturday's** daily index | HTTP 403 + `AccessDenied` — routine absence, already handled |
+| an absent filing | HTTP 404 + `NoSuchKey` — also handled |
+
+The Saturday body is **gzipped XML**, not the HTML page the owner saw. So
+`"SEC.gov | File Unavailable"` is a genuine transient sec.gov outage, and
+two occurrences across ~108 weekend attempts is a blip that was already
+over.
+
+**The defect is that nothing could say it was over:**
+
+```sql
+SELECT COUNT(*) FROM raw_events WHERE source = ? AND fetched_at > ?
+```
+
+That is how the panel decided a fault was resolved — *did this feed
+produce ROWS since it failed?* At a weekend the Form 4 feed correctly
+produces **zero** rows, because EDGAR publishes no daily index. And a
+successful read that yields nothing wrote **no row anywhere**: only
+failures were recorded. So a Saturday-evening outage could not clear
+until EDGAR next published on the Monday — up to **48 hours** of reported
+damage for a bot doing its job. Third instance of the "routine attrition
+must not look like damage" failure CLAUDE.md says has already cost real
+debugging time twice.
+
+**"It answered" and "it had something to say" are different facts, and
+only one was recorded.** `feed_reads` records the answer itself, empty or
+not, as a side table (never a column on a hot one). `item_count` is kept
+because **zero is the interesting value** and house rule 3 wants it
+stated rather than inferred from an absent row.
+
+Measured, the owner's exact case rendered both ways:
+
+| | NEEDS ATTENTION block |
+|---|---|
+| two failures, no read recorded | **rendered** (correctly — this is the pre-fix state) |
+| the same two, then four empty reads | **gone**, and listed under "failed and recovered" |
+
+**Where the read is recorded matters, and it is not where it looks like
+it should go.** `run_cycle` sees the whole fetch as one call — but a Form
+4 `RateLimitBlocked` records an error and then `return []`, which
+`run_cycle` receives as a perfectly successful empty fetch. Recording the
+read there would have cleared the fault written one line above it, every
+time. So it is recorded per-feed in the scheduler, where the truth is
+known, and a test drives a real blocked cycle to hold that.
+
+### AND A SECOND, PRE-EXISTING BUG: `feed_healed` was computed and thrown away
+
+`funnel()` built the recovered list forty lines above its own `return`
+and **never passed it to the `Funnel` object.** The field existed with a
+default, the panel renders a section from it, and the panel's own
+paragraph promises *"A failure it recovered from is listed separately
+below, not here."* That section has been empty since it was written.
+
+Not harmful — the important half (not in NEEDS ATTENTION) worked — but it
+is an unkept promise on the page, and it is the **sixth** instance of this
+project's most recurring defect: **the work done and the wiring missing**
+(§12, §14, §17, §22, §23). Found by a test failing for a reason unrelated
+to what it tested, not by inspection.
+
+### And the fault line named only one end of the range
+
+*"2 times since 2026-09-12T17:02"* gives the **first** occurrence, so two
+blips that stopped an hour later read as something that started then and
+never stopped. It now names both ends, and says "the same time" when they
+coincide rather than printing one timestamp twice.
+
+### Verification
+
+- Both directions reproduced by rendering the owner's own case, not
+  argued.
+- The scheduler wiring asserted by running a **real cycle** with
+  `run_cycle` stubbed to call the injected feed — §22 and §24 both had a
+  call-site grep walk past a sabotage, so the outcome is asserted, never
+  a substring.
+- One existing test correctly pinned the old wording
+  (`"2 times since" in ...`) and was updated to assert the **property** —
+  both timestamps present — rather than the phrasing.

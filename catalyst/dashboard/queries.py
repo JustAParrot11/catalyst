@@ -1541,28 +1541,61 @@ def funnel(db: Db) -> Funnel:
     for r in err_q.rows:
         source, when = str(r["source"]), str(r["attempted_at"])
         detail = str(r["error_text"] or "")
-        ok_since = db.q(
-            "SELECT COUNT(*) AS n FROM raw_events WHERE source = ? "
-            "AND fetched_at > ?", (source, when))
-        n_ok = int(ok_since.rows[0]["n"]) if ok_since.rows else 0
+        # HAS IT ANSWERED SINCE? - which is NOT "has it produced rows
+        # since". Owner-reported 2026-09-13: a Saturday sec.gov outage
+        # still under NEEDS ATTENTION a day later, for a feed that was
+        # working. At a weekend the Form 4 feed correctly returns ZERO
+        # events, because EDGAR publishes no daily index, so the old
+        # `raw_events` test could not clear a weekend fault until EDGAR
+        # next published on the Monday - up to 48 hours of reported
+        # damage for a bot doing its job.
+        #
+        # feed_reads records the answer itself, empty or not. The
+        # raw_events test is kept as a FALLBACK, not replaced: a failure
+        # recorded before feed_reads existed has no read row to find, and
+        # an upgraded database should not suddenly show every historic
+        # fault as unresolved.
+        reads = db.q(
+            "SELECT COUNT(*) AS n FROM feed_reads WHERE source = ? "
+            "AND read_at > ?", (source, when))
+        n_reads = int(reads.rows[0]["n"]) if reads.rows else 0
+        n_ok = n_reads
+        how = "answered"
+        if n_ok == 0:
+            ok_since = db.q(
+                "SELECT COUNT(*) AS n FROM raw_events WHERE source = ? "
+                "AND fetched_at > ?", (source, when))
+            n_ok = int(ok_since.rows[0]["n"]) if ok_since.rows else 0
+            how = "returned data"
         if n_ok > 0:
             feed_healed.append(
                 (f"{source_label(source)} failed, then recovered", 1,
-                 f"{n_ok} successful read(s) since {when[:16]} - "
-                 "resolved, shown for the record"))
+                 f"{n_ok} successful read(s) since {when[:16]} - it has "
+                 f"{how} since, so this is resolved and shown for the "
+                 "record"))
             continue
         key = (source, sources.fault_key(detail))
         if key in grouped:
             # Rows arrive newest first, so the detail already stored is
-            # the newest one. Only the count and the earliest time move.
-            count, first_detail, _oldest = grouped[key]
-            grouped[key] = (count + 1, first_detail, when)
+            # the newest one, and so is the FIRST `when` seen - that is
+            # the most recent failure. Only the count and the earliest
+            # time move as older rows arrive.
+            count, first_detail, _oldest, newest = grouped[key]
+            grouped[key] = (count + 1, first_detail, when, newest)
         else:
-            grouped[key] = (1, detail, when)
-    for (source, _k), (count, detail, oldest) in grouped.items():
+            grouped[key] = (1, detail, when, when)
+    for (source, _k), (count, detail, oldest, newest) in grouped.items():
         reason = f"{source_label(source)} could not be read"
+        # BOTH ENDS, because "since <first time>" alone reads as though it
+        # started then and never stopped. The owner's line was "2 times
+        # since 2026-09-12T17:02" on a feed whose last failure was that
+        # same evening - two blips, over, and unreadable as over.
         if count > 1:
-            reason += f", {count} times since {oldest[:16]}"
+            reason += f", {count} times between {oldest[:16]} and "
+            reason += ("the same time" if newest[:16] == oldest[:16]
+                       else newest[:16])
+        else:
+            reason += f", at {newest[:16]}"
         feed_faults.append((reason, count, detail))
 
     # --- the funnel proper, over candidate ids
@@ -1799,9 +1832,19 @@ def funnel(db: Db) -> Funnel:
                     " Nothing was recorded about why, and that is itself the "
                     "finding: the step rejected everything and explained "
                     "nothing.")
+    # feed_healed WAS COMPUTED AND THROWN AWAY. The field existed, the
+    # list was built forty lines up, the panel renders a section from it
+    # and its own paragraph promises "A failure it recovered from is
+    # listed separately below, not here" - and it was never passed in, so
+    # that section has been empty since it was written. Found while
+    # fixing the weekend fault (2026-09-13), not by a test.
+    #
+    # Sixth instance of this project's most recurring defect: the work
+    # done and the wiring missing (docs/WHAT-WE-TRIED.md sections 12, 14,
+    # 17, 22, 23).
     return Funnel(stages=stages, blame=blame, blame_stage=blame_stage,
                   feed_events=int(raw_q.scalar(0) or 0), feed_query=raw_q,
-                  feed_faults=feed_faults)
+                  feed_faults=feed_faults, feed_healed=feed_healed)
 
 
 # --------------------------------------------------------------------------

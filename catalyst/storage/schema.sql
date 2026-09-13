@@ -746,3 +746,45 @@ CREATE TABLE IF NOT EXISTS position_review_checkins (
 
 CREATE INDEX IF NOT EXISTS idx_review_checkins_position
     ON position_review_checkins (position_id, next_check_at DESC);
+
+-- WHEN A FEED ANSWERED, WHICH IS NOT THE SAME AS WHEN IT RETURNED
+-- SOMETHING.
+--
+-- OWNER-REPORTED 2026-09-13, on the Pipeline page, about a Saturday:
+--   "Insider trades (SEC Form 4) could not be read, 2 times since
+--    2026-09-12T17:02 ... an error or maintenance page at the source"
+-- still sitting under NEEDS ATTENTION a day later, for a feed that was
+-- working.
+--
+-- The panel decides a fault is resolved by asking whether the feed
+-- produced ROWS since it failed:
+--
+--     SELECT COUNT(*) FROM raw_events WHERE source = ? AND fetched_at > ?
+--
+-- At a weekend the Form 4 feed correctly produces ZERO rows - EDGAR
+-- publishes no daily index on a Saturday or Sunday (measured: the
+-- Saturday index returns 403 + AccessDenied, which the feed already
+-- treats as routine absence). A successful read that yields nothing
+-- wrote no row ANYWHERE: only failures were recorded. So a transient
+-- sec.gov outage on a Saturday evening could not be marked recovered
+-- until EDGAR next published on the Monday, and for ~48 hours the
+-- dashboard reported damage for a bot doing its job. That is the
+-- "routine attrition must not look like damage" failure CLAUDE.md says
+-- has already cost real debugging time twice, and this was the third.
+--
+-- So "the feed answered" becomes a recorded fact in its own right,
+-- distinct from "the feed had something to say". item_count is kept
+-- because zero is the interesting value and house rule 3 wants the
+-- reason a result was empty beside it, not inferred from its absence.
+--
+-- A SIDE TABLE (CLAUDE.md: never add a column to a hot table), and
+-- deliberately NOT rows in raw_events_errors - every existing reader of
+-- that table treats any row in it as a failure.
+CREATE TABLE IF NOT EXISTS feed_reads (
+    source     TEXT NOT NULL,
+    read_at    TEXT NOT NULL,
+    item_count INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_feed_reads_source_at
+    ON feed_reads (source, read_at DESC);
