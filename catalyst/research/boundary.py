@@ -61,6 +61,61 @@ from catalyst.research.schema import (
 DEFAULT_RESEARCH_MODEL = "claude-sonnet-5"
 RESEARCH_MODEL = DEFAULT_RESEARCH_MODEL   # judgement calls; cheap enough to
                                         # keep the $5/month cap honest
+
+
+def cacheable_prompt_message(prompt: str) -> dict:
+    """The research prompt as ONE cacheable text block.
+
+    OWNER-REPORTED 2026-09-13: Anthropic's own usage tip said the prompt
+    cache hit rate was low. Measured: `cache_control` appeared NOWHERE in
+    this file, so the rate was zero by construction rather than by nature.
+
+    WHY ONE BREAKPOINT, HERE, AND NOWHERE ELSE - all three decided by
+    measurement rather than preference:
+
+    1. ACROSS CALLS IT CANNOT WORK, and must not be made to. Two
+       candidates' prompts share **300 characters, ~75 tokens, 5.3%** -
+       the ticker is the third line. The cacheable minimum is 1024 tokens
+       on Sonnet 5 (512 on Opus 5), so a cross-call breakpoint would
+       silently never cache. Making it work would mean REORDERING the
+       prompt to put the standing brief first and the candidate last -
+       which changes what the model reads first, and so changes the
+       judgement this whole project exists to measure. A cost saving is
+       not worth making the live record incomparable with its own
+       history. Deliberately not done.
+
+    2. WITHIN A CALL IT WORKS, and that is where the money is. One
+       research call is up to four requests - two exploration turns, a
+       forced extraction, and a repair - and each one resends the WHOLE
+       accumulated `messages`, including web-search results measured at
+       34k input tokens median and 166k max. This prompt is
+       byte-identical across every one of those turns, so turn 1 writes
+       it at 1.25x and every later turn reads it at 0.10x. Break-even is
+       two requests; the normal call is three or four.
+
+    3. THE GROWING TAIL NEEDS NO MARKER FROM US. Once a request uses
+       caching at all, the API inserts its own 5-minute cache write after
+       server-tool results - so the search output, the expensive part, is
+       covered without this code guessing where a second breakpoint goes.
+       Marking the tail ourselves is the documented way to pay a write
+       premium on bytes nothing reads back, and it is not done until the
+       ledger shows it is needed.
+
+    THE DEFAULT 5-MINUTE TTL, NOT 1-HOUR. A read refreshes the timer for
+    free and a call's turns are seconds apart, so five minutes covers the
+    whole call. The 1-hour TTL doubles the write to 2x and would only pay
+    across cycles - and the cycle is 15 minutes, so each cycle's first
+    call would write at 2x to serve reads that may never come. If the
+    ledger later shows enough calls landing inside an hour, that is the
+    moment to revisit it, with a number.
+
+    Returns a message whose text is the prompt UNCHANGED - the model sees
+    exactly what it saw before. A string becomes a one-block list because
+    `cache_control` attaches to a content block, not to a bare string.
+    """
+    return {"role": "user",
+            "content": [{"type": "text", "text": prompt,
+                         "cache_control": {"type": "ephemeral"}}]}
 MAX_EXPLORATION_TURNS = 2               # pause_turn continuations included
 #: Output cap on the EXPLORATION turn - the one that thinks and searches.
 #: MEASURED, from the owner's live bundle for 2026-08-14. Of 65
@@ -426,6 +481,19 @@ def invalid_payload_reason(payload: dict,
                         f"{type(block).__name__}")
             if not block.get("type"):
                 return f"message {i} content block {j} has no 'type'"
+            # AN EMPTY TEXT BLOCK IS AN EMPTY PROMPT WEARING A LIST.
+            #
+            # The string branch above has always refused empty content.
+            # The prompt became a one-block LIST so it could carry a
+            # cache_control marker (`cacheable_prompt_message`), and that
+            # quietly routed it past this guard - a research call with no
+            # prompt would have been paid for and refused by the API.
+            # Found by the caching change's own test, not by reasoning.
+            if (block.get("type") == "text"
+                    and not str(block.get("text") or "").strip()):
+                return (f"message {i} ({role}) content block {j} is an empty "
+                        "text block - the Messages API rejects it, and an "
+                        "empty prompt must never be paid for")
     # EVERY `tool_use` MUST BE ANSWERED IN THE NEXT MESSAGE. The API
     # rejects the whole request otherwise - "tool_use ids were found
     # without tool_result blocks immediately after" - and it does so
@@ -551,7 +619,10 @@ def investigate(
     cost_cents = Decimal("0")
     unpriced: list[str] = []
     transport_errors: list[str] = []
-    messages: list[dict] = [{"role": "user", "content": prompt}]
+    # THE PROMPT IS MARKED CACHEABLE, AND ONLY THE PROMPT. See
+    # `cacheable_prompt_message` for why this one breakpoint and no
+    # other.
+    messages: list[dict] = [cacheable_prompt_message(prompt)]
 
     def finish(view: ResearchView | None, skipped: str | None) -> ResearchCallLog:
         log = ResearchCallLog(

@@ -280,7 +280,27 @@ class TestInvestigate:
         transport, log = transport_script([end_turn(), extraction_response()])
         investigate(candidate(), ctx(db), transport,
                     graph_context="GRAPH: acme -> pdufa 2026-09-01")
-        assert "GRAPH: acme" in log[0]["messages"][0]["content"]
+        # The prompt is a one-block content LIST now, so it can carry a
+        # cache_control marker. Asserted through the text rather than the
+        # container: what matters is that the graph context reaches the
+        # model, not how the block is shaped.
+        assert "GRAPH: acme" in _prompt_text(log[0])
+
+
+def _prompt_text(payload: dict) -> str:
+    """The research prompt as the model sees it, whatever shape it is in.
+
+    `investigate` sends the prompt as a one-block content list so it can
+    carry a `cache_control` marker; it used to be a bare string. Tests
+    assert on the TEXT because that is the thing the model reads - a test
+    pinned to the container shape breaks on a change that alters nothing
+    the model sees, which is exactly what happened here.
+    """
+    content = payload["messages"][0]["content"]
+    if isinstance(content, str):
+        return content
+    return "".join(b.get("text", "") for b in content
+                   if b.get("type") == "text")
 
 
 class TestMakeView:
