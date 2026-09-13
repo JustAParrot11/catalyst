@@ -662,13 +662,38 @@ def mindmap(
 # Decision spider: the whole decision as one picture
 # --------------------------------------------------------------------------
 
-#: Three groups, three categorical slots. A spider is an ALL-PAIRS form -
-#: any node can end up beside any other - and the reference palette caps
-#: all-pairs categorical sets at three slots. Validated in both modes:
-#: worst CVD dE 9.2 light / 9.4 dark, worst normal-vision dE 24.0 / 20.9.
-#: Aqua is under 3:1 on the light surface, so the relief rule applies and
-#: every node carries a visible text label - identity is never colour alone.
-SPIDER_SLOTS = ("var(--series-1)", "var(--series-2)", "var(--series-3)")
+#: One categorical slot per arm. A spider is an ALL-PAIRS form - any node
+#: can end up beside any other - so the whole set is measured together,
+#: and every node also carries a visible text label, which is why a set
+#: this size is usable at all: identity is never colour alone here.
+#:
+#: A FOURTH SLOT WAS ADDED 2026-09-13, and it cost nothing measurable.
+#: Owner-reported: the picture *"stops at what the deterministic engine
+#: did and what happened at the broker it just seems to cut off"* - which
+#: was literally true, there were three arms and the last was the risk
+#: engine. Adding "what happened next" needed a fourth colour, and the
+#: previous note here said three was the cap.
+#:
+#: So it was measured rather than argued (CIE76 dE in Lab, Vienot LMS
+#: simulation for deuteran/protan/tritan, against this dashboard's own
+#: two surfaces):
+#:
+#:            worst normal dE      worst CVD dE     min contrast
+#:   light 3        94.2              22.5             2.82:1
+#:   light 4        42.8              22.5             2.82:1
+#:   dark  3        87.2               7.8             4.66:1
+#:   dark  4        25.5               7.8             4.66:1
+#:
+#: THE WORST CVD PAIR IS UNCHANGED IN BOTH THEMES - it is series-1 against
+#: series-3, which was already the binding pair and which the fourth
+#: colour does not come between. The normal-vision worst pair falls and
+#: stays well clear of 14.9, the last figure §18 measured as reliable.
+#:
+#: The fourth is `--cmp-2`, an EXISTING token rather than a new one, so
+#: there is no second place for a palette to drift out of step. Slate was
+#: not considered: §18 already rejected it for reading as chrome.
+SPIDER_SLOTS = ("var(--series-1)", "var(--series-2)", "var(--series-3)",
+                "var(--cmp-2)")
 
 
 def _leaf_box(leaf_label: str) -> tuple[float, float]:
@@ -709,7 +734,12 @@ def decision_spider(
     """
     import math
 
-    groups = [(label, leaves) for label, leaves in groups if leaves][:3]
+    # BOUNDED BY THE PALETTE ITSELF, not by a typed 3. The cap used to be
+    # a literal, so adding an arm silently reused a colour: arm 4 drew in
+    # arm 1's hue with `gi % len(SPIDER_SLOTS)` below and two arms became
+    # indistinguishable. Derived, the two cannot disagree.
+    groups = [(label, leaves)
+              for label, leaves in groups if leaves][:len(SPIDER_SLOTS)]
     if not groups:
         raise ValueError("decision_spider needs at least one populated group")
 

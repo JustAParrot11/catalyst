@@ -7,6 +7,7 @@ print provenance and, on a zero, the exact query that produced it.
 Nothing here writes. The two write paths live in server.py.
 """
 
+import os
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -744,6 +745,12 @@ SOURCE_LABELS = {
     "federal_register": "Government notices (Federal Register)",
     "clinicaltrials": "Drug trials (ClinicalTrials.gov)",
     "openfda": "FDA decisions (openFDA)",
+    # FOUND BY RENDERING THE OWNER'S OWN CHYM CARD: this feed had no
+    # friendly name, so it read as "edgar fts" - and it is the feed
+    # behind the conjunction arm, which took 48% of the research budget.
+    # The one machine name most likely to be on the page was the one
+    # missing from the table.
+    "edgar_fts": "SEC filing text (EDGAR full-text search)",
     "alpaca_news": "Market news (Alpaca)",
     "alpaca": "Broker data (Alpaca)",
     "news": "News",
@@ -1278,6 +1285,177 @@ def governor_reason_link(reason: str):
     escaped text - see the note above GOVERNOR_REASONS."""
     entry = GOVERNOR_REASONS.get(_base_reason(reason))
     return entry[2] if entry else _UNKNOWN_REASON[1]
+
+
+@dataclass(frozen=True)
+class _Queued:
+    """One queued candidate. `interleave_by_arm` only reads `.id`, so this
+    carries the display columns alongside it rather than re-querying."""
+
+    id: str
+    ticker: str
+    arm: str
+    catalyst_date: str
+    discovered_at: str
+
+
+@dataclass
+class WhatItIsDoing:
+    """The answer to "what is it doing right now, and what is queued".
+
+    OWNER-ASKED 2026-09-13: *"I can see it was doing active research and
+    finding potential stocks on 12/09, this is good. What did it do, are
+    any queued up its not clear anywhere what it is doing."*
+
+    **IT WAS NOT CLEAR ANYWHERE, and the figures were all on disk.** The
+    Pipeline page counts a LIFETIME funnel - 6,999 candidates, 299
+    researched - which answers "what has happened" and cannot answer
+    "what is happening". The largest single drop reason in the owner's
+    bundle is `deferred_max_research_per_cycle` at **6,581**, which is
+    precisely the queue, named, counted, and never described as one.
+
+    Every field here is counted from rows. Nothing is estimated, and a
+    count that could not be read is `None` rather than 0 - "no queue" and
+    "the query broke" are different facts and only one is good news.
+    """
+
+    #: When the newest research call was billed, and when the newest
+    #: candidate was built. Two different signs of life: a bot that is
+    #: discovering but not researching is a different problem from one
+    #: doing neither.
+    last_call_at: str = ""
+    last_candidate_at: str = ""
+    cycle_seconds: int = 0
+    #: Candidates with no research call and no risk decision: nothing has
+    #: been spent on them and nothing has judged them. The queue.
+    waiting_for_research: int | None = None
+    #: A view exists, formed off a cached close, and no risk decision yet
+    #: - the weekend case. These cost nothing more; they are waiting for
+    #: the market to open so code can size them.
+    holding_a_weekend_view: int | None = None
+    #: Researched and decided. Finished, whichever way it went.
+    finished: int | None = None
+    #: How many paid research calls this cycle's belt allows, and how many
+    #: have been billed today.
+    belt_per_cycle: int | None = None
+    calls_today: int | None = None
+    #: [(ticker, arm, called_at, cost_cents, direction, conviction)] for
+    #: the most recent paid calls - "what did it do".
+    recent: list = field(default_factory=list)
+    #: [(ticker, arm, catalyst_date, discovered_at)] for what is next in
+    #: line, in the order the rotation will take them.
+    next_up: list = field(default_factory=list)
+    error: str = ""
+
+
+def what_it_is_doing(db: Db, now=None) -> WhatItIsDoing:
+    """Counted from rows, never estimated. See `WhatItIsDoing`."""
+    from catalyst.orchestrator.scheduler import DEFAULT_CYCLE_SECONDS
+
+    now = now or datetime.now(timezone.utc)
+    out = WhatItIsDoing(cycle_seconds=int(
+        os.environ.get("CATALYST_CYCLE_SECONDS", DEFAULT_CYCLE_SECONDS) or
+        DEFAULT_CYCLE_SECONDS))
+    if db.conn is None:
+        out.error = db.open_error or "no connection"
+        return out
+
+    def one(sql, params=()):
+        """A single scalar, or None when the query could not run. NOT 0:
+        house rule 3 in miniature - "nothing queued" and "the query is
+        broken" must not render identically."""
+        try:
+            row = db.conn.execute(sql, params).fetchone()
+        except Exception as exc:                       # noqa: BLE001
+            out.error = out.error or f"{type(exc).__name__}: {exc}"
+            return None
+        return None if row is None else row[0]
+
+    out.last_call_at = str(one(
+        "SELECT MAX(called_at) FROM research_calls "
+        "WHERE skipped_reason IS NULL OR skipped_reason = ''") or "")
+    out.last_candidate_at = str(one(
+        "SELECT MAX(discovered_at) FROM candidates") or "")
+    out.waiting_for_research = one(
+        "SELECT COUNT(*) FROM candidates c "
+        "WHERE NOT EXISTS (SELECT 1 FROM research_views v "
+        "                  WHERE v.candidate_id = c.id) "
+        "  AND NOT EXISTS (SELECT 1 FROM risk_decisions d "
+        "                  WHERE d.candidate_id = c.id)")
+    out.holding_a_weekend_view = one(
+        "SELECT COUNT(*) FROM research_views v "
+        "JOIN research_view_context x ON x.candidate_id = v.candidate_id "
+        "WHERE x.priced_off != 'live_nbbo' "
+        "  AND NOT EXISTS (SELECT 1 FROM risk_decisions d "
+        "                  WHERE d.candidate_id = v.candidate_id)")
+    out.finished = one(
+        "SELECT COUNT(DISTINCT candidate_id) FROM risk_decisions")
+    out.calls_today = one(
+        "SELECT COUNT(*) FROM research_calls "
+        "WHERE (skipped_reason IS NULL OR skipped_reason = '') "
+        "  AND substr(called_at, 1, 10) = ?", (now.date().isoformat(),))
+    try:
+        from catalyst.orchestrator.cycle import research_per_cycle
+
+        # The SAME function the cycle uses, so the number on the page
+        # cannot drift from the number the belt applies.
+        out.belt_per_cycle = int(research_per_cycle(conn=db.conn))
+    except Exception as exc:                           # noqa: BLE001
+        out.error = out.error or f"belt: {type(exc).__name__}: {exc}"
+
+    try:
+        out.recent = [
+            (str(r[0]), str(r[1] or "unrecorded"), str(r[2]), str(r[3]),
+             (None if r[4] is None else str(r[4])),
+             (None if r[5] is None else float(r[5])))
+            for r in db.conn.execute(
+                "SELECT c.ticker, o.origin, rc.called_at, rc.cost_cents, "
+                "       v.direction, v.conviction "
+                "FROM research_calls rc "
+                "JOIN candidates c ON c.id = rc.candidate_id "
+                "LEFT JOIN candidate_origin o ON o.candidate_id = rc.candidate_id "
+                "LEFT JOIN research_views v ON v.candidate_id = rc.candidate_id "
+                "WHERE rc.skipped_reason IS NULL OR rc.skipped_reason = '' "
+                "ORDER BY rc.called_at DESC LIMIT 8").fetchall()]
+    except Exception as exc:                           # noqa: BLE001
+        out.error = out.error or f"recent: {type(exc).__name__}: {exc}"
+
+    # WHICH NAMES ARE NEXT, THROUGH THE REAL ROTATION.
+    #
+    # The first version ordered by `discovered_at DESC` and captioned it
+    # "the order the belt takes them in". THAT WAS AN UNVERIFIED CLAIM
+    # ABOUT CODE - caught by reading `interleave_by_arm`, whose docstring
+    # says the opposite: the belt round-robins ONE PER ARM PER ROUND, and
+    # within an arm it preserves the live builder's own order, which this
+    # database cannot replay.
+    #
+    # So the arm rotation is applied by calling the cycle's own function
+    # rather than described, and what cannot be reproduced is admitted in
+    # the caption instead of papered over. More candidates than the page
+    # shows are fetched, because rotating a list of eight from one arm
+    # would just return the same eight.
+    try:
+        rows = db.conn.execute(
+            "SELECT c.id, c.ticker, o.origin, c.catalyst_date, "
+            "       c.discovered_at "
+            "FROM candidates c "
+            "LEFT JOIN candidate_origin o ON o.candidate_id = c.id "
+            "WHERE NOT EXISTS (SELECT 1 FROM research_views v "
+            "                  WHERE v.candidate_id = c.id) "
+            "  AND NOT EXISTS (SELECT 1 FROM risk_decisions d "
+            "                  WHERE d.candidate_id = c.id) "
+            "ORDER BY c.discovered_at DESC LIMIT 400").fetchall()
+        queued = [_Queued(str(r[0]), str(r[1]), str(r[2] or "unrecorded"),
+                          str(r[3]), str(r[4])) for r in rows]
+        from catalyst.orchestrator.cycle import interleave_by_arm
+
+        ordered = interleave_by_arm(
+            queued, {q.id: q.arm for q in queued})
+        out.next_up = [(q.ticker, q.arm, q.catalyst_date, q.discovered_at)
+                       for q in ordered[:8]]
+    except Exception as exc:                           # noqa: BLE001
+        out.error = out.error or f"next_up: {type(exc).__name__}: {exc}"
+    return out
 
 
 def funnel(db: Db) -> Funnel:
@@ -2855,6 +3033,37 @@ def _next_checkin_row(db: Db, position_id: str):
                 str(r["clamped_by"] or ""))
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def describe_source(payload) -> str:
+    """`_describe_source`, for callers outside this module.
+
+    OWNER-REPORTED 2026-09-13, on the decision page: *"these references
+    dont actually mean anything to me"*. They did not: the spider drew
+    `filing 0001193125-26-385383:credit_amendment, fetched ...` and the
+    full record's fold was headed `source event edgar_fts:...` - an
+    accession number where a sentence belongs. §10b fixed exactly this on
+    the TRADE CARD and the describer has been sitting in this module since,
+    reachable only through `_candidate_sources`, which only the trade card
+    calls. A trade card exists for one candidate in seven thousand.
+
+    Takes the payload as stored - a dict, or the JSON text of one - so a
+    caller holding a raw row does not have to remember to parse it first.
+    """
+    if isinstance(payload, str):
+        payload = jload(payload, {}) or {}
+    if not isinstance(payload, dict):
+        return ""
+    return _describe_source(payload)
+
+
+def source_link(source, payload) -> str:
+    """`_source_link`, for callers outside this module. Same reason."""
+    if isinstance(payload, str):
+        payload = jload(payload, {}) or {}
+    if not isinstance(payload, dict):
+        return ""
+    return _source_link(str(source or ""), payload)
 
 
 def _candidate_sources(db: Db, candidate_id: str) -> list:

@@ -784,6 +784,189 @@ def _fault_gist(detail) -> str:
     return " - ".join(parts) if parts else "no detail was returned"
 
 
+def _ago(newest: str, now) -> str:
+    """"14 minutes ago", or an honest silence. Never a bare timestamp.
+
+    Returns "" when the value cannot be parsed - a wrong duration is
+    worse than none, and an unparseable timestamp is a fact worth
+    showing raw rather than converting from a guess.
+    """
+    try:
+        when = datetime.fromisoformat(str(newest))
+    except (TypeError, ValueError):
+        return ""
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    minutes = (now - when).total_seconds() / 60.0
+    if minutes < 0:
+        return "dated in the future"
+    if minutes < 1:
+        # "0 minutes ago" is a number where a word belongs, and it is the
+        # commonest reading on a live page.
+        return "just now"
+    if minutes < 90:
+        return f"{int(round(minutes))} minutes ago"
+    if minutes < 60 * 36:
+        return f"{int(round(minutes / 60))} hours ago"
+    return f"{int(round(minutes / 1440))} days ago"
+
+
+def working_on(db: Db, p: str = "doing", now=None) -> str:
+    """What the bot is doing right now, and what is queued behind it.
+
+    OWNER-ASKED 2026-09-13: *"I can see it was doing active research and
+    finding potential stocks on 12/09, this is good. What did it do, are
+    any queued up its not clear anywhere what it is doing."*
+
+    **THE FIGURES WERE ALL ON DISK AND NOTHING ASSEMBLED THEM.** The
+    funnel below counts a LIFETIME population, which answers "what has
+    happened" and structurally cannot answer "what is happening now". In
+    the owner's own bundle the single largest drop reason is
+    `deferred_max_research_per_cycle` at **6,581** - that IS the queue,
+    named and counted, and never once described as one. A reader saw a
+    six-thousand-line loss and no statement that those candidates are
+    still in the running.
+
+    Four questions, in the order a reader asks them:
+
+        1. is it alive, and when did it last spend anything
+        2. what did it most recently do, and what came of it
+        3. what is waiting, and how long will that take to clear
+        4. which names are next
+
+    A count that could not be read renders as a dash with the error
+    beside it, never as 0: "nothing queued" and "the query broke" look
+    identical otherwise, and telling them apart is repeatedly the whole
+    diagnosis.
+    """
+    now = now or datetime.now(timezone.utc)
+    d = queries.what_it_is_doing(db, now=now)
+    out = []
+
+    # 1. ALIVE, AND WHEN IT LAST SPENT. Two separate facts: a bot that is
+    # discovering and not researching has a different problem from one
+    # doing neither, and one number cannot say which.
+    call_ago = _ago(d.last_call_at, now)
+    cand_ago = _ago(d.last_candidate_at, now)
+    minutes = max(1, int(round(d.cycle_seconds / 60.0))) if d.cycle_seconds \
+        else 0
+    lede = []
+    if call_ago:
+        lede.append(f"The last paid research call was <b>{esc(call_ago)}</b>")
+    elif d.last_call_at:
+        lede.append("The last paid research call is recorded as "
+                    f"<code>{esc(d.last_call_at)}</code>, which could not be "
+                    "read as a date")
+    else:
+        lede.append("<b>No research call has ever been billed</b>")
+    if cand_ago:
+        lede.append(f"the newest candidate was built {esc(cand_ago)}")
+    if minutes:
+        lede.append(f"and the cycle runs every {minutes} minutes")
+    out.append(f'<p class="lede-line" id="{p}-lede">' + ", ".join(lede)
+               + ".</p>")
+
+    def count(value, label, hint):
+        return (label,
+                "&mdash;" if value is None else f"{int(value):,}",
+                hint if value is not None else
+                "this count could not be read - see the note below")
+
+    out.append(tiles(f"{p}-tiles", [
+        count(d.waiting_for_research, "Queued for research",
+              "nothing has been spent on these and nothing has judged "
+              "them yet"),
+        count(d.holding_a_weekend_view, "Judged, waiting for the open",
+              "a view already formed off a cached close; these cost "
+              "nothing more and are sized at the next open"),
+        count(d.finished, "Finished",
+              "a risk decision exists, whichever way it went"),
+        count(d.calls_today, "Paid calls today",
+              (f"the belt allows {d.belt_per_cycle} per cycle"
+               if d.belt_per_cycle is not None else
+               "the per-cycle belt could not be read")),
+    ]))
+
+    # 3. HOW LONG THE QUEUE TAKES, stated as arithmetic the reader can
+    # check rather than as a duration they have to trust. Only when both
+    # halves are real numbers - a rate of zero would divide by zero and a
+    # missing count would invent one.
+    if (d.waiting_for_research and d.belt_per_cycle
+            and d.belt_per_cycle > 0 and minutes):
+        cycles = -(-int(d.waiting_for_research) // int(d.belt_per_cycle))
+        # A RATE, NOT A COUNTDOWN, and it says so. The screens rebuild
+        # the candidate list from the feeds on every cycle, so the queue
+        # grows while it drains and "18 cycles from now it is empty"
+        # would be a promise the code does not make. What IS true is the
+        # rate, which is the number that answers "why has it not looked
+        # at this one yet".
+        out.append(prov_html(
+            f"At {d.belt_per_cycle} research slot(s) a cycle and one cycle "
+            f"every {minutes} minutes, working through "
+            f"{int(d.waiting_for_research):,} candidates at that rate is "
+            f"about <b>{cycles:,} cycles</b> - though the screens rebuild "
+            "the list from the feeds every cycle, so this is the rate, not "
+            "a countdown to an empty queue. That pacing is the belt "
+            "spreading a day's affordable calls across the day rather than "
+            "a backlog going wrong. <b>Nothing in the queue is discarded</b> "
+            "&mdash; a deferred candidate returns on the next cycle exactly "
+            "as it was, and the daily and monthly budget caps are what "
+            "bound the rate."))
+
+    # 2. WHAT IT ACTUALLY DID. The owner asked about a specific day, so
+    # this is per call with what came of it - not a total.
+    if d.recent:
+        rows = []
+        for ticker, arm, called_at, cents, direction, conviction in d.recent:
+            said = ("no view recorded" if not direction else
+                    f"{direction}"
+                    + (f" at {conviction:.2f}" if conviction is not None
+                       else ""))
+            rows.append([esc(called_at[:16].replace("T", " ")), esc(ticker),
+                         esc(arm), dollars(cents), esc(said)])
+        out.append(details(
+            f"{p}-recent", f"the last {len(rows)} paid research call(s), and "
+            "what each concluded",
+            table(f"{p}-recent-table",
+                  ["when", "ticker", "arm", "cost", "what it concluded"],
+                  rows, numeric_cols={3})))
+    else:
+        out.append(note(
+            f'<b id="{p}-no-recent">No paid research call is on record.</b> '
+            "That is the thing to explain before anything else on this "
+            "page: either the governor is refusing to spend, or no "
+            "candidate has reached the belt."))
+
+    # 4. WHICH NAMES ARE NEXT. "Are any queued up" is most directly
+    # answered by naming them.
+    if d.next_up:
+        rows = [[esc(t), esc(arm), esc(cat), esc(disc[:10])]
+                for t, arm, cat, disc in d.next_up]
+        out.append(details(
+            f"{p}-next", f"the next {len(rows)} in line",
+            table(f"{p}-next-table",
+                  ["ticker", "arm", "catalyst date", "found"], rows)
+            + prov_html(
+                "<b>Rotated by arm, using the cycle's own "
+                "<code>interleave_by_arm</code></b> rather than a "
+                "description of it - one candidate per arm per round, so "
+                "the arm that emits the most cannot take the whole cycle. "
+                "Within an arm the live belt keeps whatever order the "
+                "builder produced, and that order is not recorded, so the "
+                "names inside one arm are shown newest evidence first "
+                "here and the real cycle may take them in a different "
+                "order. An arm with no directional view in many paid "
+                "calls takes one round in four, never none.")))
+
+    if d.error:
+        out.append(note(
+            f'<b id="{p}-error">Part of this panel could not be read.</b> '
+            f"The exact error, unedited: <code>{esc(d.error)}</code>. Any "
+            "figure above showing a dash is that failure, not a zero."))
+    return section(f"{p}-section", "What it is doing right now",
+                   "".join(out))
+
+
 def funnel_panel(db: Db, p: str = "funnel") -> str:
     """Where every candidate ended up, as one narrowing population.
 
@@ -2347,11 +2530,28 @@ def _narrative_what_was_seen(t: queries.Trace, p: str) -> str:
                                meaning="no candidate row with this id"))
     if t.raw_events_q.rows:
         for i, r in enumerate(t.raw_events_q.rows):
-            out.append(details(
-                f"{p}-rawevent-{i}",
-                f"source event {r['source']}:{r['source_id']} fetched {r['fetched_at']}",
-                pre(json_pretty(r["payload_raw"])),
-            ))
+            # WHAT IT SAID, IN THE HEADING. Owner-reported 2026-09-13:
+            # "these references dont actually mean anything to me". The
+            # fold was headed `source event edgar_fts:0001193125-26-385383
+            # :credit_amendment fetched ...` - four machine facts and not
+            # one word about what the filing was. The same payload the
+            # fold opens onto already holds the headline or the matched
+            # phrase, and queries.describe_source has read it since
+            # August for the trade card alone.
+            said = queries.describe_source(r["payload_raw"])
+            feed = queries.source_label(r["source"])
+            link = queries.source_link(r["source"], r["payload_raw"])
+            head = (f"{said} - {feed}, {r['fetched_at']}"
+                    if _readable_ref(said) else
+                    f"{feed} - {r['source_id']}, fetched {r['fetched_at']}")
+            body = pre(json_pretty(r["payload_raw"]))
+            if link.startswith(("http://", "https://")):
+                # A payload is upstream data and the dashboard holds an
+                # access code, so http(s) only and rel=noopener.
+                body = (f'<p><a href="{esc(link)}" target="_blank" '
+                        f'rel="noopener noreferrer">Open this source</a> '
+                        f"({esc(r['source_id'])})</p>" + body)
+            out.append(details(f"{p}-rawevent-{i}", head, body))
     else:
         out.append(empty_block(
             f"{p}-empty-rawevents", t.raw_events_q,
@@ -2721,6 +2921,14 @@ def _narrative_evidence(t: queries.Trace, p: str, db_for_graph=None,
         # belongs to and its predicate rides along on the same line.
         if node in seen:
             continue
+        # AN UNNAMED ENTITY IS DROPPED HERE TOO. `label_of` falls through
+        # to `subject_entity_id`, which is a `uuid.uuid4().hex` - a
+        # 32-character hex box in the middle of a diagram, which is the
+        # owner's "these references dont actually mean anything to me".
+        # The assertion is still in the verbatim table underneath, where
+        # an id is the right thing to show.
+        if not _readable_ref(node):
+            continue
         seen.add(node)
         branches.append((
             # Predicates are stored as they came from the graph, in
@@ -2830,11 +3038,51 @@ def _conviction_gauge(value: float, p: str, decision: dict | None = None) -> str
         "</div>")
 
 
+def _readable_ref(value: str) -> bool:
+    """Is this string something a reader learns anything from?
+
+    OWNER-REPORTED 2026-09-13: *"these references dont actually mean
+    anything to me"*. Classified BY THE RULE rather than by a list of
+    known id formats (house rule 7), because the next opaque id will be
+    in a format nobody thought of: a label that is mostly digits and
+    punctuation is a machine reference, whatever scheme produced it.
+    `0001193125-26-385383`, `61720763:CHYM` and a 32-char uuid all fail;
+    `Chime Financial Stock Pulls Back Thursday` and `Bern Richard (CEO)`
+    pass.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return False
+    letters = sum(1 for ch in text if ch.isalpha())
+    # A reference is allowed to CONTAIN digits - "bought 141,000 shares
+    # at $70.96" is full of them - so the test is whether letters carry
+    # the string, plus a word of at least three letters to rule out a
+    # hex blob.
+    if letters < max(3, len(text) // 2):
+        return False
+    # LETTERS INSIDE THE WORD, not `word.isalpha()`. Found by rendering:
+    # an EDGAR full-text match is stored as `"credit agreement"
+    # "amendment"` - every word carries a quote, so `isalpha()` was
+    # False for all of them and a perfectly readable phrase was
+    # discarded in favour of the feed's machine name.
+    for word in text.replace("-", " ").replace(":", " ").split():
+        if sum(1 for ch in word if ch.isalpha()) >= 3:
+            return True
+    return False
+
+
 def _spider_groups(t, c, db, ticker: str) -> list:
-    """The three arms of the decision, each built from what is actually
+    """The arms of the decision, each built from what is actually
     recorded. An arm with nothing in it is dropped rather than drawn
     empty - a branch to nowhere reads as a fact the bot had and did not
     use, which is the opposite of true.
+
+    THERE ARE FOUR NOW, and the fourth is the owner's report: *"I can see
+    the graph its made but stops at what the deterministic engine did and
+    what happened at the broker it just seems to cut off"*. That was
+    literally what it did. The arms were saw / concluded / did, and the
+    story of a decision does not end at the risk engine - it ends at a
+    fill, or at a sentence saying why there was never going to be one.
     """
     view = dict(t.view_q.rows[0]) if t.view_q.rows else {}
     decision = dict(t.decisions_q.rows[0]) if t.decisions_q.rows else {}
@@ -2843,10 +3091,16 @@ def _spider_groups(t, c, db, ticker: str) -> list:
     seen = []
     for r in t.raw_events_q.rows[:4]:
         d = dict(r)
-        # The feed in WORDS. "edgar" names the machine, not the thing.
-        seen.append((queries.source_label(d.get("source")),
-                     f"filing {d.get('source_id') or 'unknown'}, fetched "
-                     f"{d.get('fetched_at') or 'unknown'}"))
+        # WHAT THE SOURCE SAID, not what it is filed under. This drew
+        # the feed's name with the accession number in the hover, so the
+        # owner's CHYM card offered "Market news (Alpaca)" over
+        # "filing 61720763:CHYM" - twice, once per feed - when the same
+        # payload already held the headline.
+        said = queries.describe_source(d.get("payload_raw"))
+        feed = queries.source_label(d.get("source"))
+        ref = f"{feed}, {d.get('source_id') or 'no id'}, fetched " \
+              f"{d.get('fetched_at') or 'unknown'}"
+        seen.append((said if _readable_ref(said) else feed, ref))
     ev = queries.evidence_graph(db, ticker) if ticker else None
     for r in (ev.rows if ev else [])[:4]:
         d = dict(r)
@@ -2859,8 +3113,14 @@ def _spider_groups(t, c, db, ticker: str) -> list:
         label = subj if obj == ticker else obj
         if not label:
             label = str(d.get("object_date") or "").strip()
-        if label and label != ticker:
-            seen.append((label, str(d.get("predicate") or "linked to")))
+        # AN UNNAMED ENTITY IS DROPPED, not drawn as its own id. Entity
+        # ids are `uuid.uuid4().hex`, and a node reading `a3f1c9...` is
+        # the owner's complaint exactly. The assertion is still in the
+        # verbatim table below, where an id is the right thing to show.
+        if label and label != ticker and _readable_ref(label):
+            seen.append((label,
+                         str(d.get("predicate") or "linked to").replace(
+                             "_", " ")))
     if c.get("catalyst_type"):
         seen.append((str(c["catalyst_type"]).replace("_", " "), "catalyst type"))
 
@@ -2900,7 +3160,84 @@ def _spider_groups(t, c, db, ticker: str) -> list:
 
     return [("What it saw", seen[:6]),
             ("What it concluded", concluded[:5]),
-            ("What the code did", did[:6])]
+            ("What the code did", did[:6]),
+            ("What happened next", _spider_happened(t, decision)[:6])]
+
+
+def _spider_happened(t, decision: dict) -> list:
+    """The fourth arm: the broker, and what became of the position.
+
+    OWNER-REPORTED 2026-09-13: the picture *"stops at what the
+    deterministic engine did and what happened at the broker it just
+    seems to cut off"*.
+
+    A DECLINED CANDIDATE STILL GETS AN ARM, and that is the point rather
+    than an edge case. The bot has declined 293 candidates and traded
+    one, so "nothing was sent, and here is what the stock did without
+    us" IS the outcome in almost every case - and the refusal tracker is
+    the project's own most important feedback loop. Drawing nothing there
+    is what made the page look truncated.
+
+    The arm is empty ONLY when nothing is knowable: no order, no
+    decision, no refusal row. `decision_spider` drops an empty arm, so
+    that case draws three arms exactly as before.
+    """
+    out: list = []
+    for o in t.orders_q.rows[:2]:
+        o = dict(o)
+        out.append((
+            f"{o.get('side') or '?'} {o.get('qty') or '?'} sent",
+            f"order {o.get('id')} as {o.get('order_type')} "
+            f"{o.get('time_in_force')}, broker id "
+            f"{o.get('broker_order_id') or 'none assigned'}, status "
+            f"{o.get('status')}"))
+        fills = t.fills_by_order.get(o.get("id"))
+        for fr in (fills.rows if fills else [])[:2]:
+            fr = dict(fr)
+            out.append((f"filled at {fr.get('broker_reported_price') or fr.get('price')}",
+                        f"{fr.get('qty')} share(s) at {fr.get('filled_at')}; "
+                        "the broker's own price, with any modelled "
+                        "slippage recorded beside it, never instead"))
+    for pos in (t.positions or [])[:1]:
+        out.append((f"position {pos.get('status') or 'open'}",
+                    f"opened {pos.get('opened_at')}, hard exit "
+                    f"{pos.get('planned_exit_date')}, stop order "
+                    f"{pos.get('stop_order_id') or 'NONE RECORDED'}"))
+    for ct in t.closed_q.rows[:1]:
+        ct = dict(ct)
+        out.append((
+            f"closed {dollars(ct.get('realized_pnl_cents'))}",
+            f"entry {ct.get('entry_price')}, exit {ct.get('exit_price')}, "
+            f"ended by {ct.get('exit_reason')} after "
+            f"{ct.get('actual_holding_days')} day(s) against an expected "
+            f"{ct.get('expected_holding_days')}"))
+    n_reviews = len(t.reviews_q.rows) if t.reviews_q is not None else 0
+    if n_reviews:
+        out.append((f"{n_reviews} re-read(s)",
+                    "Claude re-read the open position; a review can only "
+                    "ever bring the exit date forward, never push it out"))
+
+    # THE DECLINED CASE, which is 293 of the 294 decisions on record.
+    if not out and str(decision.get("action") or "").lower() == "skip":
+        out.append(("no order was sent",
+                    "the risk engine declined, so nothing reached the "
+                    "broker - the arm above says which rule stopped it"))
+    for r in (t.refusal_q.rows if t.refusal_q is not None else [])[:2]:
+        r = dict(r)
+        if r.get("scored_at"):
+            out.append((
+                f"went {r.get('outcome_return') or '?'} without us",
+                f"declined at {r.get('price_at_refusal')}, scored "
+                f"{r.get('scored_at')} at {r.get('outcome_price')} - a "
+                "declined name that rose is a trade refused without "
+                "skill; one that fell says the refusal was right"))
+        else:
+            out.append((
+                "outcome not scored yet",
+                f"the price at refusal ({r.get('price_at_refusal')}) is "
+                "recorded and waiting for its holding window to pass; "
+                "until it is scored this refusal is evidence of nothing"))
+    return out
 
 
 def trace_simple(db: Db, candidate_id: str, p: str = "trs") -> str:

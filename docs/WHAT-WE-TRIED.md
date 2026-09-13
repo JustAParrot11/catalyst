@@ -2180,3 +2180,182 @@ restoring**, not merely restore the source.
   Whether `priced_in` stops being set on 95% of candidates is the number
   to watch, per arm, on the Pipeline page.
 - **No production call has been billed with the clock in the prompt.**
+
+---
+
+## 23. The card cut off at the risk engine, and nothing said what was queued
+
+Owner-reported 2026-09-13, on the CHYM decision card and the AAPL
+tracked-stock row:
+
+> *"I can see the graph its made but stops at what the deterministic
+> engine did and what happened at the broker it just seems to cut off"*
+>
+> *"the graph is looking good however, these references dont actually
+> mean anything to me"*
+>
+> *"I can see it was doing active research and finding potential stocks
+> on 12/09, this is good. What did it do, are any queued up its not clear
+> anywhere what it is doing."*
+>
+> *"why cant it just make the API call to immediately get the historical
+> predicted data for tracking on the graph, why do i need to wait a day
+> when the data is available"*
+
+### 1. It cut off because there were three arms and the third was the risk engine
+
+Literally. `_spider_groups` returned `saw / concluded / did`, and
+`decision_spider` hard-capped `groups[:3]`. **The story of a decision
+does not end at the risk engine** — it ends at a fill, or at a sentence
+saying why there was never going to be one.
+
+**And the declined case is not an edge case, it is 293 of 294 decisions.**
+So "nothing was sent, the risk engine declined" plus "here is what the
+stock did without us, or that it is not scored yet" *is* the outcome in
+almost every card. Drawing nothing there is what made the page look
+truncated.
+
+**A fourth arm needed a fourth colour, and the note in the code said
+three was the cap.** So it was measured rather than argued — CIE76 ΔE in
+Lab, Vienot LMS simulation for deuteran/protan/tritan, against this
+dashboard's own two surfaces:
+
+| | worst normal ΔE | worst CVD ΔE | min contrast |
+|---|---|---|---|
+| light, 3 arms | 94.2 | 22.5 | 2.82:1 |
+| **light, 4 arms** | 42.8 | **22.5** | 2.82:1 |
+| dark, 3 arms | 87.2 | 7.8 | 4.66:1 |
+| **dark, 4 arms** | 25.5 | **7.8** | 4.66:1 |
+
+**The worst CVD pair is unchanged in both themes** — it is series-1
+against series-3, which was already the binding pair and which the fourth
+colour does not come between. Normal-vision worst pair falls and stays
+well clear of 14.9, the last figure §18 measured as reliable. The fourth
+is `--cmp-2`, an **existing** token, so there is no second palette to
+drift out of step. Slate was not considered: §18 already rejected it for
+reading as chrome.
+
+**The cap is now `[:len(SPIDER_SLOTS)]`, not `[:3]`.** The colour index is
+`gi % len(SPIDER_SLOTS)`, so a typed cap and the palette could disagree —
+and a fifth arm would have silently redrawn in the first arm's hue.
+
+### 2. The references were machine references, and the describer already existed
+
+| where | was | is |
+|---|---|---|
+| spider leaf | `Market news (Alpaca)`, accession in the hover | `Chime Financial Stock Pulls Back Thursday`, reference in the hover |
+| spider leaf | `edgar fts` | `"credit agreement" "amendment"` |
+| unnamed graph entity | `3f9c1ab24e7d4c8fa1b25e6d9c704f11` | dropped from the picture, still in the verbatim table |
+| full-record fold | `source event edgar_fts:0001193125-26-385383:credit_amendment fetched …` | the headline, the feed, the time — and a link to the source the feed actually fetched |
+
+**`queries._describe_source` has read those payloads since §10b** — for
+the **trade card alone**, which exists for one candidate in seven
+thousand. §6's "a helper nobody calls", in its other form: a helper only
+*one* caller reaches, on the page almost nobody opens. It is `describe_source`
+now, takes the payload as stored or as JSON text, and the spider and the
+full record both call it.
+
+**`edgar_fts` had no entry in `SOURCE_LABELS`,** so it read as
+`edgar fts` — and it is the feed behind the conjunction arm, which took
+48% of the research budget. The one machine name most likely to be on the
+page was the one missing from the table. Found by rendering the owner's
+own card, not by a test.
+
+**Readability is a RULE, not a list of id formats** (house rule 7): a
+label whose letters do not carry it, or which contains no word of three
+letters, is a machine reference whatever scheme produced it. A hand-written
+list of formats mislabels the first format nobody thought of.
+
+**And the rule's first version was wrong, found by rendering.** It
+required `word.isalpha()`, and an EDGAR full-text match is stored as
+`"credit agreement" "amendment"` — **every word carries a quote**, so
+`isalpha()` was False for all of them and a perfectly readable phrase was
+thrown away in favour of the feed's machine name. It counts letters
+*inside* each word now.
+
+### 3. "What is it doing" — the figures were all on disk and nothing assembled them
+
+The Pipeline page counts a **lifetime** population: 6,999 candidates,
+299 researched. That answers *what has happened* and structurally cannot
+answer *what is happening*. And its largest single drop reason is
+**`deferred_max_research_per_cycle` at 6,581** — that IS the queue,
+named, counted, and never once described as one. The owner read a
+six-thousand-line loss with nothing anywhere saying those candidates were
+still in the running.
+
+`working_on()` now sits **above** the funnel on `/funnel` and answers four
+questions in the order a reader asks them:
+
+1. **When did it last spend anything, and when was the newest candidate
+   built** — two separate facts, because discovering-but-not-researching
+   is a different problem from doing neither, and one number cannot say
+   which.
+2. **Queued / judged-and-waiting-for-the-open / finished / paid calls
+   today**, each counted from rows. The weekend state gets its own count:
+   it is not queued (it has been judged and costs nothing more) and not
+   finished (no risk decision).
+3. **The rate, stated as arithmetic the reader can check** — slots per
+   cycle × cycle length — and explicitly **not a countdown**, because the
+   screens rebuild the candidate list every cycle so the queue grows while
+   it drains. Plus that nothing in the queue is discarded.
+4. **The next eight names.**
+
+**TRIED AND CORRECTED BEFORE SHIPPING:** the first version ordered the
+next-in-line list by `discovered_at DESC` and captioned it *"the order
+the belt takes them in"*. **That was an unverified claim about code, and
+`interleave_by_arm`'s own docstring contradicts it** — the belt
+round-robins one per arm per round, and within an arm it preserves the
+live builder's order, which the database cannot replay. So the rotation
+is now applied **by calling the cycle's own function**, and the caption
+admits what cannot be reproduced instead of papering over it. Caught by
+reading the function before describing it (house rule 1).
+
+### 4. The new stock is fetched on the add, and the wait was already not a day
+
+§19 had cut it from a day to **one cycle** by keying the refresh marker on
+the tracked SET as well as the date. But one cycle is up to fifteen
+minutes of an empty row, and **an empty row is indistinguishable from a
+mistyped ticker** — the state this dashboard has been reported for twice.
+
+So `track_stock` now fetches immediately, through the **same**
+`refresh_comparisons` the scheduler calls. Three things make that safe
+rather than clever:
+
+- `refresh_benchmark` promises not to raise and `refresh_comparisons`
+  wraps it again, so a failed fetch cannot cost the row.
+- **The row is committed before the fetch runs.** A failure, a timeout or
+  a dead process leaves the stock tracked and the scheduler picks it up
+  next cycle exactly as before — this is an accelerator, never the only
+  path. A test asserts that with a fetch that raises.
+- It writes a bar cache file and nothing else. `grep` over `risk/`,
+  `execution/` and `cost/` for the function returns nothing, and a test
+  holds that.
+
+The sentence the owner gets says **what happened**, not what was
+attempted: bars written and the feed, or the refusal with the raw upstream
+response and *"either the spelling is wrong, or it is not US-listed"* —
+which is where a London ticker such as VUAG reports itself, since the form
+accepts it by shape on purpose (§20).
+
+### The generalising lesson, and it is the fourth time
+
+**A fact the system already had, one caller away from the page that needed
+it.** §17 (the diagnosis discarded at the point of writing), §14
+(`orders.decision_id`), §22 (the spread sentinel), and now the source
+describer reachable only from the trade card. In every case the work was
+done and the wiring was missing. **When a panel is reported as confusing,
+grep for whether the fact already exists somewhere else in the codebase
+before writing anything new.**
+
+### Verification
+
+- Full suite green offline: **4081 tests**.
+
+### What is NOT claimed
+
+- **No tracked stock has ever been fetched from the dashboard in
+  production.** The chain is verified offline with an injected transport.
+- **Whether four arms is more readable than three is a judgement the
+  owner will make by looking at it.** The ΔE table says only that the
+  fourth colour costs nothing measurable in separability, and every arm
+  carries a visible text label, so colour is never the identifier.
