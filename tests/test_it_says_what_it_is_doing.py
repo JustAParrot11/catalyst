@@ -92,6 +92,16 @@ def queued(tmp_path):
                      (cid, "long", 0.58, "t", "i", 10, 0, "r"))
         conn.execute("INSERT INTO research_view_context VALUES (?,?,?,?)",
                      (cid, "32.31", "daily_close", ago(120)))
+    # A LIVE view with no decision yet. Without this row the priced_off
+    # filter is not load-bearing and a sabotage replacing it with 1=1
+    # comes back green - which is exactly what happened.
+    conn.execute("INSERT INTO research_calls VALUES (?,?,?,?,?,?,?,?,?)",
+                 ("rcl", "c12", "claude-sonnet-5", "p", "[]", "9.46", 30256,
+                  None, ago(10)))
+    conn.execute("INSERT INTO research_views VALUES (?,?,?,?,?,?,?,?)",
+                 ("c12", "no_trade", 0.7, "t", "i", 10, 1, "r"))
+    conn.execute("INSERT INTO research_view_context VALUES (?,?,?,?)",
+                 ("c12", "44.10", "live_nbbo", ago(10)))
     for i in range(20, 40):
         conn.execute("INSERT INTO research_calls VALUES (?,?,?,?,?,?,?,?,?)",
                      (f"na{i}", f"c{i}", "", "", "[]", "0", 0,
@@ -106,7 +116,7 @@ class TestItCountsWhatIsQueued:
 
     def test_the_queue_is_counted_and_named(self, queued):
         d = queries.what_it_is_doing(Db(queued), now=NOW)
-        assert d.waiting_for_research == 54, (
+        assert d.waiting_for_research == 53, (
             "a candidate with no view and no decision is queued; the "
             "funnel reports these as a loss")
 
@@ -115,20 +125,26 @@ class TestItCountsWhatIsQueued:
         research call is not a research call, and counting it as one would
         report the queue as empty."""
         d = queries.what_it_is_doing(Db(queued), now=NOW)
-        assert d.waiting_for_research == 54
+        assert d.waiting_for_research == 53
         assert d.finished == 4
 
     def test_a_weekend_view_is_its_own_state(self, queued):
         """Not queued (it has been judged and cost nothing more) and not
         finished (no risk decision). §13's whole point, and it needs its
-        own count or it reads as one of the other two."""
+        own count or it reads as one of the other two.
+
+        THREE views have no decision here and only TWO were formed off a
+        cached close - the third is a live view still waiting for the risk
+        engine, which is an ordinary Tuesday and NOT the weekend state.
+        Without that third row the `priced_off` filter is not load-bearing
+        and a sabotage replacing it with `1=1` comes back green."""
         d = queries.what_it_is_doing(Db(queued), now=NOW)
         assert d.holding_a_weekend_view == 2
 
     def test_paid_calls_today_excludes_the_skipped_ones(self, queued):
         d = queries.what_it_is_doing(Db(queued), now=NOW)
-        assert d.calls_today == 6, (
-            "20 deferral rows were counted as spending" )
+        assert d.calls_today == 7, (
+            "20 deferral rows were counted as spending")
 
     def test_the_belt_is_the_cycle_s_own_number(self, queued):
         """Read through `cycle.research_per_cycle`, so the figure on the
@@ -191,13 +207,15 @@ class TestThePanelAnswersTheQuestionAsked:
 
     def test_it_says_when_it_last_spent_anything(self, queued):
         html = panels.working_on(Db(queued), p="doing", now=NOW)
-        assert "30 minutes ago" in _visible(html)
+        assert "10 minutes ago" in _visible(html), (
+            "the newest paid call is 10 minutes old; a bare timestamp or a "
+            "duration from an older call is not the answer")
 
     def test_it_names_the_queue_in_words_not_only_a_number(self, queued):
         html = panels.working_on(Db(queued), p="doing", now=NOW)
         text = _visible(html)
         assert "Queued for research" in text
-        assert "54" in text
+        assert "53" in text
 
     def test_it_says_what_each_recent_call_CONCLUDED(self, queued):
         """"What did it do" is not answered by a count of calls."""
@@ -240,10 +258,29 @@ class TestAZeroIsNeverSilent:
     """House rule 3, and §14's rule: "no queue" and "the query is broken"
     look identical as a 0."""
 
-    def test_an_unreadable_count_is_a_dash_and_not_a_zero(self, tmp_path):
+    def test_a_missing_database_is_a_dash_and_not_a_zero(self, tmp_path):
         d = queries.what_it_is_doing(Db(str(tmp_path / "missing.db")))
         assert d.waiting_for_research is None
         assert d.error, "a failure with no error text is a silent zero"
+
+    def test_a_FAILING_QUERY_is_a_dash_and_not_a_zero(self, tmp_path):
+        """A database that OPENS but whose table is not there. The
+        missing-file case returns early and never reaches the per-count
+        handler, so a sabotage making that handler return 0 came back
+        green - the test could not see the branch it was guarding."""
+        import sqlite3
+
+        path = str(tmp_path / "half.db")
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE candidates (id TEXT)")
+        conn.commit()
+        conn.close()
+        d = queries.what_it_is_doing(Db(path), now=NOW)
+        assert d.waiting_for_research is None, (
+            "a query that could not run reported a count of 0, which reads "
+            "as an empty queue")
+        assert "research_views" in d.error or "no such table" in d.error, (
+            f"the error does not name what failed: {d.error!r}")
 
     def test_the_panel_prints_the_error_verbatim(self, tmp_path):
         html = panels.working_on(Db(str(tmp_path / "missing.db")), p="doing",

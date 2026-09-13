@@ -110,13 +110,23 @@ def chym(tmp_path):
     for eid, kind, key, name in [
             ("g1", "company", "company:CHYM", "CHYM"),
             # THE HEX CASE. A real entity whose display_name never got
-            # written, so `label_of` falls through to the uuid.
+            # written, so the mindmap's `label_of` falls through to
+            # `subject_entity_id` - a uuid4 hex.
             ("g2", "other", "org:3f9c1ab24e7d4c8fa1b25e6d9c704f11", ""),
+            # AND THE OTHER SHAPE OF THE SAME PROBLEM, which is the one
+            # the SPIDER can reach: an entity that HAS a display_name and
+            # whose display_name is itself a machine reference. The
+            # spider reads `subject_label` only, so it can never see a
+            # uuid - found by sabotage coming back green - but it can
+            # certainly draw an accession number somebody stored as a
+            # name.
+            ("g4", "filing", "filing:acc", "0001193125-26-385383"),
             ("g3", "event", "event:stride",
              "Stride Bank acquisition, $590M cash")]:
         conn.execute("INSERT INTO graph_entities VALUES (?,?,?,?,?)",
                      (eid, kind, key, name, iso))
     for i, (s_, pred, o_) in enumerate([("g2", "lender_to", "g1"),
+                                        ("g4", "filed_against", "g1"),
                                         ("g1", "likely_beneficiary_of", "g3")]):
         conn.execute("INSERT INTO graph_assertions VALUES (?,?,?,?,?,?,?,?,?)",
                      (f"ga{i}", s_, pred, o_, None, "edgar_filing",
@@ -241,10 +251,38 @@ class TestTheReferencesSayWhatTheyAre:
         assert "61720763:CHYM" not in _visible(html)
         assert "61720763:CHYM" in _hovers(html)
 
-    def test_an_unnamed_graph_entity_is_not_drawn_as_its_uuid(self, chym):
+    def test_an_opaque_NAME_is_not_drawn_in_the_spider(self, chym):
+        """The spider reads `subject_label` only, so it can never see a
+        uuid - sabotage proved that by coming back green. What it CAN
+        draw is an entity whose stored display_name is itself a machine
+        reference, which is the same defect wearing the other hat."""
         html = panels.trace_simple(Db(chym), CID, p="trs")
-        assert "3f9c1ab24e7d4c8fa1b25e6d9c704f11" not in html, (
+        assert "0001193125-26-385383" not in _visible(html)
+
+    def test_an_unnamed_graph_entity_is_not_drawn_as_its_uuid(self, chym):
+        """THE MINDMAP is where the uuid can actually appear: its
+        `label_of` falls through to `subject_entity_id`, and it renders on
+        the FULL record, not the simple view. The first version of this
+        test asserted against `trace_simple` and could not fail."""
+        html = panels.trace_page(Db(chym), CID, p="tr")
+        mindmap = html[html.index("-mindmap"):] if "-mindmap" in html else ""
+        assert mindmap, "no mindmap was drawn, so this test guards nothing"
+        assert "3f9c1ab24e7d4c8fa1b25e6d9c704f11" not in _visible(mindmap), (
             "a 32-character hex box is the owner's complaint exactly")
+
+    def test_the_mindmap_falls_back_to_entity_ids_when_names_are_absent(
+            self, tmp_path):
+        """The path that makes the guard above reachable, asserted
+        explicitly: with no `graph_entities` NAME to join, the generic
+        scan is used and `label_of` reaches `subject_entity_id`. Without
+        this, the guard is protecting a branch no fixture enters."""
+        import inspect
+
+        src = inspect.getsource(panels._narrative_evidence)
+        assert '"subject_entity_id"' in src, (
+            "the fallback chain no longer reaches an entity id, so the "
+            "readability guard beside it is dead code - remove one or the "
+            "other rather than keeping a guard that guards nothing")
 
     def test_a_NAMED_graph_entity_is_still_drawn(self, chym):
         """The suppression must not take the good ones with it."""
