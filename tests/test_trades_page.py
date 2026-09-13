@@ -164,7 +164,7 @@ class TestTheStaleUnprotectedAlarm:
         finally:
             db.close()
         alarms = [t for sev, t, _ in a.items if sev == "alarm"]
-        assert not [t for t in alarms if "unprotected" in t], (
+        assert not [t for t in alarms if "EMBC" in t], (
             f"a resolved gap is still alarming: {alarms}")
 
     def test_a_position_unprotected_RIGHT_NOW_still_alarms(self, tmp_path):
@@ -179,8 +179,14 @@ class TestTheStaleUnprotectedAlarm:
         finally:
             db.close()
         alarms = [t for sev, t, _ in a.items if sev == "alarm"]
-        assert any("unprotected" in t for t in alarms), (
-            "a position with no resting stop RIGHT NOW is not alarming")
+        # PINNED TO THE BEHAVIOUR, not to the status word. The sentence
+        # used to read "is unprotected", which named the database's
+        # status and not what is at stake (owner, 2026-09-13: "what is
+        # this as it isnt very clear"). What must hold is that a live gap
+        # alarms and names the stock.
+        assert alarms, "a position with no resting stop RIGHT NOW is not alarming"
+        assert any("EMBC" in t for t in alarms), alarms
+        assert any("no protective stop" in t.lower() for t in alarms), alarms
 
     def test_duplicate_stops_also_still_alarm(self, tmp_path):
         path = _seed(tmp_path, stops=[
@@ -191,7 +197,11 @@ class TestTheStaleUnprotectedAlarm:
             a = queries.alerts(db)
         finally:
             db.close()
-        assert any("duplicate_stops" in t for sev, t, _ in a.items)
+        alarms = [t for sev, t, _ in a.items if sev == "alarm"]
+        assert alarms, "two resting stops on one position is not alarming"
+        # The consequence, not the enum: two stops means it can be SOLD
+        # TWICE, which needs the opposite response to having none.
+        assert any("sold twice" in t for t in alarms), alarms
 
     def test_the_gap_is_still_VISIBLE_on_the_trade(self, tmp_path):
         """Not alarming is not the same as hidden. A position that was
