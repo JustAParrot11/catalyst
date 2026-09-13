@@ -287,6 +287,7 @@ owner's time on a fix that was never applied or a test that never ran.
 | **Believing a month-to-date number is a run rate** | see §5 | divide by *active* days |
 | **A vacuously true assertion** | `nums == sorted(nums)` and `nums == range(1, len+1)` are BOTH true for an empty list, so removing the numbering entirely passed the test that existed to check it | assert the collection is non-empty *before* asserting anything about its contents |
 | **A hand-numbered sequence across conditional sections** | headings hard-coded "6." while the orders section only renders when orders exist, so a card showed 1,2,3,4,5,7 | number at render time from a counter |
+| **Committing while the suite runs** | two tests compare live `git` state against import-time `__version__`/`__build__`; a commit mid-run moved both and reported two false failures | let a run finish before touching the tree; re-run before believing a red |
 
 ---
 
@@ -2782,8 +2783,40 @@ see the file you just added.**
   the `FileNotFoundError` against a path that does not exist here, and
   the vacuous pass with its `returncode 2` and empty stdout.
 - The three touched test files run green from
-  `/tmp/.../scratchpad/elsewhere`, an unrelated absolute path.
-- Full suite green offline: **4128 tests**.
+  `/tmp/.../scratchpad/elsewhere`, an unrelated absolute path, and so
+  does the whole suite from there.
+
+### A NEW PROCESS FAILURE: committing while the suite runs invalidates it
+
+The first full run came back with **two failures that were not a
+regression at all**:
+
+```
+FAILED test_version_moves.py::TestThePatchMovesByItself::
+       test_it_counts_commits_since_the_series_changed
+FAILED test_version_moves.py::TestTheOwnerCanTellTwoDeploysApart::
+       test_a_dirty_tree_says_so
+```
+
+Both compare **live `git` state** against `catalyst.__version__` and
+`catalyst.__build__`, which are computed **once at import**. I committed
+three times while that run was in flight, so the commit count moved and
+the tree went from dirty to clean underneath it. Re-run on a settled
+tree, both pass.
+
+**The rule: do not commit, edit or stash while a suite run you intend to
+trust is in flight.** This project has two tests that are *correctly*
+anchored to the repository's own live state — that is their whole
+purpose, so they cannot be loosened — and any working-tree change during
+a run makes them report on a repository that no longer exists. It is the
+mirror image of house rule 6: instead of a fixture drifting out of a
+window, the *world* drifts out from under the fixture.
+
+It also cost a wrong conclusion for a few minutes: two red tests in
+`test_version_moves.py` look exactly like a real break, and the only way
+to tell was to re-run them once nothing was moving.
+- Full suite green offline, **4138 tests**, run twice: once in this
+  checkout and once from an unrelated absolute path.
 
 ### What is NOT claimed
 
