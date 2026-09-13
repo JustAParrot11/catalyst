@@ -3096,3 +3096,39 @@ untested. Same treatment as §17's single green sabotage.
   panel says so with its query. An honest zero, not a fault.
 - **"19 catalyst types — 2 backtested, 17 estimated"** is informational,
   and the split is the honest half: only 2 of 19 have ever been replayed.
+
+### Verification
+
+- **The owner's alert reproduced character for character**, `[]`
+  included, before anything changed.
+- **9 sabotage breakages, all 9 caught red**, and the round is weighted
+  deliberately toward the direction this change makes *quieter*: the
+  closed filter removed; `NULL` no longer counting so an orphan goes
+  silent; the `LEFT JOIN` turned inner (same silent orphan); filtering on
+  *any* closed position so one silences an open one beside it; the two
+  faults collapsed into one sentence; the uuid back in place of the
+  ticker; a missing ticker rendering blank; the orphan no longer saying
+  the record is wrong; and the consequence stripped back to a bare
+  status.
+- **Full suite green offline, zero failures** — a clean run with nothing
+  committed during it, so no `test_version_moves` artefacts this time
+  (§25, §26: the lesson applied rather than re-learned).
+
+### THREE EXISTING TESTS WERE PINNED TO THE STATUS WORD
+
+`test_trades_page.py::TestTheStaleUnprotectedAlarm` greped the rendered
+sentence for `"unprotected"` and `"duplicate_stops"` — the **database's
+own status names**. The clearer wording removes both words, so all three
+went red on a change that alters no behaviour.
+
+They were also the weaker assertion: *"the word appears in some alarm"*
+never said **which** position alarmed. Re-pinned to what must hold — an
+alarm exists, it names the stock, and it states the consequence. The
+fourth test in that class is untouched and still passes, because the
+trade page keeps the raw status word in its timeline: that is the
+"history is not deleted" property.
+
+**Same shape as §26's `"2 times since"`.** Twice in one day a test
+pinned to phrasing broke on a rewording that improved it, which is worth
+stating as a rule: **assert the property the reader depends on, not the
+string that currently expresses it.**
