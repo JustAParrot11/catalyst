@@ -3053,22 +3053,35 @@ def _readable_ref(value: str) -> bool:
     text = str(value or "").strip()
     if not text:
         return False
-    letters = sum(1 for ch in text if ch.isalpha())
-    # A reference is allowed to CONTAIN digits - "bought 141,000 shares
-    # at $70.96" is full of them - so the test is whether letters carry
-    # the string, plus a word of at least three letters to rule out a
-    # hex blob.
-    if letters < max(3, len(text) // 2):
+    # WHAT MAKES A LABEL READABLE IS *WORDS*, and a word is a run of
+    # letters with the punctuation taken off its ends. Two conditions,
+    # both needed:
+    #
+    #   1. at least one word, so a pure id has none;
+    #   2. words carry at least half the characters, so a reference with
+    #      a word stuck to it - `61720763:CHYM` - is still a reference.
+    #
+    # TWO EARLIER VERSIONS WERE WRONG, both found by running it rather
+    # than reasoning:
+    #
+    #   * `word.isalpha()` threw away `"credit agreement" "amendment"`,
+    #     because every token carries a quote.
+    #   * "letters carry half the string, plus a token with three
+    #     letters in it" ACCEPTED A 32-CHARACTER HEX ID whose digits
+    #     happen to be mostly a-f: `a1b2c3d4e5f6...` is sixteen letters
+    #     in thirty-two characters, which clears both halves. Caught by
+    #     this module's own test, not by inspection.
+    #
+    # No hex-specific case and no list of id formats (house rule 7): the
+    # rule is about word shape, so the first id format nobody thought of
+    # is classified correctly too.
+    words = []
+    for token in re.split(r"[^0-9A-Za-z]+", text):
+        if len(token) >= 2 and token.isalpha():
+            words.append(token)
+    if not words:
         return False
-    # LETTERS INSIDE THE WORD, not `word.isalpha()`. Found by rendering:
-    # an EDGAR full-text match is stored as `"credit agreement"
-    # "amendment"` - every word carries a quote, so `isalpha()` was
-    # False for all of them and a perfectly readable phrase was
-    # discarded in favour of the feed's machine name.
-    for word in text.replace("-", " ").replace(":", " ").split():
-        if sum(1 for ch in word if ch.isalpha()) >= 3:
-            return True
-    return False
+    return sum(len(w) for w in words) * 2 >= len(text)
 
 
 def _spider_groups(t, c, db, ticker: str) -> list:

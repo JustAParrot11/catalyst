@@ -50,6 +50,14 @@ from catalyst.dashboard import charts, panels, queries
 from catalyst.dashboard.db import Db
 
 NOW = datetime(2026, 9, 13, 12, 54, tzinfo=timezone.utc)
+#: `graph.store.upsert_entity` writes `uuid.uuid4().hex`. The ids matter to
+#: this module: the mindmap's fallback chain ends at `subject_entity_id`,
+#: so a fixture using short ids cannot reproduce the 32-character box the
+#: owner reported.
+HEX_COMPANY = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
+HEX_UNNAMED = "3f9c1ab24e7d4c8fa1b25e6d9c704f11"
+HEX_FILING = "77aa11bb22cc33dd44ee55ff66007788"
+HEX_EVENT = "0011223344556677889900aabbccddee"
 GRAPH_SCHEMA = (Path(__file__).resolve().parent.parent / "catalyst"
                 / "storage" / "schema_graph.sql")
 
@@ -107,12 +115,16 @@ def chym(tmp_path):
                   json.dumps({"conviction_floor": 0.5}), iso))
     conn.execute("INSERT INTO refusals VALUES (?,?,?,?,?,?,?)",
                  ("d-chym", cid, "32.31", iso, None, None, None))
+    # ENTITY IDS ARE `uuid.uuid4().hex` IN PRODUCTION. The fixture used to
+    # use "g1".."g4", which are unreadable by the rule anyway - so the
+    # fallback path could never draw the 32-character box the owner
+    # reported, and a sabotage of the guard came back green.
     for eid, kind, key, name in [
-            ("g1", "company", "company:CHYM", "CHYM"),
+            (HEX_COMPANY, "company", "company:CHYM", "CHYM"),
             # THE HEX CASE. A real entity whose display_name never got
             # written, so the mindmap's `label_of` falls through to
             # `subject_entity_id` - a uuid4 hex.
-            ("g2", "other", "org:3f9c1ab24e7d4c8fa1b25e6d9c704f11", ""),
+            (HEX_UNNAMED, "other", "org:unnamed", ""),
             # AND THE OTHER SHAPE OF THE SAME PROBLEM, which is the one
             # the SPIDER can reach: an entity that HAS a display_name and
             # whose display_name is itself a machine reference. The
@@ -120,14 +132,15 @@ def chym(tmp_path):
             # uuid - found by sabotage coming back green - but it can
             # certainly draw an accession number somebody stored as a
             # name.
-            ("g4", "filing", "filing:acc", "0001193125-26-385383"),
-            ("g3", "event", "event:stride",
+            (HEX_FILING, "filing", "filing:acc", "0001193125-26-385383"),
+            (HEX_EVENT, "event", "event:stride",
              "Stride Bank acquisition, $590M cash")]:
         conn.execute("INSERT INTO graph_entities VALUES (?,?,?,?,?)",
                      (eid, kind, key, name, iso))
-    for i, (s_, pred, o_) in enumerate([("g2", "lender_to", "g1"),
-                                        ("g4", "filed_against", "g1"),
-                                        ("g1", "likely_beneficiary_of", "g3")]):
+    for i, (s_, pred, o_) in enumerate(
+            [(HEX_UNNAMED, "lender_to", HEX_COMPANY),
+             (HEX_FILING, "filed_against", HEX_COMPANY),
+             (HEX_COMPANY, "likely_beneficiary_of", HEX_EVENT)]):
         conn.execute("INSERT INTO graph_assertions VALUES (?,?,?,?,?,?,?,?,?)",
                      (f"ga{i}", s_, pred, o_, None, "edgar_filing",
                       "0001193125-26-385383", iso, "primary_document"))
@@ -265,24 +278,56 @@ class TestTheReferencesSayWhatTheyAre:
         the FULL record, not the simple view. The first version of this
         test asserted against `trace_simple` and could not fail."""
         html = panels.trace_page(Db(chym), CID, p="tr")
-        mindmap = html[html.index("-mindmap"):] if "-mindmap" in html else ""
-        assert mindmap, "no mindmap was drawn, so this test guards nothing"
-        assert "3f9c1ab24e7d4c8fa1b25e6d9c704f11" not in _visible(mindmap), (
+        assert "-mindmap" in html, (
+            "no mindmap was drawn, so this test guards nothing")
+        # DRAWN text only. The verbatim table below the diagram carries
+        # every id on purpose - that is where a reference belongs, and a
+        # slice to the end of the page would find it there.
+        drawn = " ".join(re.findall(r"<text[^>]*>(.*?)</text>", html,
+                                   flags=re.S))
+        assert HEX_UNNAMED not in drawn, (
             "a 32-character hex box is the owner's complaint exactly")
+        assert HEX_UNNAMED in html, (
+            "the id vanished from the record as well, which loses the "
+            "audit trail rather than tidying the picture")
 
-    def test_the_mindmap_falls_back_to_entity_ids_when_names_are_absent(
-            self, tmp_path):
-        """The path that makes the guard above reachable, asserted
-        explicitly: with no `graph_entities` NAME to join, the generic
-        scan is used and `label_of` reaches `subject_entity_id`. Without
-        this, the guard is protecting a branch no fixture enters."""
-        import inspect
+    def test_the_mindmap_fallback_draws_no_entity_ids(self, chym):
+        """THE BRANCH WHERE A UUID CAN ACTUALLY REACH THE PAGE, entered on
+        purpose.
 
-        src = inspect.getsource(panels._narrative_evidence)
-        assert '"subject_entity_id"' in src, (
-            "the fallback chain no longer reaches an entity id, so the "
-            "readability guard beside it is dead code - remove one or the "
-            "other rather than keeping a guard that guards nothing")
+        `_narrative_evidence` prefers `evidence_graph`, which SELECTs
+        `display_name` - so on that path an entity id is not even in the
+        result set. It falls back to the generic `graph_assertions` scan
+        when that query returns nothing, and THAT row set carries
+        `subject_entity_id`, which `label_of` reaches.
+
+        The first version of this test grepped the source for
+        `"subject_entity_id"`, which proves the fallback chain exists and
+        not that anything guards it. This enters the branch: a candidate
+        whose ticker matches no `company:<TICKER>` entity, which is an
+        ordinary production state (a graph built under a different symbol,
+        or a database with assertions and no names).
+        """
+        import sqlite3
+
+        conn = sqlite3.connect(chym)
+        try:
+            conn.execute("UPDATE candidates SET ticker = 'ZZZZ' WHERE id = ?",
+                         (CID,))
+            conn.commit()
+        finally:
+            conn.close()
+        html = panels.trace_page(Db(chym), CID, p="tr")
+        # Proof the branch was entered: the generic scan is what renders
+        # the verbatim table, and it carries the raw entity ids.
+        assert HEX_UNNAMED in html, (
+            "the fallback did not run, so this test guards nothing")
+        drawn = " ".join(re.findall(r"<text[^>]*>(.*?)</text>", html,
+                                   flags=re.S))
+        assert HEX_UNNAMED not in drawn, (
+            "a 32-character entity id is drawn as a node label, which is "
+            "the owner's complaint exactly")
+        assert HEX_COMPANY not in drawn
 
     def test_a_NAMED_graph_entity_is_still_drawn(self, chym):
         """The suppression must not take the good ones with it."""
@@ -328,7 +373,16 @@ class TestTheReadabilityRuleIsARuleNotAList:
 
     @pytest.mark.parametrize("opaque", [
         "3f9c1ab24e7d4c8fa1b25e6d9c704f11",
+        # A HEX ID WHOSE DIGITS ARE MOSTLY a-f. Sixteen letters in
+        # thirty-two characters, so the earlier "letters carry half the
+        # string plus a three-letter token" rule accepted it - and the
+        # mindmap drew a 32-character box. Found by this module's own
+        # test, not by inspection.
+        "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+        "0011223344556677889900aabbccddee",
+        "77aa11bb22cc33dd44ee55ff66007788",
         "0001193125-26-385383",
+        # A reference with a real word stuck to it is still a reference.
         "61720763:CHYM",
         "0001193125-26-385383:x",
         "", "   ", None, "1234567890", "a1", "e1",
