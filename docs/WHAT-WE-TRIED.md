@@ -2349,7 +2349,56 @@ before writing anything new.**
 
 ### Verification
 
-- Full suite green offline: **4081 tests**.
+- Full suite green offline: **4087 tests**.
+- **36 sabotage breakages, all 36 caught red**, each verified to still
+  import first. 31 red on the first pass; **four of the five greens were
+  real test weaknesses** and one was a flawed sabotage.
+
+| green | why it passed | the fix |
+|---|---|---|
+| the uuid guard (mindmap) | asserted against `trace_simple`, which does not render the mindmap at all | re-asserted on the FULL record, reading the SVG's `<text>` elements |
+| the uuid guard (spider) | the spider reads `subject_label` only, so `subject_entity_id` **cannot reach it** | the same defect wearing the other hat is reachable — an entity whose stored `display_name` IS a machine reference. Seeded, and the guard is now load-bearing |
+| the weekend-view count | no LIVE view in the fixture, so `priced_off != 'live_nbbo'` → `1=1` changed nothing | a live view with no decision — an ordinary Tuesday — seeded; the counts moved 54/6 → 53/7 because of it |
+| dash-not-zero | used a MISSING database, which returns early and never reaches the per-count handler | a database that opens with one table present does reach it, and the error must name the table that was not there |
+| "nothing is discarded" | **a flawed sabotage**: it blanked the last string fragment while the sentence lives in an earlier one | retargeted at the sentence, then red |
+
+### AND PINNING THAT TEST FOUND A REAL DEFECT IN MY OWN RULE
+
+Worth its own heading because it is the second time in one change that a
+readability rule was wrong, and the first version of the fixture could
+not have caught it.
+
+The fixture used entity ids `g1`..`g4`. **Production writes
+`uuid.uuid4().hex`.** With realistic ids the mindmap fallback drew a box
+reading `a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6` — and measured, that string is
+**sixteen letters in thirty-two characters**, because its digits happen to
+be mostly `a`–`f`. The rule at that point was *"letters carry at least
+half the string, plus a token containing three letters"*, and a hex id
+like that clears **both** halves.
+
+The rule is now about **word shape**: a word is a run of letters with
+punctuation stripped from its ends, and a label is readable when it has at
+least one word **and** words carry at least half the characters. No hex
+case and no list of id formats (house rule 7), so:
+
+| label | readable |
+|---|---|
+| `"credit agreement" "amendment"` | yes |
+| `Bern Richard (CEO) bought 141,000 shares at $70.96` | yes |
+| `a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6` | no |
+| `61720763:CHYM` | **no** — a reference with a real word stuck to it is still a reference |
+| `0001193125-26-385383` | no |
+
+**Three defects in this change were found by running it, none by
+inspection:** `isalpha()` discarding the quoted EDGAR phrase, the missing
+`edgar_fts` label, and the hex id clearing the letter-fraction rule. Plus
+the unverified claim about the belt's order, found by reading
+`interleave_by_arm` before describing it.
+
+**A fixture that cannot produce the input the owner reported cannot test
+the fix.** `g1` is unreadable under every version of the rule, so the
+fixture agreed with the bug — the same shape as §14's foreign-keys-off
+fixture, in miniature.
 
 ### What is NOT claimed
 
