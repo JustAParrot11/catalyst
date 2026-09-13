@@ -3,6 +3,7 @@ schema initializes, the boundary object cannot carry a size, and the
 offline guard actually guards.
 """
 
+import ast
 import dataclasses
 import socket
 from datetime import date, datetime
@@ -348,6 +349,224 @@ def test_the_old_review_marker_is_gone_everywhere():
         str(p.relative_to(root)) for p in root.rglob("*.py")
         if "HUMAN REVIEW REQUIRED" in p.read_text())
     assert not stale, f"the retired marker is still in: {stale}"
+
+
+def _string_literals(path: Path):
+    """Every string literal in a file EXCEPT docstrings.
+
+    Docstrings are excluded on purpose: a path written down in prose to
+    explain a past defect is documentation, not something the code
+    opens - and tests/source_guard.py quotes the exact offending line.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    docstrings = set()
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                 ast.AsyncFunctionDef)) or not body:
+            continue
+        first = body[0]
+        if (isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)):
+            docstrings.add(id(first.value))
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and id(node) not in docstrings):
+            yield node.lineno, node.value
+
+
+def _machine_specific_roots(checkout: Path, home: Path) -> list[str]:
+    """The prefixes no literal may start with, DERIVED not enumerated.
+
+    House rule 7. No list of /home, /Users, /root generalises: the
+    offending path is whatever directory this checkout happens to live
+    in, which is only knowable by asking at runtime.
+    """
+    roots = [str(checkout)]
+    # Guarded because a home of "/" would make every absolute path in
+    # the project an offender, and a checkout that IS home would flag
+    # itself twice.
+    if len(home.parts) > 1 and checkout != home:
+        roots.append(str(home))
+    return roots
+
+
+def _literals_naming_a_local_path(files, roots: list[str], base: Path):
+    """Every non-docstring literal starting with one of `roots`."""
+    offenders = []
+    for path in files:
+        for line, value in _string_literals(path):
+            if any(value.startswith(root) for root in roots):
+                try:
+                    where = path.relative_to(base).as_posix()
+                except ValueError:
+                    where = str(path)
+                offenders.append(f"{where}:{line}: {value!r}")
+    return offenders
+
+
+def _shipped_python(checkout: Path) -> list[Path]:
+    files = []
+    for folder in ("tests", "catalyst", "scripts"):
+        directory = checkout / folder
+        if not directory.is_dir():
+            continue
+        files.extend(path for path in sorted(directory.rglob("*.py"))
+                     if "__pycache__" not in path.parts)
+    assert files, (
+        f"found no Python under {checkout} to check, so this guard would "
+        f"pass by looking at nothing")
+    return files
+
+
+def test_no_file_names_this_checkout_by_absolute_path():
+    """THE OWNER'S UPGRADE FAILED AND ROLLED BACK ON EXACTLY THIS.
+
+    2026-09-13: a guard test passed cwd="/home/user/catalyst" - the
+    location of the sandbox it was written in - to subprocess.run. On
+    the owner's machine that directory does not exist, the call raised
+    FileNotFoundError, one test of 4120 failed, and upgrade.sh correctly
+    refused to ship the version. The suite was green everywhere it was
+    developed and red on the only machine that matters.
+
+    A path that must be absolute is either computed from __file__ or
+    handed in by a fixture. There is no third correct case.
+
+    THIS ASSERTION IS VACUOUS TODAY - there are no offenders left - so
+    the rule it rests on is exercised against synthetic input by
+    TestTheLocalPathRuleReallyCatchesOne below. Without that, deleting
+    the rule's body would pass."""
+    checkout = Path(__file__).resolve().parents[1]
+    roots = _machine_specific_roots(checkout, Path.home().resolve())
+    offenders = _literals_naming_a_local_path(
+        _shipped_python(checkout), roots, checkout)
+    assert not offenders, (
+        "these literals name a directory that exists only on the machine "
+        "they were written on, so they cannot run on the owner's:\n"
+        + "\n".join(offenders)
+        + "\n\nDerive the path from __file__ instead.")
+
+
+class TestTheLocalPathRuleReallyCatchesOne:
+    """The non-vacuity half. The guard above finds nothing because
+    nothing is left to find, which is exactly the shape of assertion
+    that broke the owner's upgrade in the first place."""
+
+    @staticmethod
+    def _write(tmp_path, body: str) -> Path:
+        path = tmp_path / "offender.py"
+        path.write_text(body)
+        return path
+
+    def test_a_literal_under_the_checkout_is_flagged(self, tmp_path):
+        checkout = Path("/some/where/catalyst")
+        path = self._write(
+            tmp_path,
+            'cwd = "/some/where/catalyst"\n')
+        found = _literals_naming_a_local_path(
+            [path], _machine_specific_roots(checkout, Path("/home/someone")),
+            tmp_path)
+        assert len(found) == 1, found
+        assert "offender.py:1" in found[0]
+
+    def test_a_literal_under_the_home_directory_is_flagged(self, tmp_path):
+        path = self._write(tmp_path, 'p = "/home/someone/notes/x.db"\n')
+        found = _literals_naming_a_local_path(
+            [path],
+            _machine_specific_roots(Path("/srv/catalyst"),
+                                    Path("/home/someone")),
+            tmp_path)
+        assert len(found) == 1, found
+
+    def test_the_same_path_in_a_docstring_is_not_flagged(self, tmp_path):
+        """Documenting the defect must stay possible - source_guard.py
+        quotes the exact offending line."""
+        path = self._write(
+            tmp_path,
+            '"""It used to say /some/where/catalyst here."""\n'
+            'def f():\n'
+            '    """And /some/where/catalyst here too."""\n'
+            '    return 1\n')
+        found = _literals_naming_a_local_path(
+            [path], _machine_specific_roots(Path("/some/where/catalyst"),
+                                            Path("/home/someone")),
+            tmp_path)
+        assert found == [], found
+
+    def test_a_relative_or_production_path_is_not_flagged(self, tmp_path):
+        path = self._write(
+            tmp_path,
+            'a = "catalyst/risk/sizing.py"\n'
+            'b = "/var/lib/catalyst"\n'
+            'c = "/v2/account"\n')
+        found = _literals_naming_a_local_path(
+            [path], _machine_specific_roots(Path("/some/where/catalyst"),
+                                            Path("/home/someone")),
+            tmp_path)
+        assert found == [], found
+
+    def test_a_home_of_root_only_is_not_used_as_a_prefix(self):
+        """Every absolute path in the project starts with "/", so a home
+        of "/" would flag all of them and the guard would be useless
+        noise rather than a rule."""
+        roots = _machine_specific_roots(Path("/srv/catalyst"), Path("/"))
+        assert roots == ["/srv/catalyst"]
+
+
+class TestTheSourceGuardCannotPassBySearchingNothing:
+    """The guards that assert "this string appears nowhere in the money
+    path" are only worth anything if the search really happened. The
+    version these replaced asserted `grep`'s stdout was empty, which is
+    also what an unresolved path produces - so it could pass while
+    reading no files at all."""
+
+    def test_a_missing_directory_raises_instead_of_matching_nothing(self):
+        from source_guard import source_matches
+
+        with pytest.raises(AssertionError) as caught:
+            source_matches("anything", "catalyst/not_a_real_package")
+        assert "not a directory" in str(caught.value)
+
+    def test_a_missing_file_raises_instead_of_matching_nothing(self):
+        from source_guard import pattern_matches
+
+        with pytest.raises(AssertionError) as caught:
+            pattern_matches("x", "catalyst/risk/not_a_real_module.py")
+        assert "not a file" in str(caught.value)
+
+    def test_a_directory_holding_no_python_raises(self):
+        """docs/ is real and contains no .py, so "nothing matched" there
+        would be true for the wrong reason."""
+        from source_guard import source_matches
+
+        with pytest.raises(AssertionError) as caught:
+            source_matches("anything", "docs")
+        assert "vacuously true" in str(caught.value)
+
+    def test_an_empty_needle_is_refused(self):
+        from source_guard import source_matches
+
+        with pytest.raises(AssertionError):
+            source_matches("", "catalyst/risk")
+
+    def test_it_finds_a_string_that_is_really_there(self):
+        """The positive half. Without this, every guard in the suite
+        could be satisfied by a search that reads nothing."""
+        from source_guard import source_matches
+
+        hits = source_matches("MONEY-CRITICAL", "catalyst/risk")
+        assert hits, (
+            "the source search found no MONEY-CRITICAL marker under "
+            "catalyst/risk, which certainly has them - so the search is "
+            "not reading the files and every guard built on it is empty")
+        assert all(":" in hit for hit in hits)
+
+    def test_the_repo_root_is_derived_and_correct(self):
+        from source_guard import REPO_ROOT
+
+        assert (REPO_ROOT / "catalyst" / "risk" / "sizing.py").is_file()
+        assert REPO_ROOT == Path(__file__).resolve().parents[1]
 
 
 def test_the_hard_bounds_still_say_a_human_decides():

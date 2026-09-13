@@ -2628,3 +2628,129 @@ And both failure branches, on fresh databases:
 - **It does not make the weekend price LIVE.** There is no live price when
   the book is shut. It makes it the *newest close that exists*, dated, and
   refuses it when it is not.
+
+---
+
+## 25. The upgrade rolled back on my own test, and the assertion could only fail by crashing
+
+Owner-reported 2026-09-13, with the upgrade's own output:
+
+> *"PUTTING THE OLD VERSION BACK … WHY: The new version failed its own
+> tests, so it is not safe to run your money through it."*
+>
+> `FileNotFoundError: [Errno 2] No such file or directory:
+> '/home/user/catalyst'`
+>
+> `1 failed, 4119 passed, 3 skipped, 1 warning in 74.77s`
+
+**The safety net worked exactly as designed and the failing test was
+mine.** `upgrade.sh` runs the full suite after pulling and rolls back on
+any failure, so nothing broken reached the money — but the version that
+did not ship contained §24's weekend-price fix, which the owner was
+waiting on.
+
+### The test, and the three defects in nine lines
+
+```python
+def test_nothing_here_can_size_spend_or_trade(self):
+    out = subprocess.run(
+        ["grep", "-rn", "_fetch_one_comparison_now",
+         "catalyst/risk", "catalyst/execution", "catalyst/cost"],
+        capture_output=True, text=True, cwd="/home/user/catalyst")
+    assert out.stdout.strip() == ""
+```
+
+| # | defect | measured |
+|---|---|---|
+| 1 | **a hard-coded absolute path** — the sandbox it was written in | `subprocess.run(..., cwd="/home/billy/Desktop/catalyst")` → `FileNotFoundError: [Errno 2] No such file or directory` |
+| 2 | **shelling out to `grep`** for four lines of Python | grep's presence, its exit codes and its path resolution are three failure modes, none of them the thing under test |
+| 3 | **THE VACUOUS PASS, and it is the worst of the three** | run from a directory where those paths do not resolve: `returncode 2`, `stderr "grep: catalyst/risk: No such file or directory"`, **`stdout ''`** — so `assert stdout.strip() == ""` **passed while reading no files at all** |
+
+Defect 3 is the one worth keeping. The assertion's only failure mode was
+a crash: whenever the search worked it found nothing, and whenever it
+did not work it also found nothing. §6's opening row — *a test that
+cannot fail is not a test* — in a form the sabotage rounds could not
+catch, because sabotaging the **production** string it guards would
+still leave the test green.
+
+**And two sibling guards had the same shape.**
+`test_tracking_ten_stocks_at_once.py` greps the same three directories
+with **no** `cwd` at all, which silently depends on pytest being invoked
+from the repository root; from anywhere else it searched nothing and
+passed.
+
+### What changed
+
+`tests/source_guard.py` — pure Python, root derived from `__file__`, and
+**it proves its own haystack before asserting anything about it**: the
+directory must exist and must contain at least one `.py` file, or the
+call raises with the resolved path in the message. An empty result then
+means *searched and found nothing*, never *searched nothing*. Five tests
+hold that, including the positive half (`MONEY-CRITICAL` **must** be
+found under `catalyst/risk`) — without which every guard built on the
+helper could be satisfied by a search that reads no files.
+
+### The generalising guard, stated as a rule rather than a list
+
+`test_no_file_names_this_checkout_by_absolute_path` walks `tests/`,
+`catalyst/` and `scripts/` and fails on any **non-docstring** string
+literal starting with either this repository's own resolved location or
+the running user's home directory. Both facts are **derived at runtime**
+— house rule 7, because no enumeration of `/home`, `/Users`, `/root`
+generalises: the offending path is whatever directory the checkout
+happens to live in, which is only knowable by asking. Docstrings are
+excluded on purpose, so this file and `source_guard.py` can quote the
+offending line as documentation.
+
+**It found a second offender immediately:** `scripts/fetch_sic.py:22`
+carried `REPO = pathlib.Path("/home/user/catalyst")`, four lines under a
+correctly derived `ROOT`. Now derived too.
+
+### Why no sabotage round caught this, and the rule that follows
+
+Every sabotage this project runs breaks the **code** and checks the test
+goes red. This defect was in the **test**, and in the direction where
+breaking the code changes nothing. The check that catches it is
+different in kind, and it is cheap:
+
+**RUN THE SUITE FROM A DIFFERENT ABSOLUTE PATH BEFORE SAYING IT IS
+GREEN.** Measured, on this change:
+
+| where | old guard | new guard |
+|---|---|---|
+| the development checkout | pass | pass |
+| a copy at an unrelated absolute path | **pass** (the hard-coded path still exists on *this* machine) | pass |
+| a directory where `catalyst/risk` does not resolve | **pass, having searched nothing** | raises |
+| a machine without `/home/user/catalyst` | **FileNotFoundError** | pass |
+
+Note row two: copying the repo elsewhere on the same machine did **not**
+reproduce the owner's crash, because the hard-coded directory still
+existed. What reproduced it was pointing the same call at a path that
+does not exist here. **A path-portability bug does not reproduce by
+moving the code; it reproduces by removing the path.**
+
+The first cross-path run also failed for an unrelated and instructive
+reason: the copy was made with `git ls-files`, which omitted the
+brand-new untracked helper, so eight tests failed on a missing import.
+**A "does it work elsewhere" check built from tracked files only cannot
+see the file you just added.**
+
+### Verification
+
+- **7 sabotage breakages, all 7 caught red**, each verified to still
+  import first.
+- Both defects of the old guard reproduced by running them, not argued:
+  the `FileNotFoundError` against a path that does not exist here, and
+  the vacuous pass with its `returncode 2` and empty stdout.
+- The three touched test files run green from
+  `/tmp/.../scratchpad/elsewhere`, an unrelated absolute path.
+- Full suite green offline: **4128 tests**.
+
+### What is NOT claimed
+
+- **The owner's upgrade has not yet been re-run.** What is verified is
+  that the failing assertion no longer depends on any path this machine
+  happens to have, and that the same class of literal cannot re-enter
+  `tests/`, `catalyst/` or `scripts/` without failing the suite.
+- **The other 21 test files using raw `sqlite3.connect`** (§14) are
+  still a known blind spot. Untouched here on purpose.

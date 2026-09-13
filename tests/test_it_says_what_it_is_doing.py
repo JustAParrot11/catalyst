@@ -480,11 +480,18 @@ class TestANewTrackedStockIsFetchedImmediately:
             "silently did nothing")
 
     def test_nothing_here_can_size_spend_or_trade(self):
-        """Same guard §18 set for the table itself."""
-        import subprocess
+        """Same guard §18 set for the table itself.
 
-        out = subprocess.run(
-            ["grep", "-rn", "_fetch_one_comparison_now",
-             "catalyst/risk", "catalyst/execution", "catalyst/cost"],
-            capture_output=True, text=True, cwd="/home/user/catalyst")
-        assert out.stdout.strip() == ""
+        Searched in Python off the repo root derived from __file__: the
+        first version of this test shelled out to grep with an absolute
+        cwd from the sandbox it was written in, and broke the owner's
+        upgrade. See tests/source_guard.py.
+        """
+        from source_guard import source_matches
+
+        hits = source_matches("_fetch_one_comparison_now",
+                              "catalyst/risk", "catalyst/execution",
+                              "catalyst/cost")
+        assert hits == [], (
+            "a dashboard convenience reached the money path:\n"
+            + "\n".join(hits))

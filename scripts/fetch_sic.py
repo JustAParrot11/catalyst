@@ -19,7 +19,10 @@ import urllib.error
 import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parents[0]
-REPO = pathlib.Path("/home/user/catalyst")
+# Derived from this file, never typed: a checkout lives wherever it was
+# cloned, and a hard-coded repo path broke the owner's upgrade once
+# (tests/source_guard.py).
+REPO = pathlib.Path(__file__).resolve().parents[1]
 SRC = REPO / "data" / "insider" / "purchases.csv"
 OUT = REPO / "data" / "insider" / "issuer_sic.csv"
 UA = "Catalyst Trading Bot (billysawyer0@gmail.com)"
