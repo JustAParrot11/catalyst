@@ -2429,8 +2429,17 @@ cannot quietly fall out of the total. And an unrecorded provenance is
 **not** read as "the market was shut": unknown and closed are different
 facts, the same asymmetry §22 needed for `market_is_live`.
 
-**37 sabotage breakages, all 37 caught red** after this. Full suite green
-offline: **4089 tests**.
+**38 sabotage breakages, all 38 caught red.** Full suite green offline:
+**4089 tests**.
+
+Two of the original 37 came back **NOT APPLIED** on the final pass, and
+that is recorded as not applied rather than as caught (§18): they targeted
+the *old* readability rule, which the hex-id defect above replaced. They
+were retargeted at the word-shape rule — drop the guard entirely, drop the
+words-carry-half condition, and count a token with digits in it as a word
+— and all three go red. **A sabotage suite rots when the code it points at
+changes**, and the tell is a NOT APPLIED count, which is why the harness
+asserts every replacement's expected occurrence count.
 
 ### What is NOT claimed
 
