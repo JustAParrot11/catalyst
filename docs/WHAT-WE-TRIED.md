@@ -2400,6 +2400,38 @@ the fix.** `g1` is unreadable under every version of the rule, so the
 fixture agreed with the bug — the same shape as §14's foreign-keys-off
 fixture, in miniature.
 
+### AND THE UPGRADE CHECK FOUND A FOURTH, which no test could have
+
+Run rather than assumed: a database built from the schema at `e7d4961`
+(before this session), then today's `init_db` over it — what the service
+does on start after `upgrade.sh` pulls.
+
+| check | result |
+|---|---|
+| tables added by this session | **none** |
+| tables lost | none |
+| existing rows preserved | every one |
+| `PRAGMA foreign_keys` | 1 |
+| every page this session touched | rendered, no exception |
+
+**What it found:** a view written before `research_view_context` existed
+has no provenance row — so on the new panel it was in **neither** the
+weekend count, **nor** the finished count, **nor** the queue. It fell out
+of the arithmetic entirely, and every candidate on that database is in
+that state. That is the shape of every "the numbers do not add up" report
+this dashboard has had.
+
+Fixed by counting `awaiting_decision` — any view with no risk decision —
+and keeping the weekend figure as its **named subset** rather than as a
+stand-in for it. A test now asserts
+`queued + judged + finished == candidates`, so a fourth state added later
+cannot quietly fall out of the total. And an unrecorded provenance is
+**not** read as "the market was shut": unknown and closed are different
+facts, the same asymmetry §22 needed for `market_is_live`.
+
+**37 sabotage breakages, all 37 caught red** after this. Full suite green
+offline: **4089 tests**.
+
 ### What is NOT claimed
 
 - **No tracked stock has ever been fetched from the dashboard in

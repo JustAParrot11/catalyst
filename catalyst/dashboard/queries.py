@@ -1329,9 +1329,21 @@ class WhatItIsDoing:
     #: Candidates with no research call and no risk decision: nothing has
     #: been spent on them and nothing has judged them. The queue.
     waiting_for_research: int | None = None
-    #: A view exists, formed off a cached close, and no risk decision yet
-    #: - the weekend case. These cost nothing more; they are waiting for
-    #: the market to open so code can size them.
+    #: A view exists and no risk decision does: judged, not yet sized.
+    #:
+    #: THIS COUNT WAS MISSING AND THE TILES DID NOT ADD UP. Found by
+    #: running the upgrade against a database built from the schema
+    #: BEFORE this session: a view written before
+    #: `research_view_context` existed has no provenance row, so it was
+    #: in neither the weekend count nor the finished count nor the queue.
+    #: It fell out of the arithmetic entirely, which is the shape of
+    #: every "the numbers do not add up" report this dashboard has had.
+    awaiting_decision: int | None = None
+    #: The SUBSET of those formed off a cached close - the weekend case.
+    #: These cost nothing more; they are waiting for the market to open so
+    #: code can size them. Kept separate from the total rather than
+    #: standing in for it: "judged off Friday's close" and "judged at a
+    #: live mid ten minutes ago" want different readings.
     holding_a_weekend_view: int | None = None
     #: Researched and decided. Finished, whichever way it went.
     finished: int | None = None
@@ -1382,6 +1394,10 @@ def what_it_is_doing(db: Db, now=None) -> WhatItIsDoing:
         "                  WHERE v.candidate_id = c.id) "
         "  AND NOT EXISTS (SELECT 1 FROM risk_decisions d "
         "                  WHERE d.candidate_id = c.id)")
+    out.awaiting_decision = one(
+        "SELECT COUNT(*) FROM research_views v "
+        "WHERE NOT EXISTS (SELECT 1 FROM risk_decisions d "
+        "                  WHERE d.candidate_id = v.candidate_id)")
     out.holding_a_weekend_view = one(
         "SELECT COUNT(*) FROM research_views v "
         "JOIN research_view_context x ON x.candidate_id = v.candidate_id "

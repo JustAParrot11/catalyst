@@ -140,6 +140,57 @@ class TestItCountsWhatIsQueued:
         and a sabotage replacing it with `1=1` comes back green."""
         d = queries.what_it_is_doing(Db(queued), now=NOW)
         assert d.holding_a_weekend_view == 2
+        assert d.awaiting_decision == 3, (
+            "the weekend subset was reported as the whole of 'judged, not "
+            "yet sized'")
+
+    def test_the_three_states_account_for_every_candidate(self, queued):
+        """FOUND BY RUNNING THE UPGRADE, not by a test.
+
+        Against a database built from the schema BEFORE this session, a
+        view written before `research_view_context` existed has no
+        provenance row - so it was in neither the weekend count, nor the
+        finished count, nor the queue. It fell out of the arithmetic
+        entirely, which is the shape of every "the numbers do not add up"
+        report this dashboard has had.
+        """
+        import sqlite3
+
+        d = queries.what_it_is_doing(Db(queued), now=NOW)
+        conn = sqlite3.connect(queued)
+        try:
+            total = conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
+        finally:
+            conn.close()
+        assert (d.waiting_for_research + d.awaiting_decision + d.finished
+                == total), (
+            f"{d.waiting_for_research} queued + {d.awaiting_decision} judged "
+            f"+ {d.finished} finished != {total} candidates, so some "
+            "candidate is on no tile")
+
+    def test_a_view_with_no_recorded_provenance_is_still_counted(self,
+                                                                 tmp_path):
+        """The exact upgrade case: a view from before
+        `research_view_context` existed. It is NOT a weekend view - the
+        provenance is unknown, not 'closed' - and it must still appear."""
+        from catalyst.storage import init_db
+
+        path = str(tmp_path / "old.db")
+        conn = init_db(path)
+        conn.execute("INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?,?)",
+                     ("old", "CHYM", "financing", "2026-09-10", "estimated",
+                      json.dumps([]), NOW.isoformat(), "6199",
+                      json.dumps([])))
+        conn.execute("INSERT INTO research_views VALUES (?,?,?,?,?,?,?,?)",
+                     ("old", "no_trade", 0.68, "t", "i", 10, 1, "r"))
+        conn.commit()
+        conn.close()
+        d = queries.what_it_is_doing(Db(path), now=NOW)
+        assert d.awaiting_decision == 1
+        assert d.holding_a_weekend_view == 0, (
+            "an unrecorded provenance was read as 'the market was shut'")
+        assert d.waiting_for_research == 0
+        assert d.finished == 0
 
     def test_paid_calls_today_excludes_the_skipped_ones(self, queued):
         d = queries.what_it_is_doing(Db(queued), now=NOW)
@@ -216,6 +267,7 @@ class TestThePanelAnswersTheQuestionAsked:
         text = _visible(html)
         assert "Queued for research" in text
         assert "53" in text
+        assert "Judged, not yet sized" in text
 
     def test_it_says_what_each_recent_call_CONCLUDED(self, queued):
         """"What did it do" is not answered by a count of calls."""

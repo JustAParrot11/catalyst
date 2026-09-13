@@ -876,9 +876,12 @@ def working_on(db: Db, p: str = "doing", now=None) -> str:
         count(d.waiting_for_research, "Queued for research",
               "nothing has been spent on these and nothing has judged "
               "them yet"),
-        count(d.holding_a_weekend_view, "Judged, waiting for the open",
-              "a view already formed off a cached close; these cost "
-              "nothing more and are sized at the next open"),
+        count(d.awaiting_decision, "Judged, not yet sized",
+              ("of which " + str(int(d.holding_a_weekend_view))
+               + " formed while the market was shut, so they are sized at "
+               "the next open" if d.holding_a_weekend_view else
+               "a view exists and the risk engine has not decided yet")
+              + " - these cost nothing more"),
         count(d.finished, "Finished",
               "a risk decision exists, whichever way it went"),
         count(d.calls_today, "Paid calls today",
