@@ -613,6 +613,10 @@ _TIME_COLUMNS = (
     # When a research view was formed, and therefore which price it was
     # reasoning about. NOT `price_at_view`, which is money, not a clock.
     "formed_at",
+    # When a feed ANSWERED, which is not the same fact as when it
+    # returned something - the distinction a quiet weekend feed needs so
+    # it stops reading as a broken one (feed_reads).
+    "read_at",
 )
 
 

@@ -1272,6 +1272,42 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
         except Exception:  # noqa: BLE001 - recording is best effort
             _log.debug("a feed error could not be recorded", exc_info=True)
 
+    def _record_feed_read(source, item_count):
+        """THE OTHER HALF OF _record_feed_error, and it was missing.
+
+        A feed that answered and had nothing to say wrote no row
+        anywhere, so the dashboard could only ask "did it produce items
+        since it failed?" - and at a weekend the Form 4 feed correctly
+        produces none, because EDGAR publishes no daily index. A Saturday
+        outage therefore stayed under NEEDS ATTENTION until Monday
+        (owner-reported 2026-09-13). "It answered" and "it had something
+        to say" are different facts and only one of them was recorded.
+
+        Written HERE rather than in run_cycle because this is where the
+        per-source truth is: a Form 4 rate-limit block records an error
+        and then returns [], which run_cycle sees as a successful empty
+        fetch. Recording the read there would clear the fault that had
+        just been recorded, one line above.
+
+        Best effort and never raises, for the same reason as its pair:
+        failing to record a success must not become a failure.
+        """
+        import sqlite3 as _sq
+
+        try:
+            c = _sq.connect(db_file, timeout=5.0)
+            try:
+                c.execute(
+                    "INSERT INTO feed_reads (source, read_at, item_count) "
+                    "VALUES (?,?,?)",
+                    (source, datetime.now(timezone.utc).isoformat(),
+                     int(item_count)))
+                c.commit()
+            finally:
+                c.close()
+        except Exception:  # noqa: BLE001 - recording is best effort
+            _log.debug("a feed read could not be recorded", exc_info=True)
+
     def feed(since, until):
         """All three feeds. Form 4 is the only one that may fail the pass.
 
@@ -1298,6 +1334,10 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
                 "are what keeps this inside sec.gov's fair-use limits.",
                 got.requests_made, got.from_cache, got.index_days_from_cache)
             events = list(flatten_form4_events(got.events))
+            # ANSWERED. Zero events is the normal weekend answer, and
+            # recording it is the whole point: without this row the
+            # dashboard cannot tell a quiet feed from a broken one.
+            _record_feed_read("edgar_form4", len(events))
         except RateLimitBlocked as exc:
             # NOT a feed error to log and continue past. sec.gov blocked
             # this IP and every further request extends the timeout, so
@@ -1323,6 +1363,7 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
                 "other feeds. Cross-feed conjunctions will be thinner.")
             fts = None
         if fts is not None:
+            _record_feed_read("edgar_fts", len(fts.events))
             events.extend(fts.events)
             for err in fts.errors:
                 _log.warning("Full-text search query %r failed: %s",
@@ -1336,6 +1377,7 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
                 news_start, news_end,
                 alpaca_key=creds.alpaca_key,
                 alpaca_secret=creds.alpaca_secret)
+            _record_feed_read("alpaca_news", len(news.events))
             events.extend(news.events)
             if news.error:
                 _log.warning("News feed: %s", news.error[:300])
