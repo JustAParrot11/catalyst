@@ -352,57 +352,69 @@ def test_the_old_review_marker_is_gone_everywhere():
 
 
 def _string_literals(path: Path):
-    """Every string literal in a file EXCEPT docstrings.
-
-    Docstrings are excluded on purpose: a path written down in prose to
-    explain a past defect is documentation, not something the code
-    opens - and tests/source_guard.py quotes the exact offending line.
-    """
+    """Every string literal in a file, with its line number."""
     tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
-    docstrings = set()
     for node in ast.walk(tree):
-        body = getattr(node, "body", None)
-        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
-                                 ast.AsyncFunctionDef)) or not body:
-            continue
-        first = body[0]
-        if (isinstance(first, ast.Expr)
-                and isinstance(first.value, ast.Constant)
-                and isinstance(first.value.value, str)):
-            docstrings.add(id(first.value))
-    for node in ast.walk(tree):
-        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
-                and id(node) not in docstrings):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
             yield node.lineno, node.value
 
 
-def _machine_specific_roots(checkout: Path, home: Path) -> list[str]:
-    """The prefixes no literal may start with, DERIVED not enumerated.
+def _machine_specific_roots(checkout: Path, home: Path):
+    """The paths no literal may name, derived and never enumerated.
 
     House rule 7. No list of /home, /Users, /root generalises: the
     offending path is whatever directory this checkout happens to live
     in, which is only knowable by asking at runtime.
+
+    Returns (self_or_under, under_only). The CHECKOUT counts even when a
+    literal IS it exactly, because that is the shape that broke the
+    upgrade: cwd="/home/user/catalyst". HOME counts only for literals
+    pointing INSIDE it - a bare home directory is not a path into
+    anything, and on this machine home is /root, which a test may
+    legitimately write down while explaining why short roots are
+    handled differently.
     """
-    roots = [str(checkout)]
+    self_or_under = [str(checkout)]
+    under_only = []
     # Guarded because a home of "/" would make every absolute path in
-    # the project an offender, and a checkout that IS home would flag
-    # itself twice.
+    # the project an offender, and a checkout that IS home would be
+    # covered twice by the line above.
     if len(home.parts) > 1 and checkout != home:
-        roots.append(str(home))
-    return roots
+        under_only.append(str(home))
+    return self_or_under, under_only
 
 
-def _literals_naming_a_local_path(files, roots: list[str], base: Path):
-    """Every non-docstring literal starting with one of `roots`."""
+def _literals_naming_a_local_path(files, roots, base: Path):
+    """Every literal that IS the checkout or points inside either root.
+
+    MATCHED AT THE START, AND ONLY THERE, and that is measured rather
+    than tidy. Matching a root ANYWHERE in a literal was tried first, on
+    the reasoning that "cd /the/checkout && pytest" is as unportable as
+    the cwd= that broke the upgrade. It flagged
+    catalyst/dashboard/render.py:88 - a CSS **comment**, inside the one
+    big style literal, that quotes a path it once rendered badly. Prose
+    embedded in a large literal is not something an AST can separate
+    from code, so the broader rule cannot be kept without forcing
+    someone to mangle a comment. Section 17's generic-word trap in a new
+    coat: a rule that cries wolf teaches the next reader to silence it.
+
+    A root must be followed by a separator to count, which is also what
+    stops /some/where/catalyst-backup reading as being inside
+    /some/where/catalyst.
+    """
+    self_or_under, under_only = roots
     offenders = []
     for path in files:
         for line, value in _string_literals(path):
-            if any(value.startswith(root) for root in roots):
-                try:
-                    where = path.relative_to(base).as_posix()
-                except ValueError:
-                    where = str(path)
-                offenders.append(f"{where}:{line}: {value!r}")
+            inside = any(value.startswith(root + "/")
+                         for root in list(self_or_under) + list(under_only))
+            if not (inside or value in self_or_under):
+                continue
+            try:
+                where = path.relative_to(base).as_posix()
+            except ValueError:
+                where = str(path)
+            offenders.append(f"{where}:{line}: {value!r}")
     return offenders
 
 
@@ -436,7 +448,11 @@ def test_no_file_names_this_checkout_by_absolute_path():
     THIS ASSERTION IS VACUOUS TODAY - there are no offenders left - so
     the rule it rests on is exercised against synthetic input by
     TestTheLocalPathRuleReallyCatchesOne below. Without that, deleting
-    the rule's body would pass."""
+    the rule's body would pass.
+
+    It is deliberately NOT enough on its own: the suite must also be run
+    from a different absolute path before a version is called green,
+    because a rule can only catch the literals somebody wrote down."""
     checkout = Path(__file__).resolve().parents[1]
     roots = _machine_specific_roots(checkout, Path.home().resolve())
     offenders = _literals_naming_a_local_path(
@@ -479,20 +495,13 @@ class TestTheLocalPathRuleReallyCatchesOne:
             tmp_path)
         assert len(found) == 1, found
 
-    def test_the_same_path_in_a_docstring_is_not_flagged(self, tmp_path):
-        """Documenting the defect must stay possible - source_guard.py
-        quotes the exact offending line."""
-        path = self._write(
-            tmp_path,
-            '"""It used to say /some/where/catalyst here."""\n'
-            'def f():\n'
-            '    """And /some/where/catalyst here too."""\n'
-            '    return 1\n')
+    def test_a_deeper_path_under_the_checkout_is_flagged(self, tmp_path):
+        path = self._write(tmp_path, 'p = "/some/where/catalyst/data/x.csv"\n')
         found = _literals_naming_a_local_path(
             [path], _machine_specific_roots(Path("/some/where/catalyst"),
                                             Path("/home/someone")),
             tmp_path)
-        assert found == [], found
+        assert len(found) == 1, found
 
     def test_a_relative_or_production_path_is_not_flagged(self, tmp_path):
         path = self._write(
@@ -506,12 +515,56 @@ class TestTheLocalPathRuleReallyCatchesOne:
             tmp_path)
         assert found == [], found
 
-    def test_a_home_of_root_only_is_not_used_as_a_prefix(self):
+    def test_a_sibling_directory_sharing_the_prefix_is_not_flagged(
+            self, tmp_path):
+        """/some/where/catalyst-backup is a different directory, and
+        without the separator check it would read as being inside the
+        checkout."""
+        path = self._write(tmp_path, 'p = "/some/where/catalyst-backup/x"\n')
+        found = _literals_naming_a_local_path(
+            [path], _machine_specific_roots(Path("/some/where/catalyst"),
+                                            Path("/home/someone")),
+            tmp_path)
+        assert found == [], found
+
+    def test_a_home_shaped_token_in_prose_is_not_flagged(self, tmp_path):
+        """MEASURED, not preferred. Matching a root ANYWHERE in a literal
+        was tried first and flagged the dashboard's own CSS comment at
+        render.py:88, which quotes a path it once rendered badly - prose
+        inside one big style literal, which no AST can separate from
+        code. Section 17's generic-word trap: a rule that cries wolf
+        gets silenced by the next reader."""
+        path = self._write(
+            tmp_path,
+            'CSS = "\\n:root { color: red; }\\n"\n'
+            'NOTE = "it used to read /some/where/catalyst/dashboa, cut off"\n')
+        found = _literals_naming_a_local_path(
+            [path], _machine_specific_roots(Path("/some/where/catalyst"),
+                                            Path("/root")),
+            tmp_path)
+        assert found == [], found
+
+    def test_a_bare_home_directory_is_not_flagged(self, tmp_path):
+        """A home root on its own is not a path into anything, and a
+        fixture may legitimately write one down - this suite writes
+        "/root" while explaining why short roots differ. The CHECKOUT
+        root is the opposite case and is asserted above, because
+        cwd="/the/checkout" is exactly what broke the upgrade."""
+        path = self._write(tmp_path, 'h = "/root"\n')
+        found = _literals_naming_a_local_path(
+            [path], _machine_specific_roots(Path("/some/where/catalyst"),
+                                            Path("/root")),
+            tmp_path)
+        assert found == [], found
+
+    def test_a_home_of_root_only_is_never_used_as_a_prefix(self):
         """Every absolute path in the project starts with "/", so a home
         of "/" would flag all of them and the guard would be useless
         noise rather than a rule."""
-        roots = _machine_specific_roots(Path("/srv/catalyst"), Path("/"))
-        assert roots == ["/srv/catalyst"]
+        self_or_under, under_only = _machine_specific_roots(
+            Path("/srv/catalyst"), Path("/"))
+        assert self_or_under == ["/srv/catalyst"]
+        assert under_only == []
 
 
 class TestTheSourceGuardCannotPassBySearchingNothing:
