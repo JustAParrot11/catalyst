@@ -2577,8 +2577,46 @@ not a changed decision.
 
 ### Verification
 
-- Full suite green offline: **4120 tests**.
-- Sabotage round in the commit.
+- Full suite green offline: **4123 tests**.
+- **26 sabotage breakages, all 26 caught red**, each verified to still
+  import first. 23 red on the first pass.
+- **18 existing weekend tests went red the moment the guard landed**,
+  which is how the 553-day fixture was found.
+
+**The three greens, and two were the same shape as §22's:**
+
+| green | why it passed | the fix |
+|---|---|---|
+| the cycle stops passing the broker | the test GREPPED `run_cycle` for `refused=stale` — which survives that edit | a real closed-market cycle: a 40-day-stale cache plus a broker holding yesterday's close can only research if the broker was passed |
+| the cycle stops recording the stale refusal | same grep; `closed_market_close_too_stale` survives `if False:` too | the same cycle asserts the reason reaches the funnel **with its numbers** |
+| a non-dict bar is not skipped | **defence in depth** — `Broker.get_daily_bars` already filters with `isinstance(b, dict)`, so a bare string cannot reach the inner guard through a real broker | recorded as such (§14, §17) and the property only the inner guard holds is tested directly: a caller handing the helper a list of its own would hit `AttributeError`, which is **not** among the exceptions the loop catches and would escape into the cycle |
+
+**A substring still present in the source is not a behaviour.** That is
+now the second change in a row where a call-site grep walked past a
+sabotage, and the corollary to §6's rule is worth stating once more:
+assert the OUTCOME when the outcome is reachable offline, and this one
+was — the whole cycle runs against an injected clock, an injected broker
+and a cache dated by the test.
+
+### Verified end to end, not asserted
+
+The ACVA case driven through a full cycle on a database built from the
+schema at `3322198` and upgraded by today's `init_db` (no tables lost,
+every row preserved, `PRAGMA foreign_keys` = 1):
+
+| | |
+|---|---|
+| the cache held | **$7.22**, 40 days stale |
+| Alpaca held | **$10.43**, yesterday |
+| the model saw | **$10.43**, via `broker_daily_close` |
+| orders placed | **0** — the market is shut, and that has not moved |
+
+And both failure branches, on fresh databases:
+
+| Alpaca | cache | outcome |
+|---|---|---|
+| down | 40 days old | researched 0, funnel: `closed_market_close_too_stale: newest close is 2026-08-04, 40 day(s) old, over the 7-day bound (cached_daily_close)` |
+| down | Friday's close | researched 1, funnel: `researched_while_closed_awaiting_open` — **the feature still works when the broker cannot be reached**, which is the point of keeping the cache as a fallback rather than removing it |
 
 ### What is NOT claimed
 
