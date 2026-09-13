@@ -2519,20 +2519,67 @@ def alerts(db: Db) -> Alerts:
     # fact rendered as a live one. The row is not deleted - it is real,
     # it matters, and the trade page shows it in the timeline. It just
     # stops being an ALARM once a later check found the stop resting.
+    # AND A CLOSED POSITION CANNOT BE UNPROTECTED - there is nothing left
+    # to protect. Owner-reported again 2026-09-13, the SAME position id,
+    # still alarming a fortnight later:
+    #
+    #   position 85fb5edc-...-0b91c4953b4c is unprotected
+    #   (checked 2026-08-31T13:27:33.148717+00:00)     []
+    #
+    # The 08-17 fix above is right and was not enough. "Only the latest
+    # check counts" rescues a gap that was RESOLVED on an open position,
+    # because a later check overwrites the verdict. It can never rescue a
+    # CLOSED one: `confirm_stops_resting` runs over `_open_position_dicts`
+    # (`WHERE p.status = 'open'`), so the moment a position closes no
+    # further check is ever written and its last verdict is frozen for
+    # good. And that last verdict is very often `unprotected` for an
+    # innocent reason - it is taken as the position is being sold, after
+    # the resting stop has been cancelled to make way for the market
+    # sell. So the final check on a normal, correct exit alarms forever.
+    #
+    # The position's own status is the fact that settles it, and it was
+    # one join away. Same shape as every other report this week: a
+    # historical fact rendered as a live one.
+    #
+    # UNKNOWN IS NOT CLOSED. A confirmation whose position_id has no row
+    # at all still alarms - that means the record is wrong, which is
+    # worse than an unprotected position, not better. Absence of evidence
+    # is not evidence the stop is fine (sections 16, 22, 23).
     unprotected_q = db.q(
-        "SELECT c.position_id, c.checked_at, c.status, c.live_stop_order_ids "
+        "SELECT c.position_id, c.checked_at, c.status, c.live_stop_order_ids, "
+        "       p.ticker AS ticker, p.status AS position_status "
         "FROM stop_confirmations c "
         "JOIN (SELECT position_id, MAX(checked_at) AS newest "
         "      FROM stop_confirmations GROUP BY position_id) latest "
         "  ON latest.position_id = c.position_id "
         " AND latest.newest = c.checked_at "
-        "WHERE c.status != 'ok' ORDER BY c.checked_at DESC LIMIT 10"
+        "LEFT JOIN positions p ON p.id = c.position_id "
+        "WHERE c.status != 'ok' "
+        "  AND (p.status IS NULL OR p.status != 'closed') "
+        "ORDER BY c.checked_at DESC LIMIT 10"
     )
     for row in unprotected_q.rows:
-        items.append(("alarm",
-                      f"position {row['position_id']} is {row['status']} "
-                      f"(checked {row['checked_at']})",
-                      row["live_stop_order_ids"]))
+        # NAME THE STOCK, not the row id. A uuid is a machine reference
+        # and tells the reader nothing (section 23, the same defect in
+        # another panel). The id stays in the verbatim table behind it.
+        who = row["ticker"] or f"position {row['position_id']}"
+        # SAY WHICH FAULT IT IS. Both statuses land here and they need
+        # opposite responses: none means the downside is unbounded, two
+        # means a double sale is possible.
+        what = {
+            "unprotected": ("has NO protective stop resting at the broker, "
+                            "so its downside is unbounded until one is "
+                            "placed"),
+            "duplicate_stops": ("has MORE THAN ONE stop resting at the "
+                                "broker, so it could be sold twice"),
+        }.get(str(row["status"]),
+              f"is {row['status']} (the broker check does not recognise "
+              "that status, which is itself the finding)")
+        said = f"{who} {what} - checked {row['checked_at']}"
+        if row["position_status"] is None:
+            said += (". And no position row exists for this id, so the "
+                     "record itself is wrong")
+        items.append(("alarm", said, row["live_stop_order_ids"]))
     adaptive_q = db.q(
         "SELECT parameter, old_value, new_value, changed_at, reverted_at, "
         "evidence_summary, sample_ids, evidence_window_start, evidence_window_end, "
