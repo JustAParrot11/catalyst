@@ -287,6 +287,7 @@ owner's time on a fix that was never applied or a test that never ran.
 | **Believing a month-to-date number is a run rate** | see §5 | divide by *active* days |
 | **A vacuously true assertion** | `nums == sorted(nums)` and `nums == range(1, len+1)` are BOTH true for an empty list, so removing the numbering entirely passed the test that existed to check it | assert the collection is non-empty *before* asserting anything about its contents |
 | **A hand-numbered sequence across conditional sections** | headings hard-coded "6." while the orders section only renders when orders exist, so a card showed 1,2,3,4,5,7 | number at render time from a counter |
+| **Committing while the suite runs** | two tests compare live `git` state against import-time `__version__`/`__build__`; a commit mid-run moved both and reported two false failures | let a run finish before touching the tree; re-run before believing a red |
 
 ---
 
@@ -2628,3 +2629,200 @@ And both failure branches, on fresh databases:
 - **It does not make the weekend price LIVE.** There is no live price when
   the book is shut. It makes it the *newest close that exists*, dated, and
   refuses it when it is not.
+
+---
+
+## 25. The upgrade rolled back on my own test, and the assertion could only fail by crashing
+
+Owner-reported 2026-09-13, with the upgrade's own output:
+
+> *"PUTTING THE OLD VERSION BACK … WHY: The new version failed its own
+> tests, so it is not safe to run your money through it."*
+>
+> `FileNotFoundError: [Errno 2] No such file or directory:
+> '/home/user/catalyst'`
+>
+> `1 failed, 4119 passed, 3 skipped, 1 warning in 74.77s`
+
+**The safety net worked exactly as designed and the failing test was
+mine.** `upgrade.sh` runs the full suite after pulling and rolls back on
+any failure, so nothing broken reached the money — but the version that
+did not ship contained §24's weekend-price fix, which the owner was
+waiting on.
+
+### The test, and the three defects in nine lines
+
+```python
+def test_nothing_here_can_size_spend_or_trade(self):
+    out = subprocess.run(
+        ["grep", "-rn", "_fetch_one_comparison_now",
+         "catalyst/risk", "catalyst/execution", "catalyst/cost"],
+        capture_output=True, text=True, cwd="/home/user/catalyst")
+    assert out.stdout.strip() == ""
+```
+
+| # | defect | measured |
+|---|---|---|
+| 1 | **a hard-coded absolute path** — the sandbox it was written in | `subprocess.run(..., cwd="/home/billy/Desktop/catalyst")` → `FileNotFoundError: [Errno 2] No such file or directory` |
+| 2 | **shelling out to `grep`** for four lines of Python | grep's presence, its exit codes and its path resolution are three failure modes, none of them the thing under test |
+| 3 | **THE VACUOUS PASS, and it is the worst of the three** | run from a directory where those paths do not resolve: `returncode 2`, `stderr "grep: catalyst/risk: No such file or directory"`, **`stdout ''`** — so `assert stdout.strip() == ""` **passed while reading no files at all** |
+
+Defect 3 is the one worth keeping. The assertion's only failure mode was
+a crash: whenever the search worked it found nothing, and whenever it
+did not work it also found nothing. §6's opening row — *a test that
+cannot fail is not a test* — in a form the sabotage rounds could not
+catch, because sabotaging the **production** string it guards would
+still leave the test green.
+
+**And two sibling guards had the same shape.**
+`test_tracking_ten_stocks_at_once.py` greps the same three directories
+with **no** `cwd` at all, which silently depends on pytest being invoked
+from the repository root; from anywhere else it searched nothing and
+passed.
+
+### What changed
+
+`tests/source_guard.py` — pure Python, root derived from `__file__`, and
+**it proves its own haystack before asserting anything about it**: the
+directory must exist and must contain at least one `.py` file, or the
+call raises with the resolved path in the message. An empty result then
+means *searched and found nothing*, never *searched nothing*. Five tests
+hold that, including the positive half (`MONEY-CRITICAL` **must** be
+found under `catalyst/risk`) — without which every guard built on the
+helper could be satisfied by a search that reads no files.
+
+### The generalising guard, stated as a rule rather than a list
+
+`test_no_file_names_this_checkout_by_absolute_path` walks `tests/`,
+`catalyst/` and `scripts/` and fails on any string literal that **is**
+this checkout's own resolved location, or that points **inside** it or
+inside the running user's home directory. Both facts are **derived at
+runtime** — house rule 7, because no enumeration of `/home`, `/Users`,
+`/root` generalises: the offending path is whatever directory the
+checkout happens to live in, which is only knowable by asking.
+
+**It found a second offender immediately:** `scripts/fetch_sic.py:22`
+carried `REPO = pathlib.Path("/home/user/catalyst")`, four lines under a
+correctly derived `ROOT`. Now derived too.
+
+The assertion is **vacuous today** — there is nothing left to find,
+which is the same shape as the assertion that caused all this. So the
+rule is exercised against synthetic input separately: a literal that is
+the checkout, one deeper inside it, one under home, and four that must
+NOT be flagged.
+
+### TRIED AND REJECTED: matching the root ANYWHERE in a literal
+
+The first version matched a root anywhere in the string, reasoning that
+`"cd /the/checkout && pytest"` is exactly as unportable as the `cwd=`
+that broke the upgrade. **Measured, it flagged two things that are not
+bugs:**
+
+| flagged | what it actually is |
+|---|---|
+| `catalyst/dashboard/render.py:88` | a **CSS comment**, inside the one big style literal, quoting a path the sidebar once rendered badly. Prose embedded in a large literal is not something an AST can separate from code |
+| `tests/test_scaffold.py` | **this guard's own fixture**, writing `"/root"` while explaining why short roots need different treatment — because on this machine `Path.home()` **is** `/root` |
+
+Section 17's generic-word trap in a new coat: a rule that cries wolf
+gets silenced by the next reader rather than obeyed. A docstring
+exclusion was tried as the fix for the first row and does not reach it —
+the offending text is a comment inside a CSS string, not a docstring.
+So the rule is start-anchored, and:
+
+- **a root must be followed by a separator** to count, which also stops
+  `/some/where/catalyst-backup` reading as being inside
+  `/some/where/catalyst`;
+- **the checkout counts on exact equality too**, because
+  `cwd="/home/user/catalyst"` is precisely the literal that failed;
+- **a bare home directory does not**, because it is not a path into
+  anything and is what a fixture naturally writes.
+
+The docstring exclusion was then **removed as machinery no test could
+make load-bearing**: under a start-anchored rule no docstring in this
+repository is flagged, since `source_guard.py`'s own explanation
+mentions the path mid-sentence. Sabotaging it came back GREEN, which is
+how it was caught.
+
+### Why no sabotage round caught this, and the rule that follows
+
+Every sabotage this project runs breaks the **code** and checks the test
+goes red. This defect was in the **test**, and in the direction where
+breaking the code changes nothing. The check that catches it is
+different in kind, and it is cheap:
+
+**RUN THE SUITE FROM A DIFFERENT ABSOLUTE PATH BEFORE SAYING IT IS
+GREEN.** Measured, on this change:
+
+| where | old guard | new guard |
+|---|---|---|
+| the development checkout | pass | pass |
+| a copy at an unrelated absolute path | **pass** (the hard-coded path still exists on *this* machine) | pass |
+| a directory where `catalyst/risk` does not resolve | **pass, having searched nothing** | raises |
+| a machine without `/home/user/catalyst` | **FileNotFoundError** | pass |
+
+Note row two: copying the repo elsewhere on the same machine did **not**
+reproduce the owner's crash, because the hard-coded directory still
+existed. What reproduced it was pointing the same call at a path that
+does not exist here. **A path-portability bug does not reproduce by
+moving the code; it reproduces by removing the path.**
+
+The first cross-path run also failed for an unrelated and instructive
+reason: the copy was made with `git ls-files`, which omitted the
+brand-new untracked helper, so eight tests failed on a missing import.
+**A "does it work elsewhere" check built from tracked files only cannot
+see the file you just added.**
+
+### Verification
+
+- **11 sabotage breakages, all 11 caught red**, each verified to still
+  import first. The harness **refuses to run against a dirty working
+  tree** — section 21's lesson made mechanical, because a `git checkout`
+  restore only restores what git knows about, and it stopped this round
+  twice while the rule was still being changed.
+- Both defects of the old guard reproduced by running them, not argued:
+  the `FileNotFoundError` against a path that does not exist here, and
+  the vacuous pass with its `returncode 2` and empty stdout.
+- The three touched test files run green from
+  `/tmp/.../scratchpad/elsewhere`, an unrelated absolute path, and so
+  does the whole suite from there.
+
+### A NEW PROCESS FAILURE: committing while the suite runs invalidates it
+
+The first full run came back with **two failures that were not a
+regression at all**:
+
+```
+FAILED test_version_moves.py::TestThePatchMovesByItself::
+       test_it_counts_commits_since_the_series_changed
+FAILED test_version_moves.py::TestTheOwnerCanTellTwoDeploysApart::
+       test_a_dirty_tree_says_so
+```
+
+Both compare **live `git` state** against `catalyst.__version__` and
+`catalyst.__build__`, which are computed **once at import**. I committed
+three times while that run was in flight, so the commit count moved and
+the tree went from dirty to clean underneath it. Re-run on a settled
+tree, both pass.
+
+**The rule: do not commit, edit or stash while a suite run you intend to
+trust is in flight.** This project has two tests that are *correctly*
+anchored to the repository's own live state — that is their whole
+purpose, so they cannot be loosened — and any working-tree change during
+a run makes them report on a repository that no longer exists. It is the
+mirror image of house rule 6: instead of a fixture drifting out of a
+window, the *world* drifts out from under the fixture.
+
+It also cost a wrong conclusion for a few minutes: two red tests in
+`test_version_moves.py` look exactly like a real break, and the only way
+to tell was to re-run them once nothing was moving.
+- Full suite green offline, **4138 tests**, run twice: once in this
+  checkout and once from an unrelated absolute path.
+
+### What is NOT claimed
+
+- **The owner's upgrade has not yet been re-run.** What is verified is
+  that the failing assertion no longer depends on any path this machine
+  happens to have, and that the same class of literal cannot re-enter
+  `tests/`, `catalyst/` or `scripts/` without failing the suite.
+- **The other 21 test files using raw `sqlite3.connect`** (§14) are
+  still a known blind spot. Untouched here on purpose.

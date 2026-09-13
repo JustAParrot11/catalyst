@@ -986,23 +986,29 @@ class TestTheChartDrawsEveryLineDistinguishably:
 class TestNothingHereCanSizeSpendOrTrade:
 
     def test_the_risk_engine_never_reads_the_tracked_list(self):
-        import subprocess
+        """Searched off the repo root, not off the process's cwd.
 
-        out = subprocess.run(
-            ["grep", "-rn", "benchmark_comparisons", "catalyst/risk",
-             "catalyst/execution", "catalyst/cost"],
-            capture_output=True, text=True)
-        assert out.stdout.strip() == "", (
-            "a display preference reached the money path:\n" + out.stdout)
+        These two greps used to depend on pytest being run from the
+        repository root: from anywhere else they searched nothing and
+        passed. See tests/source_guard.py for what that cost.
+        """
+        from source_guard import source_matches
+
+        hits = source_matches("benchmark_comparisons", "catalyst/risk",
+                              "catalyst/execution", "catalyst/cost")
+        assert hits == [], (
+            "a display preference reached the money path:\n"
+            + "\n".join(hits))
 
     def test_the_comparisons_module_imports_nothing_that_trades(self):
-        import subprocess
+        from source_guard import pattern_matches
 
-        out = subprocess.run(
-            ["grep", "-nE", r"^\s*(from|import)\s+catalyst\.(risk|execution)",
-             "catalyst/benchmark/comparisons.py"],
-            capture_output=True, text=True)
-        assert out.stdout.strip() == ""
+        hits = pattern_matches(
+            r"^\s*(from|import)\s+catalyst\.(risk|execution)",
+            "catalyst/benchmark/comparisons.py")
+        assert hits == [], (
+            "the tracked-stock store imports the money path:\n"
+            + "\n".join(hits))
 
     @staticmethod
     def _regions(html):
