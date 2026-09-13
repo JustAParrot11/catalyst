@@ -2417,9 +2417,20 @@ def _why_not_researched(db: Db, candidate_id: str) -> str:
             ctx = db.q("SELECT priced_off FROM research_view_context "
                        "WHERE candidate_id = ?", (candidate_id,))
             off = str(ctx.rows[0]["priced_off"]) if ctx.rows else ""
-            if off == "daily_close":
-                return ("researched while the market was shut, against the "
-                        "last cached close - the view is held and will be "
+            # BY THE RULE, NOT BY ENUMERATION (house rule 7). This read
+            # `off == "daily_close"`, so the moment a second closed-market
+            # provenance existed - `broker_daily_close`, added when the
+            # weekend price started coming from Alpaca instead of a stale
+            # file - a weekend view would have fallen through and been
+            # labelled "waiting for the risk engine", which is the
+            # opposite of true. Anything that is not the live mid is a
+            # view formed while the book was shut.
+            if off and off != "live_nbbo":
+                whence = ("Alpaca's own most recent daily close"
+                          if off == "broker_daily_close" else
+                          "the newest close in the local cache")
+                return ("researched while the market was shut, against "
+                        f"{whence} - the view is held and will be "
                         "sized at the next open, once code has checked the "
                         "price has not already moved past the setup")
             return ("researched - the view is in hand and waiting for the "
@@ -2442,6 +2453,13 @@ def _why_not_researched(db: Db, candidate_id: str) -> str:
             "not researched - the market is shut and no daily close is "
             "cached for this ticker, so there was no price to reason "
             "about. It waits for a live quote",
+        "closed_market_close_too_stale":
+            "not researched - the market is shut, and the newest close "
+            "anyone could produce for this ticker was too old to reason "
+            "about. The bot asks Alpaca for a fresh close first and only "
+            "falls back to its own cache; when both are stale it declines "
+            "rather than judge a price that may no longer exist. It waits "
+            "for a live quote",
         "market_clock_unavailable": "not researched - broker clock unreadable",
         "unprotected_position_blocks_entries":
             "not researched - an unprotected position blocks new entries",

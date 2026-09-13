@@ -180,13 +180,28 @@ def model_transport(view=None, calls=None):
     return transport
 
 
-def _day(i: int) -> str:
-    """Distinct, ordered dates. 400 sessions do not fit in one month, and
-    `price_action._rows` sorts by the parsed date - duplicates would make
-    "the newest close" arbitrary."""
-    from datetime import date as _d, timedelta as _td
+def _day(i: int, n: int) -> str:
+    """Distinct, ordered dates ENDING AT YESTERDAY, relative to this
+    module's own NOW.
 
-    return (_d(2024, 1, 1) + _td(days=i)).isoformat()
+    THIS USED TO ANCHOR AT 2024-01-01, and that made the fixture unable
+    to detect a real bug. With 400 rows the newest close landed on
+    2025-02-03 - **553 days before NOW** - and the weekend snapshot
+    happily read it as "the price". Production cannot be that stale on
+    purpose either, but it CAN be: `bar_history.MAX_CACHE_AGE_DAYS` is 30,
+    which is correct for measuring a three-year gap distribution and
+    wrong for a price, and that is exactly how ACVA came to be rendered
+    at a pre-announcement $7.22 against a real ~$10.43.
+
+    So the fixture now matches what `ensure_history` actually writes: up
+    to yesterday, never today, because a partial session is not a
+    session. Distinct ordered dates still matter - `price_action._rows`
+    sorts by the parsed date, so duplicates would make "the newest close"
+    arbitrary.
+    """
+    from datetime import timedelta as _td
+
+    return (NOW.date() - _td(days=(n - i))).isoformat()
 
 
 def bars_for(tmp_path, ticker="TEST", closes=None):
@@ -207,7 +222,7 @@ def bars_for(tmp_path, ticker="TEST", closes=None):
                                          "close", "volume"])
         w.writeheader()
         for i, close in enumerate(closes):
-            w.writerow({"date": _day(i), "open": close,
+            w.writerow({"date": _day(i, len(closes)), "open": close,
                         "high": close, "low": close, "close": close,
                         "volume": 1_000_000})
     return str(d)
@@ -260,7 +275,13 @@ class TestTheWeekendFormsAView:
         row = db.execute("SELECT price_at_view, priced_off "
                          "FROM research_view_context").fetchone()
         assert row is not None, "nothing recorded what price the view saw"
-        assert row[1] == "daily_close"
+        # NOT A SINGLE LITERAL. There are two closed-market provenances
+        # now - `broker_daily_close` when Alpaca answered and
+        # `cached_daily_close` when it did not - and what matters to
+        # sizing is only that neither is the live mid. `risk.evaluate`
+        # refuses by exactly that rule, so this asserts the rule.
+        assert row[1] != "live_nbbo"
+        assert row[1].endswith("daily_close"), row[1]
         assert Decimal(row[0]) > 0
 
     def test_no_cached_close_is_named_not_silent(self, db, tmp_path):
@@ -492,9 +513,14 @@ class TestNothingSizesOffAPriceThatIsNotLive:
         20bp hard bound as the tightest book ever measured."""
         from catalyst.orchestrator.cycle import build_closed_market_snapshot
 
-        snap = build_closed_market_snapshot(bars_for(tmp_path), "TEST")
+        # `now=NOW` because the freshness bound is real: called against
+        # the wall clock, this fixture's newest close is weeks old and is
+        # correctly refused. That refusal is the point of the bound and is
+        # asserted in its own module.
+        snap = build_closed_market_snapshot(bars_for(tmp_path), "TEST",
+                                            now=NOW)
         assert snap is not None
-        assert snap.priced_off == "daily_close"
+        assert snap.priced_off != "live_nbbo"
         assert snap.half_spread_bp > Decimal("20")
 
     def test_no_bars_means_no_snapshot_rather_than_a_zero(self, tmp_path):
@@ -502,8 +528,9 @@ class TestNothingSizesOffAPriceThatIsNotLive:
 
         empty = tmp_path / "none"
         empty.mkdir()
-        assert build_closed_market_snapshot(str(empty), "TEST") is None
-        assert build_closed_market_snapshot(None, "TEST") is None
+        assert build_closed_market_snapshot(str(empty), "TEST",
+                                            now=NOW) is None
+        assert build_closed_market_snapshot(None, "TEST", now=NOW) is None
 
 
 class TestAnUnmeasurableMoveRefuses:

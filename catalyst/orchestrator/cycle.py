@@ -17,7 +17,7 @@ import logging
 import sqlite3
 import uuid
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from catalyst.data.bar_history import ensure_history
@@ -1252,7 +1252,19 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
             continue
 
         if research_only:
-            market = build_closed_market_snapshot(bars_dir, c.ticker)
+            # THE BROKER IS PASSED IN so the weekend price comes from
+            # Alpaca rather than from whatever the 30-day cache happened
+            # to hold (owner-asked 2026-09-13). `refused` receives the
+            # reason when a close exists but is too old to mean anything.
+            stale: list = []
+            market = build_closed_market_snapshot(
+                bars_dir, c.ticker, broker=broker, now=now, refused=stale)
+            if market is None and stale:
+                report.drop_reasons.setdefault("researched", []).append(
+                    f"{c.id}: closed_market_close_too_stale: {stale[0]}")
+                _note_not_attempted(
+                    conn, c.id, "closed_market_close_too_stale", now)
+                continue
             if market is None:
                 # HOUSE RULE 3: this is not "nothing happened". No cached
                 # bars means no price to reason about at all, and the
@@ -1731,9 +1743,115 @@ def build_market_snapshot(broker: Broker, ticker: str,
         median_daily_dollar_volume=Decimal("0"))
 
 
-def build_closed_market_snapshot(bars_dir, ticker: str) -> "MarketSnapshot | None":
-    """The newest cached daily close, for RESEARCH ONLY while the market
+#: How old the newest close may be and still be worth reasoning about.
+#:
+#: DERIVED FROM THE MARKET CALENDAR RATHER THAN CHOSEN. The longest
+#: scheduled US equity closure is four calendar days - a Friday close to
+#: a Tuesday open across a Monday holiday - so a close inside a week is
+#: consistent with "the market is shut". Anything beyond that is not a
+#: closed market, it is a cache nobody refreshed, and the model must not
+#: be handed it as a fact.
+#:
+#: WHY THIS CONSTANT EXISTS AT ALL. Owner-asked 2026-09-13: *"i dont want
+#: it to read a price that may not be live"*. `MAX_CACHE_AGE_DAYS` in
+#: `data/bar_history.py` is **30** - correct for what that cache was
+#: built for, because a 95th-percentile daily move and a worst-case gap
+#: measured over three years barely move in a month. But the weekend
+#: research feature made the same file the source of THE PRICE THE MODEL
+#: REASONS ABOUT, and a price may not be a month old.
+#:
+#: MEASURED, from the owner's own bundle: ACVA was rendered into the
+#: prompt at `last close: $7.22` while the stock traded around $10.43
+#: after an all-cash tender offer at $10.50. $10.43 / 1.44 = $7.24, so
+#: the cached close predated the announcement. The model only caught it
+#: because it happened to web-search and disbelieve its own input:
+#: *"either the price feed is stale/broken for this name or there is a
+#: data error; either way I cannot rely on it to size an edge."* That is
+#: luck, not a guard.
+MAX_RESEARCH_CLOSE_AGE_DAYS = 7
+
+#: Calendar days of bars to ask the broker for when the market is shut.
+#: Only the newest is used; the window just has to be wide enough to
+#: span the longest closure plus a margin, and asking for less history
+#: than `ensure_history` does keeps this cheap.
+CLOSED_MARKET_LOOKBACK_DAYS = 12
+
+
+def _broker_daily_close(broker, ticker: str, now) -> tuple | None:
+    """(day, close) straight from Alpaca, or None. Never raises.
+
+    THE PRICE COMES FROM THE BROKER, NOT FROM A FILE. The cache is a
+    three-year history kept for `stock_gap`, refreshed only when it is
+    over thirty days old - so reading its last row for a PRICE means
+    reading whatever happened to be fetched last, which is how ACVA was
+    shown a pre-announcement close. Alpaca knows Friday's close on a
+    Saturday; nothing needed inventing, it just was never asked.
+    """
+    if broker is None:
+        return None
+    start = (now - timedelta(days=CLOSED_MARKET_LOOKBACK_DAYS)).date()
+    try:
+        bars = broker.get_daily_bars(ticker, start.isoformat(),
+                                     now.date().isoformat())
+    except Exception:  # noqa: BLE001 - research must not break a cycle
+        return None
+    newest = None
+    for bar in bars or ():
+        if not isinstance(bar, dict):
+            continue
+        try:
+            day = date.fromisoformat(str(bar.get("t"))[:10])
+            close = _finite(bar.get("c"))
+        except (ArithmeticError, TypeError, ValueError):
+            continue
+        if close <= 0:
+            continue
+        if newest is None or day > newest[0]:
+            newest = (day, close)
+    return newest
+
+
+def _cached_daily_close(bars_dir, ticker: str) -> tuple | None:
+    """(day, close) from the local cache, or None. The FALLBACK, used
+    only when the broker could not answer - and the caller names it
+    separately so "Alpaca said" and "a file said" are never the same
+    sentence on the page."""
+    if not bars_dir:
+        return None
+    try:
+        from catalyst.data.price_action import _rows
+
+        rows = _rows(bars_dir, ticker)
+    except Exception:  # noqa: BLE001 - research must not break a cycle
+        return None
+    if not rows:
+        return None
+    try:
+        # `_rows` has always returned (day, close, dollar_volume). The day
+        # was sitting in element 0 and nothing read it, which is why a
+        # month-old close could be presented with no age beside it.
+        day, close = rows[-1][0], _finite(rows[-1][1])
+    except (ArithmeticError, TypeError, ValueError, IndexError):
+        return None
+    if close <= 0 or not isinstance(day, date):
+        return None
+    return (day, close)
+
+
+def build_closed_market_snapshot(bars_dir, ticker: str, broker=None,
+                                 now=None,
+                                 refused: list | None = None
+                                 ) -> "MarketSnapshot | None":
+    """The newest close available, for RESEARCH ONLY while the market
     is shut. Never for sizing.
+
+    ASKS THE BROKER FIRST, falls back to the cache, and REFUSES a close
+    older than the market has plausibly been shut - see
+    `MAX_RESEARCH_CLOSE_AGE_DAYS` for the measurement that made all three
+    necessary. `refused` is an optional list the caller passes to receive
+    the reason, the same idiom `hunt._validate` uses, so "there is no
+    close" and "the close is too old to mean anything" stay different
+    facts on the funnel.
 
     OWNER-ASKED 2026-09-12: *"is there any harm in doing a deep dive into
     the news to find potential for monday"*. There was no harm and there
@@ -1758,25 +1876,47 @@ def build_closed_market_snapshot(bars_dir, ticker: str) -> "MarketSnapshot | Non
     would sail through the owner's 20bp hard bound if this ever did reach
     the spread gate. Belt and braces behind the `priced_off` refusal.
 
-    Never raises: no cached history simply means no snapshot, and the
-    candidate waits for a live quote like it always did.
+    Never raises: no close simply means no snapshot, and the candidate
+    waits for a live quote like it always did.
     """
-    if not bars_dir:
-        return None
-    try:
-        from catalyst.data.price_action import _rows
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
 
-        rows = _rows(bars_dir, ticker)
-    except Exception:  # noqa: BLE001 - research must not break a cycle
+    got = _broker_daily_close(broker, ticker, now)
+    # BOTH PROVENANCES END IN "daily_close", and that is deliberate:
+    # `risk.evaluate` refuses anything that is not exactly "live_nbbo",
+    # by rule rather than by a list, so a value added here is refused for
+    # sizing the moment it exists (house rule 7). What the suffix buys is
+    # the dashboard and the prompt being able to say WHICH - "Alpaca
+    # said" and "a file on disk said" are not the same claim.
+    priced_off = "broker_daily_close"
+    if got is None:
+        got = _cached_daily_close(bars_dir, ticker)
+        priced_off = "cached_daily_close"
+    if got is None:
         return None
-    if not rows:
+    day, close = got
+
+    age_days = (now.date() - day).days
+    if age_days > MAX_RESEARCH_CLOSE_AGE_DAYS:
+        # HOUSE RULE 3: the numbers beside the refusal, so the funnel can
+        # say a month-old cache was declined rather than that nothing
+        # happened. Refusing is the tight direction - the candidate waits
+        # for a live quote, exactly as it did before any of this existed.
+        if refused is not None:
+            refused.append(
+                f"newest close is {day.isoformat()}, {age_days} day(s) old, "
+                f"over the {MAX_RESEARCH_CLOSE_AGE_DAYS}-day bound "
+                f"({priced_off})")
         return None
-    try:
-        close = _finite(rows[-1][1])
-    except (ArithmeticError, TypeError, ValueError, IndexError):
+    if age_days < 0:
+        if refused is not None:
+            refused.append(
+                f"newest close is dated {day.isoformat()}, in the future "
+                f"against a clock reading {now.date().isoformat()}")
         return None
-    if close <= 0:
-        return None
+
     return MarketSnapshot(
         ticker=ticker, last_close=close,
         # NOT ZERO. See the docstring: an impossible spread, so that if
@@ -1784,7 +1924,12 @@ def build_closed_market_snapshot(bars_dir, ticker: str) -> "MarketSnapshot | Non
         # than pass as the tightest book ever measured.
         half_spread_bp=Decimal("100000"),
         median_daily_dollar_volume=Decimal("0"),
-        priced_off="daily_close")
+        priced_off=priced_off,
+        # THE DATE OF THE CLOSE, so the prompt can state it and the model
+        # can judge staleness for itself rather than trusting a guard it
+        # cannot see. A number with no date beside it is what let a
+        # pre-announcement price read as the current one.
+        close_date=day)
 
 
 def _stored_view(conn, candidate_id: str):

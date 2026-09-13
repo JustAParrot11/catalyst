@@ -199,7 +199,7 @@ def render_as_of_section(now: datetime | None = None, market=None,
     return "\n".join(lines)
 
 
-def render_market_section(market) -> str:
+def render_market_section(market, now: datetime | None = None) -> str:
     """The numbers the model is asked to reason about.
 
     IT WAS BEING ASKED TO JUDGE PRICE WITHOUT PRICE. Question 6 asks
@@ -224,11 +224,40 @@ def render_market_section(market) -> str:
     live = market_is_live(market)
     lines = ["MARKET DATA, measured at decision time (not from the model)"]
     last = getattr(market, "last_close", None)
-    if last is not None:
+    if last is not None and live is not False:
+        lines.append(f"  - last close: ${last}")
+    elif last is not None:
+        # THE DATE OF THE CLOSE, AND WHERE IT CAME FROM. Owner-asked
+        # 2026-09-13: *"i dont want it to read a price that may not be
+        # live"*. This said only "newest cached daily close", so a close
+        # from before a merger announcement read exactly like one from
+        # Friday afternoon - measured, ACVA at $7.22 against a real
+        # ~$10.43. Code now refuses a close older than the market has
+        # plausibly been shut, and the model is told the date as well, so
+        # it can judge staleness itself rather than trusting a guard it
+        # cannot see.
+        whence = ("it is Alpaca's own newest daily close"
+                  if str(getattr(market, "priced_off", "")) ==
+                  "broker_daily_close" else
+                  "the broker could not be reached for a fresher figure, so "
+                  "it is the newest close in this bot's local cache")
+        as_of = getattr(market, "close_date", None)
+        dated = ""
+        if as_of is not None:
+            dated = f", dated {as_of}"
+            if now is not None:
+                try:
+                    days = (now.date() - as_of).days
+                    dated += (" - that is today" if days == 0 else
+                              f" - {days} day(s) before today")
+                except (AttributeError, TypeError, ValueError):
+                    pass
         lines.append(
-            f"  - last close: ${last}" if live is not False else
-            f"  - newest cached daily close: ${last} (the market is shut; "
-            "this is not a live quote)")
+            f"  - last close: ${last}{dated}. THIS IS NOT A LIVE QUOTE - "
+            f"the market is shut and {whence}. If your own searching turns "
+            "up a materially different price for this name, trust what you "
+            "find and say so: it means something happened after this close "
+            "and the figure above is behind.")
     # THE SPREAD WAS A REFUSING SENTINEL, RENDERED AS A MEASUREMENT.
     #
     # `build_closed_market_snapshot` sets `half_spread_bp = 100000`
@@ -463,7 +492,7 @@ def render_research_prompt(candidate: Candidate,
             "anything you rely on:\n"
             f"{graph_context}"
         )
-    sections.append(render_market_section(market))
+    sections.append(render_market_section(market, now))
     if record:
         sections.append(record)
     drift = candidate.catalyst_type == "earnings_drift"
