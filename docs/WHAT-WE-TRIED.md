@@ -2992,3 +2992,143 @@ coincide rather than printing one timestamp twice.
 - **Whether the bot should hold a high-conviction position longer is
   unmeasured**, and cannot be measured until hard exits are scored
   against what the stock did next. That is the open item, not the answer.
+
+---
+
+## 27. A closed position cannot be unprotected, and the 08-17 fix went halfway
+
+Owner-reported 2026-09-13, on the Overview, with a screenshot:
+
+> *"position 85fb5edc-a8f5-4bd8-a6a1-0b91c4953b4c is unprotected
+> (checked 2026-08-31T13:27:33.148717+00:00)"* — and under it, `[]` —
+> *"what is this as it isnt very clear and why is there an error"*
+
+**THE SAME POSITION ID WAS REPORTED ON 2026-08-17.** §10b-era fix:
+*"only the latest check per position counts"*. That is right, and it was
+**not enough** — which is the row worth keeping, because a half-fix that
+looks complete is how a defect survives a fortnight on the owner's
+screen.
+
+### Reproduced character for character before changing anything
+
+```python
+>>> queries.alerts(Db(p)).items[0]
+('alarm',
+ 'position 85fb5edc-a8f5-4bd8-a6a1-0b91c4953b4c is unprotected '
+ '(checked 2026-08-31T13:27:33.148717+00:00)',
+ '[]')
+```
+
+### Why the 08-17 fix could never reach this case
+
+| position state | can a later check overwrite the verdict? |
+|---|---|
+| **open**, gap resolved | **yes** — the next cycle writes `ok`, the alarm clears. This is what 08-17 fixed |
+| **closed** | **never** |
+
+`confirm_stops_resting` runs over `_open_position_dicts`, whose SQL ends
+`WHERE p.status = 'open'`. So the moment a position closes **no further
+check is ever written** and its last verdict is frozen for good.
+
+**And that last verdict is very often `unprotected` for an entirely
+innocent reason:** it is taken while the position is being sold, after
+the resting stop has been cancelled to make way for the market sell. So
+the final check on a **correct, normal exit** alarms forever. EMBC
+exited on its hard date on 2026-08-31 and has been alarming since.
+
+The position's own status is the fact that settles it, and it was **one
+join away**. Same shape as §16, §17, §23 and §26: a historical fact
+rendered as a live one.
+
+### What must NOT change, and is pinned
+
+Silencing a stop alarm wrongly is the dangerous direction, so the scope
+is narrow and four tests hold the cases that must still fire:
+
+| case | behaviour |
+|---|---|
+| closed position | **silent** — nothing left to protect |
+| open, no stop | alarms: *"EMBC has NO protective stop resting at the broker, so its downside is unbounded until one is placed"* |
+| open, two stops | alarms: *"has MORE THAN ONE stop resting at the broker, so it could be sold twice"* — a different fault needing the opposite response |
+| **no position row at all** | **alarms**, and adds *"no position row exists for this id, so the record itself is wrong"* |
+
+**UNKNOWN IS NOT CLOSED.** A confirmation with no position behind it
+means the record is wrong, which is worse than an unprotected position
+rather than better — the same asymmetry §16 needed for the baseline and
+§22 for `market_is_live`. And a closed position beside an open one still
+alarms for the open one: the filter scopes by row, it does not switch
+the panel off.
+
+**The confirmation row is not deleted.** It is real, it happened, and the
+trade timeline shows it. What changed is that it stops being an ALARM —
+which is exactly what the 08-17 comment already said it wanted.
+
+### Two readability defects in the same four lines
+
+1. **A raw uuid where a ticker belongs.** §23 fixed precisely this on the
+   decision card; it was still here. The id stays in the verbatim table.
+2. **`[]` printed bare.** That is `live_stop_order_ids` — house rule 3's
+   raw upstream response — and as displayed it says nothing about what
+   is at stake. The sentence now carries the consequence, and the status
+   is named rather than assumed: `unprotected` and `duplicate_stops` both
+   land in this panel and they need opposite responses.
+
+### The unreachable branch, recorded rather than faked
+
+The sentence map has a fallback for a status it does not recognise
+(house rule 7) — and `stop_confirmations` carries
+`CHECK (status IN ('ok','unprotected','duplicate_stops'))`, which holds
+**even under `PRAGMA writable_schema = ON`**. So that branch cannot be
+reached through the database, and the test that tried to reach it failed
+with `IntegrityError`.
+
+Rather than delete the branch or fake an input, the test now asserts the
+**constraint itself** is what makes it unreachable. If somebody relaxes
+the constraint later, the branch becomes reachable and that test goes red
+to say so, instead of the fallback quietly becoming load-bearing and
+untested. Same treatment as §17's single green sabotage.
+
+### The two panels beside it were working
+
+- **"Empty result — here is exactly why it is empty"** on adaptive
+  parameters is correct and is the design: no parameter has moved,
+  adaptation needs closed scored outcomes and a minimum sample, and the
+  panel says so with its query. An honest zero, not a fault.
+- **"19 catalyst types — 2 backtested, 17 estimated"** is informational,
+  and the split is the honest half: only 2 of 19 have ever been replayed.
+
+### Verification
+
+- **The owner's alert reproduced character for character**, `[]`
+  included, before anything changed.
+- **9 sabotage breakages, all 9 caught red**, and the round is weighted
+  deliberately toward the direction this change makes *quieter*: the
+  closed filter removed; `NULL` no longer counting so an orphan goes
+  silent; the `LEFT JOIN` turned inner (same silent orphan); filtering on
+  *any* closed position so one silences an open one beside it; the two
+  faults collapsed into one sentence; the uuid back in place of the
+  ticker; a missing ticker rendering blank; the orphan no longer saying
+  the record is wrong; and the consequence stripped back to a bare
+  status.
+- **Full suite green offline, zero failures** — a clean run with nothing
+  committed during it, so no `test_version_moves` artefacts this time
+  (§25, §26: the lesson applied rather than re-learned).
+
+### THREE EXISTING TESTS WERE PINNED TO THE STATUS WORD
+
+`test_trades_page.py::TestTheStaleUnprotectedAlarm` greped the rendered
+sentence for `"unprotected"` and `"duplicate_stops"` — the **database's
+own status names**. The clearer wording removes both words, so all three
+went red on a change that alters no behaviour.
+
+They were also the weaker assertion: *"the word appears in some alarm"*
+never said **which** position alarmed. Re-pinned to what must hold — an
+alarm exists, it names the stock, and it states the consequence. The
+fourth test in that class is untouched and still passes, because the
+trade page keeps the raw status word in its timeline: that is the
+"history is not deleted" property.
+
+**Same shape as §26's `"2 times since"`.** Twice in one day a test
+pinned to phrasing broke on a rewording that improved it, which is worth
+stating as a rule: **assert the property the reader depends on, not the
+string that currently expresses it.**
