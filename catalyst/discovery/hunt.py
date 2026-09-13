@@ -582,6 +582,26 @@ def render_hunt_prompt(events: list, as_of: datetime,
     tools_text = _tools_section(searchers)
     return "\n\n".join([part for part in [
         closed_market_brief() if market_open is False else "",
+        # WHAT DAY IT IS, and this prompt needed it more than any other.
+        #
+        # `as_of` has been a parameter of this function since it was
+        # written, and went only to `_digest` and `_validate`. So the
+        # code refused any nomination whose catalyst date was before
+        # `as_of.date()` while the prompt never said what that date was
+        # - the model was asked to obey a rule about "today" without
+        # being told when today is.
+        #
+        # That is the 88%-rejection defect one level deeper. §3 row 12's
+        # fix STATED THE RULE ("the event must resolve today or later"),
+        # which helped; it did not supply the date the rule is measured
+        # against. Both halves are needed and now both are here.
+        "RIGHT NOW\n"
+        f"Today is {as_of.date().isoformat()}, a "
+        f"{as_of.strftime('%A')}, and the time is "
+        f"{as_of.strftime('%H:%M')} UTC. Read every date below against "
+        "that, and pick your catalyst dates against it: the hard rule "
+        "further down is measured from this exact date by code that "
+        "refuses anything earlier.",
         "You are the discovery step of an automated trading system. You "
         "are reading a day of raw regulatory filings and market news, "
         "and choosing which of them are worth paying to research "

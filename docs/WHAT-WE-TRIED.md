@@ -2041,3 +2041,142 @@ fallback is the worst of both, because the fallback silently wins.
 - The first measurement to look at is `cache_read_input_tokens` on the
   Cost page. If it stays at zero across a day with research calls, a
   silent invalidator is at work and this change bought nothing.
+
+---
+
+## 22. The bot did not know what day it was
+
+Owner-asked 2026-09-13: *"is the bot 100% aware of the active current
+date and time it is making these searches?"*
+
+**No. None of the three prompts it pays for said what today was.**
+Measured from the owner's own bundle (`catalyst-logic-7d-20260913-125402`),
+the verbatim `prompt_rendered` for `conj-b3caf562223b246f8844` — CHYM,
+called 2026-09-13T00:06 — carried `2026-09-08`, `2026-09-10` and
+`Newest signal: 2026-09-10`, and **nowhere the current date**. `grep -n
+"today\|now(\|date.today" catalyst/research/prompts.py` returned nothing.
+
+| prompt | what it asked | what it was never told |
+|---|---|---|
+| research | question 6: *"has the market already consumed these filings?"* | today's date — the question is **entirely** about elapsed time |
+| hunt | *"the event must resolve today or later"*, enforced by code against `as_of.date()` | the date `as_of` actually is |
+| position review | `next_check_in_days`, *"number of days from today"*; `CLOSES: <date> (fixed)` | today, so also how many days were left |
+
+The hunt case is the sharpest: `as_of` has been a parameter of
+`render_hunt_prompt` since it was written and went only to `_digest` and
+`_validate`. So the **gate** was measured from a date the **prompt**
+never named. §3 row 12 fixed the 88%-rejection defect by stating the
+RULE; it did not supply the date the rule is measured against. Both
+halves were needed and only one had shipped.
+
+**Why this is quiet rather than dramatic.** The model reasons fluently
+about "Sept 10" without knowing whether Sept 10 was yesterday or last
+month, and nothing in the reply reveals which it assumed. Read the CHYM
+thesis: it argues confidently about a Sept 10 pullback and a Sept 2
+acquisition rally and never once states how long ago either was. It is
+not possible to tell from the output whether the dating was right.
+
+### What changed
+
+- **Every prompt opens with `RIGHT NOW`**: the ISO date, the weekday and
+  the UTC time. The weekday matters — "this is a Saturday" carries that
+  EDGAR has filed nothing and the market has been shut for a day.
+- **The research prompt states the evidence's age in days**, computed from
+  `now - candidate.catalyst_date`. That is the arithmetic `priced_in`
+  turns on, done rather than left to the model. A future-dated catalyst
+  (every hunted one, by rule) reads `N day(s) in the FUTURE`, never
+  `-N day(s) ago`.
+- **The market state is stated**, derived from `MarketSnapshot.priced_off`
+  rather than from a new parameter — one source of truth, and house
+  rule 7: anything that is not `live_nbbo` is not live, including a
+  provenance invented later. **`None` is not "closed"**: a missing
+  snapshot means nobody looked, and saying the market is shut when nobody
+  looked is the same class of error in the other direction.
+- **The review prompt says how long it has been held and how many days
+  remain.** Six days left and one day left want different answers, and
+  it was printing the exit date with no distance to it. An unreadable
+  date produces **no day count at all** rather than a confident wrong
+  one.
+- **`now` is passed in, never read from the clock inside a renderer**, so
+  a prompt is reproducible and a test can pin it (house rule 6). It
+  falls back to the real clock because *no* date is the defect being
+  fixed — a caller that forgets must not silently reintroduce it.
+
+### THE SECOND DEFECT, and this one was a falsehood rather than a gap
+
+`build_closed_market_snapshot` sets `half_spread_bp = 100000` on purpose:
+a closed book has no spread, and **zero** is the one value that would
+sail through the owner's 20bp hard bound as the tightest book ever
+measured (§13, risk review F5). Correct for the risk engine, which
+refuses the snapshot on `priced_off` anyway.
+
+**It was going straight into the prompt.** Verbatim, on every
+closed-market research call:
+
+```
+  - half-spread now: 100000 bp. This is what it costs to get in and out;
+    a thesis worth less than the round trip is not a trade.
+```
+
+A 1000% round trip kills every thesis that exists, stated under a
+heading that claims the number was measured. All four closed-market
+calls on record returned `no_trade`. **That is not proof of causation** —
+their theses argue coincidence, not cost — but the prompt was asserting
+a falsehood about the single number most likely to end the conversation.
+
+Fixed by reporting it as **unmeasurable**, not by hiding it: silence
+would be filled by the model, and the round trip is a real cost on the
+microcaps this screen surfaces (BWFG measured 99.2bp half-spread and was
+correctly refused). The sentinel itself is untouched, and a test asserts
+the risk engine still sees `100000`.
+
+### The generalising lesson
+
+**A value chosen to be refused by one consumer was displayed as a
+measurement by another.** The docstring explains at length why the number
+must be absurd, and the renderer two modules away read it as data. This
+is the same shape as §17 (a diagnosis discarded at the point of writing)
+and §14 (`orders.decision_id` holding a candidate id): *a field's meaning
+lived in one module's comments and every other reader took it at face
+value.* When a sentinel is introduced, grep for who renders the field.
+
+### Verification
+
+- Full suite green offline: **4014 tests**.
+- **29 sabotage breakages, all 29 caught red**, each verified to still
+  import first — 25 in round one (22 red) and the 3 that came back GREEN
+  re-run after fixes, plus a fourth for the same wiring.
+
+**The three that were GREEN, and two of them were real test weaknesses
+of exactly the kind §6 opens with.** Worth recording because the cause is
+general and it will recur wherever a parameter has a sensible default:
+
+| sabotage | why it passed | the fix |
+|---|---|---|
+| `investigate` stops passing the clock | `render_research_prompt(now=None)` falls back to the real clock, so "the date is present" stayed true with the wiring cut | a behavioural test that passes a date the wall clock cannot produce (`2019-03-14`) and asserts it in the prompt actually sent |
+| `run_cycle` stops passing the clock | the call-site grep `"now=now)" in src` found the **other** one, `ensure_history(..., now=now)` | a whole cycle is run with the harness clock and the recorded `prompt_rendered` is read back |
+| the hunt clock moved after the hard date rule | **a flawed sabotage** — it deleted the `RIGHT NOW` heading rather than moving the block, so the ordering property was never exercised | rewritten as two edits that genuinely relocate the text to the end of the parts list; it then goes red |
+
+**THE DEFAULT HIDES THE WIRING.** `now=None` reading the real clock is the
+right behaviour — a caller that forgets must not silently reintroduce the
+defect — and it is exactly what makes "the date is in the prompt" a test
+of the renderer rather than of the plumbing. §6's rule (*assert the call
+site, not just the function*) needs a corollary: **a substring that also
+occurs elsewhere in the same function is not a call-site assertion.**
+
+**And a new process failure: a stale `.pyc` survived the restore.** The
+harness rewrote the original bytes, but the `__pycache__` entry had been
+written in the **same second** with the same source size, so Python's
+mtime+size validity check accepted the sabotaged bytecode and the suite
+failed against a source file `git status` reported clean. Ten minutes lost
+hunting a phantom. **A sabotage harness must clear `__pycache__` after
+restoring**, not merely restore the source.
+
+### What is NOT claimed
+
+- **Whether knowing the date changes any judgement is unmeasured.** The
+  claim is narrower and checkable: the model was answering a question
+  about elapsed time without being given the time elapsed, and now it is.
+  Whether `priced_in` stops being set on 95% of candidates is the number
+  to watch, per arm, on the Pipeline page.
+- **No production call has been billed with the clock in the prompt.**

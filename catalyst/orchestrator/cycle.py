@@ -1298,7 +1298,11 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
                 # THE SNAPSHOT WAS ALREADY HERE, three lines up, and went
                 # only to the risk engine. The model was being asked what
                 # price and volume had done and shown neither.
-                market=market)
+                market=market,
+                # AND IT WAS NOT TOLD WHAT DAY IT WAS. `now` is this
+                # cycle's own decision time; it reaches the prompt text
+                # and nothing else.
+                now=now)
             if log.parsed_view is None:
                 report.drop_reasons.setdefault("researched", []).append(
                     f"{c.id}: {log.skipped_reason}")
