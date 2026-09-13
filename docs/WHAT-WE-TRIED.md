@@ -2449,3 +2449,182 @@ asserts every replacement's expected occurrence count.
   owner will make by looking at it.** The ΔE table says only that the
   fourth colour costs nothing measurable in separability, and every arm
   carries a visible text label, so colour is never the identifier.
+
+---
+
+## 24. The weekend price came from a 30-day cache, not from Alpaca
+
+Owner-asked 2026-09-13, after the ACVA decline in §23's bundle:
+
+> *"are we ensuring the pricing info it is pulling is accurate aswell, i
+> dont want it to read a price that may not be life, hence we should
+> allow it to tap into alpaca or somehow get alpaca to give a live read"*
+
+### During market hours this was already true, and is untouched
+
+`build_market_snapshot` asks Alpaca for the live NBBO **every cycle** and
+refuses a quote that is absent, undatable, older than `MAX_QUOTE_AGE`
+(10 minutes), non-positive or crossed. The mid is then cross-checked
+against the cached close — beyond ±35% flagged, beyond 5x refused and no
+order placed. And `risk/evaluate.py` accepts that provenance and no
+other. Nothing here changed.
+
+### While the market was shut it was NOT true, and the number is 30
+
+`bar_history.MAX_CACHE_AGE_DAYS = 30`. A symbol's history is refetched
+only when the file is over a month old — **correct for what that cache
+exists for**, because a 95th-percentile daily move and a worst-case gap
+measured across three years barely move in a month.
+
+**But §13's weekend feature made the same file the source of THE PRICE
+THE MODEL REASONS ABOUT**, and a price may not be a month old.
+
+| path | freshness guard, before this |
+|---|---|
+| live quote | refused above **10 minutes** |
+| weekend close | **none at all** — `rows[-1]`, whatever its date |
+
+**Measured, from the owner's own bundle.** ACVA was rendered into the
+prompt at `last close: $7.22` while the stock traded around **$10.43**
+after an all-cash tender offer at $10.50. `$10.43 / 1.44 = $7.24`, so the
+cached close predated the announcement. The model caught it only because
+it happened to search and then disbelieved its own input:
+
+> *"The market data snapshot given here (last close $7.22) conflicts
+> sharply with every public source (all citing ~$10.43 post-pop), so
+> either the price feed is stale/broken for this name or there is a data
+> error; either way I cannot rely on it to size an edge."*
+
+**That is luck, not a guard.** And `price_action._rows` has returned the
+row's DATE as element 0 since it was written — the fact needed to catch
+it was in the tuple and nothing read it. Fifth instance of §23's closing
+lesson.
+
+### What changed
+
+1. **Alpaca is asked first.** `_broker_daily_close` requests a 12-day
+   window and takes the **newest bar by date**, not the last element —
+   page order is the feed's business, not ours.
+2. **The cache is a NAMED fallback.** Two provenances now:
+   `broker_daily_close` and `cached_daily_close`. Both end in
+   `daily_close` and `evaluate` refuses anything that is not exactly
+   `live_nbbo`, **by rule not by list**, so a value added later is refused
+   for sizing the moment it exists. What the suffix buys is the page and
+   the prompt being able to say which — *"Alpaca said"* and *"a file on
+   disk said"* are not the same claim, and the second one was the wrong
+   one.
+3. **The close carries its date**, and the prompt states it with its age:
+   *"last close: $10.43, dated 2026-09-11 - 2 day(s) before today. THIS IS
+   NOT A LIVE QUOTE …"*
+4. **A close older than the market has plausibly been shut is REFUSED**,
+   with the date, the age and the source in the reason (house rule 3).
+   `MAX_RESEARCH_CLOSE_AGE_DAYS = 7`, derived: the longest scheduled US
+   closure is four calendar days (Friday close to Tuesday open across a
+   Monday holiday), so a week clears it with room and still catches the
+   30-day case by a wide margin. A test asserts the bound exceeds four.
+5. **The model is told to trust its own search over this number** if the
+   two disagree. ACVA was saved by exactly that instinct; it should be
+   instruction rather than luck.
+
+### THE FIXTURE WAS WRITING A CACHE 553 DAYS STALE
+
+The guard went red on eighteen existing weekend tests the moment it
+landed, and the reason is the finding: `test_the_weekend_is_not_wasted`
+anchored its bars at **2024-01-01**, so with 400 rows the newest close
+landed on 2025-02-03 — **553 days before that module's own `NOW`** — and
+the old code read it as the current price without complaint.
+
+**So no test in this suite could ever have detected this bug**, because
+every fixture was already in the failure state and the code had no
+opinion about it. The fixture now writes up to *yesterday*, which is what
+`ensure_history` actually produces (`end = now - 1 day`, deliberately —
+a partial session is not a session).
+
+Same shape as §14's foreign-keys-off fixture and §23's `g1` entity ids,
+and that is now **three instances**: *a fixture that cannot produce the
+state the owner hit will agree with the bug.*
+
+### Also found and fixed while reading: an enumeration where a rule belongs
+
+`panels._why_not_researched` compared `priced_off == "daily_close"`. The
+moment a second closed-market provenance existed, a weekend view would
+have fallen through to *"waiting for the risk engine"* — the opposite of
+true. Now `off and off != "live_nbbo"`, and it names which source
+produced the close (house rule 7).
+
+### The adversarial read, and the one thing it changed
+
+Full read in the commit body. What it changed: the new field was going to
+be `MarketSnapshot.as_of`, and **`PortfolioState.as_of` already exists** —
+a `datetime` rather than a `date`, and the value `kill_switches` measures
+staleness against. Two fields sharing that name, of different types, one
+load-bearing for a kill switch, is a trap for the next reader. Renamed
+`close_date`.
+
+What it cleared: `close_date` reaches the prompt renderer and nothing
+else (`grep` over `risk/`, `execution/`, `cost/` finds only its own
+definition); the closed-market path only ever **reads** the bar cache, so
+it cannot become a second writer and corrupt the history sizing measures
+a stop from (the failure §18 found in `BarCache`'s shared metadata); and
+the extra request is a market-data GET, so it spends no part of the API
+budget the governor bounds.
+
+**The one thing that got worse, stated plainly:** there is now a broker
+call per candidate per closed-market cycle. If Alpaca's data API is down
+at the weekend every candidate falls back to the cache — the old
+behaviour plus a failed fetch. The downside is latency and a log line,
+not a changed decision.
+
+### Verification
+
+- Full suite green offline: **4123 tests**.
+- **26 sabotage breakages, all 26 caught red**, each verified to still
+  import first. 23 red on the first pass.
+- **18 existing weekend tests went red the moment the guard landed**,
+  which is how the 553-day fixture was found.
+
+**The three greens, and two were the same shape as §22's:**
+
+| green | why it passed | the fix |
+|---|---|---|
+| the cycle stops passing the broker | the test GREPPED `run_cycle` for `refused=stale` — which survives that edit | a real closed-market cycle: a 40-day-stale cache plus a broker holding yesterday's close can only research if the broker was passed |
+| the cycle stops recording the stale refusal | same grep; `closed_market_close_too_stale` survives `if False:` too | the same cycle asserts the reason reaches the funnel **with its numbers** |
+| a non-dict bar is not skipped | **defence in depth** — `Broker.get_daily_bars` already filters with `isinstance(b, dict)`, so a bare string cannot reach the inner guard through a real broker | recorded as such (§14, §17) and the property only the inner guard holds is tested directly: a caller handing the helper a list of its own would hit `AttributeError`, which is **not** among the exceptions the loop catches and would escape into the cycle |
+
+**A substring still present in the source is not a behaviour.** That is
+now the second change in a row where a call-site grep walked past a
+sabotage, and the corollary to §6's rule is worth stating once more:
+assert the OUTCOME when the outcome is reachable offline, and this one
+was — the whole cycle runs against an injected clock, an injected broker
+and a cache dated by the test.
+
+### Verified end to end, not asserted
+
+The ACVA case driven through a full cycle on a database built from the
+schema at `3322198` and upgraded by today's `init_db` (no tables lost,
+every row preserved, `PRAGMA foreign_keys` = 1):
+
+| | |
+|---|---|
+| the cache held | **$7.22**, 40 days stale |
+| Alpaca held | **$10.43**, yesterday |
+| the model saw | **$10.43**, via `broker_daily_close` |
+| orders placed | **0** — the market is shut, and that has not moved |
+
+And both failure branches, on fresh databases:
+
+| Alpaca | cache | outcome |
+|---|---|---|
+| down | 40 days old | researched 0, funnel: `closed_market_close_too_stale: newest close is 2026-08-04, 40 day(s) old, over the 7-day bound (cached_daily_close)` |
+| down | Friday's close | researched 1, funnel: `researched_while_closed_awaiting_open` — **the feature still works when the broker cannot be reached**, which is the point of keeping the cache as a fallback rather than removing it |
+
+### What is NOT claimed
+
+- **This has never run against the real Alpaca at a weekend.** Every
+  broker in the tests is an `httpx.MockTransport`. The first thing to look
+  at is whether a weekend prompt reads `broker_daily_close` or
+  `cached_daily_close` — if it is always the latter, the fetch is failing
+  and the fallback is hiding it.
+- **It does not make the weekend price LIVE.** There is no live price when
+  the book is shut. It makes it the *newest close that exists*, dated, and
+  refuses it when it is not.

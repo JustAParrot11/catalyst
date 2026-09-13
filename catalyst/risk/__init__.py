@@ -114,4 +114,22 @@ class MarketSnapshot:
     #: relying on callers to remember. That refusal is the whole point of
     #: the field: it is not a label, it is the gate.
     priced_off: str = "live_nbbo"
+    #: The DATE of `last_close` when it is a close rather than a live mid.
+    #: None on a live snapshot, where "now" is the answer and a date would
+    #: be noise.
+    #:
+    #: NAMED `close_date` AND NOT `as_of` ON PURPOSE. `PortfolioState.as_of`
+    #: already exists three dataclasses up, is a `datetime` rather than a
+    #: `date`, and is what `kill_switches` measures staleness against - so
+    #: two fields sharing that name, of different types, one of them
+    #: load-bearing for a kill switch, is a trap nobody needs.
+    #:
+    #: OWNER-ASKED 2026-09-13: *"i dont want it to read a price that may
+    #: not be live"*. The weekend snapshot read the last row of a cache
+    #: refreshed only every thirty days, and the row's date - which
+    #: `price_action._rows` has always returned - was never read. So a
+    #: pre-announcement close was rendered as the current price with
+    #: nothing beside it to say otherwise (ACVA, $7.22 against a real
+    #: ~$10.43). Carried so the prompt can state it.
+    close_date: object = None
 

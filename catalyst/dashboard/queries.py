@@ -849,6 +849,15 @@ ROUTINE_SKIPS = (
     # first researched, so a ticker nothing has researched yet
     # legitimately has none, and it simply waits for a live quote.
     "market_closed_and_no_cached_close",
+    # A close EXISTS and is too old to reason about - a cache nobody
+    # refreshed and a broker that could not be reached for a fresher
+    # figure. ROUTINE rather than a fault, because the candidate simply
+    # waits for a live quote exactly as it did before weekend research
+    # existed, and refusing is the tight direction. The FEED failure that
+    # caused it, if there was one, gets its own fault row where a fault
+    # belongs - this row is the research step declining to reason about a
+    # price it cannot stand behind.
+    "closed_market_close_too_stale",
     # The model's own judgement. Declining a candidate is the single
     # most common correct thing this bot does - the previous build
     # declined eight of eight and the declines were RIGHT.
