@@ -2964,3 +2964,31 @@ coincide rather than printing one timestamp twice.
 - One existing test correctly pinned the old wording
   (`"2 times since" in ...`) and was updated to assert the **property** —
   both timestamps present — rather than the phrasing.
+- **8 sabotage breakages, all 8 caught red**, each verified to still
+  parse first: the read table not consulted; the `raw_events` fallback
+  dropped; any read ever clearing a fault; the source filter removed;
+  `feed_healed` thrown away again; the fault line naming one end;
+  the Form 4 success path not recording; and the read recorded **before**
+  the fetch, so a block would clear its own fault.
+- **The upgrade run, not assumed.** Today's `init_db` over the schema at
+  `aa57343`: `feed_reads` added, no table lost, every row preserved,
+  `PRAGMA foreign_keys` = 1. On the upgraded database the owner's fault
+  **still shows until the next cycle records a read, then clears** —
+  checked by running it, because "it self-heals in fifteen minutes" is a
+  claim about behaviour.
+- **Full suite green offline: 4145 tests.** The run reported exactly two
+  failures, both in `test_version_moves.py`, and both were the
+  mid-run-commit artefact §25 records — re-run on a settled tree with
+  zero uncommitted files, 37 passed. That is the second time in one day
+  that lesson has been needed, which is why it is in §6.
+
+### What is NOT claimed
+
+- **No weekend has run with `feed_reads` in place.** The chain is
+  verified offline and against an upgraded copy of the schema. The first
+  thing to look at is whether the Pipeline page goes quiet within one
+  cycle of the upgrade; if the fault persists past that, the scheduler is
+  not reaching `_record_feed_read` and the fallback is hiding it.
+- **Whether the bot should hold a high-conviction position longer is
+  unmeasured**, and cannot be measured until hard exits are scored
+  against what the stock did next. That is the open item, not the answer.
