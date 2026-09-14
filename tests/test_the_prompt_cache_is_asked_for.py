@@ -236,3 +236,39 @@ class TestCachingAcrossCallsIsNotAttempted:
         assert "ACROSS CALLS IT CANNOT WORK" in doc
         assert "REORDERING" in doc, (
             "the next session must be told why the obvious fix is refused")
+
+
+class TestTheMarkerIsDefinedOnce:
+    """SECTION 28. Caching shipped for the research path and the HUNT was
+    missed, which is what a second copy of a marker costs: the drift is
+    invisible until a path turns out never to have had one.
+
+    MEASURED from the owner's bundle for 2026-09-14, the day it first
+    traded:
+
+        component   requests  raw input tokens   cost
+        hunt              39        3,638,866    $8.09   <- 82% of the day
+        research          16              ~7k    $1.78
+
+    Every hunt request carried cache_creation = 0 AND cache_read = 0.
+    """
+
+    def test_only_one_place_writes_the_ephemeral_marker(self):
+        from source_guard import source_matches
+
+        markers = [h for h in source_matches('"cache_control": {', "catalyst")]
+        assert len(markers) == 1, (
+            "the ephemeral marker is written out more than once, so its "
+            "TTL and block shape can drift between paid paths:\n"
+            + "\n".join(markers))
+        assert "catalyst/research/boundary.py" in markers[0], markers[0]
+
+    def test_the_hunt_imports_that_helper_rather_than_its_own(self):
+        from source_guard import source_matches
+
+        hits = source_matches("cacheable_prompt_message",
+                              "catalyst/discovery")
+        assert hits, (
+            "the hunt does not reach the shared caching helper at all, so "
+            "its prompt is re-sent uncached on every turn of a 4-5 turn "
+            "call - 82% of the day's spend when this was measured")

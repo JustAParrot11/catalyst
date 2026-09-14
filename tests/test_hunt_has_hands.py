@@ -352,7 +352,12 @@ class TestWebSearchIsAlwaysOffered:
         assert {x["name"] for x in p["tools"]} == {
             "nominate_candidates", "search_filings", "search_news",
             "read_filing", "web_search"}
-        assert "YOU HAVE HANDS" in p["messages"][0]["content"]
+        # THE TEXT, not the container. The hunt prompt is sent as a
+        # one-block content list so it can carry the cache marker; this
+        # assertion is about what the model reads (tests/payload_text.py).
+        from payload_text import prompt_text
+
+        assert "YOU HAVE HANDS" in prompt_text(p)
 
     def test_the_search_allowance_is_what_is_LEFT_not_a_fresh_one(self, ctx):
         """max_uses is per REQUEST. Re-sending the list verbatim hands
@@ -461,3 +466,57 @@ class TestTheCheckCanFail:
         t = Script([nominate([])])
         res = H.hunt(FEED, NOW, t, ctx)
         assert res.turns == 1 and res.tool_calls == []
+
+
+class TestTheHuntPromptIsCached:
+    """SECTION 28. The hunt was the one paid path with no caching, and
+    it is the path where caching pays most: a hunt runs 4-5 turns and
+    `messages` accumulates, so the prompt is re-sent in full every turn.
+
+    MEASURED from the owner's bundle for 2026-09-14 (9 hunt calls, 39
+    requests): every request carried cache_creation = 0 and
+    cache_read = 0, and three calls opened at exactly 45,865 input
+    tokens - the same unchanged digest, paid for at full price 39 times.
+    """
+
+    def test_the_prompt_carries_the_cache_marker(self, ctx):
+        from payload_text import cache_marked
+
+        t = Script([nominate([])])
+        H.hunt(FEED, NOW, t, ctx)
+        assert t.payloads, "the hunt issued no request"
+        assert cache_marked(t.payloads[0]), (
+            "the hunt prompt carries no cache_control, so a 4-turn hunt "
+            "re-sends its whole digest uncached on every turn")
+
+    def test_the_model_reads_byte_identical_text(self, ctx):
+        """The marker changes the CONTAINER and nothing else - the
+        judgement this project measures must not move for a cost fix."""
+        from payload_text import prompt_text
+
+        expected = H.render_hunt_prompt(FEED, NOW)
+        t = Script([nominate([])])
+        res = H.hunt(FEED, NOW, t, ctx)
+        sent = prompt_text(t.payloads[0])
+        assert sent == expected, (
+            "the wrapper altered the prompt text the model reads")
+        # And the prompt RECORDED for the dashboard is the same text, so
+        # the audit trail is not the container either.
+        assert res.prompt == sent
+
+    def test_the_marker_is_on_the_prompt_and_not_on_the_tail(self, ctx):
+        """ONE breakpoint. Marking the growing tail pays a write premium
+        on bytes nothing reads back, and four is the API's limit while a
+        hunt can run five turns - so a marker that moves could overrun
+        it."""
+        from payload_text import cache_marked
+
+        searchers, _ = fake_searchers()
+        t = Script([reply([use("search_news", {"ticker": "BIOX"})]),
+                    nominate([])])
+        H.hunt(FEED, NOW, t, ctx, searchers=searchers)
+        last = t.payloads[-1]
+        marked = [i for i, m in enumerate(last["messages"])
+                  if cache_marked(last, i)]
+        assert marked == [0], (
+            f"expected exactly one marker, on the prompt; found at {marked}")
