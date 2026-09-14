@@ -3239,6 +3239,22 @@ Now in `tests/payload_text.py`, imported by both — the same reasoning as
 the production change. **A helper that solves a recurring trap has to
 live where every caller can reach it, or it solves it once.**
 
+### Verification
+
+- **8 sabotage breakages, all 8 caught red**, each verified to still
+  parse first: the hunt stops wrapping; the hunt copies the marker inline
+  instead of importing it; a second marker on the growing tail; the
+  1-hour TTL substituted; the wrapper altering the prompt text; the
+  wrapper sending an `assistant` turn; the empty-text-block guard
+  reverted; and the recorded prompt no longer being the prompt sent.
+- **One sabotage was a NO-OP on the first pass and is recorded as such,
+  not as caught.** It altered the wrapper to `prompt.strip()` — and
+  neither prompt carries surrounding whitespace, so it changed nothing
+  and came back GREEN. Retargeted at `prompt[:-1]`, which genuinely
+  changes the bytes, it goes red. **A sabotage whose edit is a no-op
+  against the real input proves nothing about the test** (§18).
+- Full suite green offline.
+
 ### What is NOT claimed
 
 - **The saving is arithmetic from today's tokens, not an observed bill.**
