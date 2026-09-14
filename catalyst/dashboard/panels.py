@@ -5847,8 +5847,13 @@ def _reason_excerpt(thesis, budget: int = REASON_EXCERPT_CHARS):
     excerpt.
     """
     text = " ".join(str(thesis or "").split())
-    if not text:
-        return "", False
+    # NO SEPARATE EMPTY-STRING BRANCH. One was written here and it was
+    # unfailable: "" is shorter than the budget, so the line below
+    # already returns ("", False), and sabotaging the extra branch came
+    # back GREEN because it changed nothing. What actually stops an
+    # empty quote reaching the page is the caller's `if reason:`, which
+    # has its own sabotage. Section 25's lesson: machinery no test can
+    # make load-bearing is removed, not kept and explained.
     if len(text) <= budget:
         return text, False
     window = text[:budget]
