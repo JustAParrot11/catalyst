@@ -3266,3 +3266,162 @@ live where every caller can reach it, or it solves it once.**
   40 calls costs under $5, and the demotion rule throttles it after that.
 - **One order is not a track record.** RLMD is open; whether the
   judgement was right is unknown until it closes.
+
+---
+
+## 29. The card answered "why" with the name of the screen
+
+Owner-reported 2026-09-14, on the RLMD card:
+
+> *"was there a fault? should it not of traded RLMD? - the info on the
+> dashboard makes me quite clueless as to the reason the supposed
+> agentically thinking bot traded it and what the driving factors were"*
+
+### There was no fault, and the trade followed every rule
+
+Checked against the bundle's own rows, not the card:
+
+| | |
+|---|---|
+| maintenance checks | **15 of 15 ok** |
+| recorded errors | **0** |
+| funnel `blame_stage` | **empty** — every drop routine or a limit |
+| reconciliation, 09-13 | agrees to the cent |
+| conviction | 0.58 against a 0.50 floor, `priced_in: 0` so no premium |
+| risk on the position | **$39.45** against the $40.00 hard bound |
+| hard bounds | `max_loss_per_position` and `max_hold_days` both **not binding** |
+| what sized it | the two adaptive numbers: 8% assumed gap, 10% stop width |
+
+**Whether the judgement was right is unknown and unknowable until it
+closes.** What can be said is that it came from `insider_cluster` — the
+arm that graded **worst** out of sample (49.3%, 41.2% max drawdown) — so
+this is a trade from the coin-flip arm, at a conviction the model itself
+scored just over a coin flip. That is the system working as designed,
+not a reason for comfort.
+
+### THE DEFECT: the summary's "why" was a two-entry lookup on the arm's name
+
+`_trade_summary` — the paragraph whose own docstring says it exists to
+be *"the FIRST thing on the card"* — built its reason like this:
+
+```python
+because = {"insider_cluster": "several insiders were buying it",
+           "earnings_drift":  "it beat on earnings and kept drifting",
+           }.get(str(st.catalyst_type), None)
+```
+
+So the **entire** answer to "why did it buy this" was seven words naming
+the screen, **identical on every insider-cluster trade the bot will ever
+make**, and it covered 2 of the 19 catalyst types. The owner's reading
+was exactly right: the only reason on offer was the name of the screen.
+
+**And it made their other conclusion look true when it is not.** The
+card said "insiders were buying" and nothing else, so it read as a
+mechanical screen's output. Measured from the same bundle, the research
+call on RLMD **ran three web searches of its own**:
+
+```
+RLMD Relmada Therapeutics CEO CFO insider buying September 2026
+RLMD Relmada Therapeutics stock news September 2026
+Relmada Therapeutics Chief Medical Officer exit Pruthi September 2026
+```
+
+Everything the thesis actually turns on came from those: a Chief Medical
+Officer (urology) departure around Sept 1-2, the 50-day MA at $5.10 and
+200-day at $6.05, Mizuho's Outperform and $19 target, NDV-01
+manufacturing delays, and ~889K shares/day of volume. **Not one of those
+facts is in any feed this bot reads.** The screen supplied two Form 4s;
+the reasoning was Claude's.
+
+The searches, the thesis, the invalidation and the priced-in call were
+**all already on `TradeStory`** — `thesis`, `priced_in`, `searches` —
+and rendered only in section 4, below the chart and two folds. **Seventh
+instance of this project's most recurring defect** (§12, §14, §17, §22,
+§23, §26): the work done and the wiring missing.
+
+### What changed — position on the page, not a new fact
+
+The numbered process walkthrough is **untouched**; the owner asked for
+that order on 09-12 and it stands. What moved is that the summary now
+answers the question it was built to answer:
+
+- **A catalyst type is stated as a type, by rule**, never as a reason —
+  so all 19 read correctly rather than the 2 somebody listed. The
+  article is derived too (`an insider cluster`, `a merger vote`): the
+  first render said *"a insider cluster"*, and six of the nineteen types
+  begin with a vowel.
+- **That Claude searched, and how many times**, counted from the stored
+  turns. This is the answer to "is this actually agentic" and it was in
+  a fold.
+- **The priced-in call beside the conviction.** 276 of 302 views were
+  declined *for* being priced in, so a trade is one of the few where the
+  model said the move was still there.
+- **Claude's own reasoning, quoted**, cut to `REASON_EXCERPT_CHARS`
+  = 240 — measured against the theses on record (median 712 characters,
+  longest 1,204), which is why it is an excerpt and not the whole thing.
+  **Nothing is paraphrased**; a test asserts the excerpt is always a
+  true prefix of what the model wrote, and a clipped one says so and
+  points at the full text below.
+
+### MY OWN CUT RULE WAS WRONG, AND EXERCISING THE BRANCH FOUND IT
+
+The first version preferred a sentence boundary only if it sat past
+**40% of the display budget**. Measured, that threw away a complete
+68-character sentence —
+
+> *"Insiders bought heavily last week and the stock has not re-rated
+> yet."*
+
+— in favour of a clause chopped off mid-phrase 237 characters in. The
+worse read of the two, and **the floor was measured in the wrong unit**:
+a fraction of a layout budget, for a question about prose. It is
+`_SENTENCE_MIN_WORDS = 8` now — about the shortest span that can carry a
+subject, a claim and a reason — which still rejects a `"Yes."` stub and
+keeps every real sentence.
+
+Found by writing a case for the branch, not by reading it. **A rule
+about text must be bounded by a property of text.**
+
+### TRIED AND REMOVED: a separate empty-string branch
+
+`_reason_excerpt` opened with `if not text: return "", False`. Its
+sabotage came back **GREEN**, because `""` is shorter than the budget so
+the very next line already returns exactly that. Redundant, and its
+presence made a sabotage read as uncaught. Deleted rather than kept and
+explained (§25's lesson about machinery no test can make load-bearing),
+and the sabotage retargeted at the guard that **is** load-bearing — the
+caller's `if reason:` — which then goes red.
+
+### Verification
+
+- **15 sabotage breakages, all 15 caught red**, each verified to still
+  parse first: the reasoning removed; the lookup table restored; the
+  article hard-coded; a clipped excerpt not saying so; no pointer to the
+  full text; a mid-word slice; the sentence branch removed; the word
+  floor removed; the search count asserted rather than counted; the
+  plural hard-coded; priced-in removed; priced-in **inverted**; the
+  excerpt taken from the end so it is no longer a prefix; the caller's
+  empty guard; and the budget guard.
+- **Two bugs in my own tests, both caught by running them:** a reused
+  `tmp_path` database filename (`UNIQUE constraint failed`), and a
+  word-cut sample **230 characters long against a 240 budget** — under
+  the budget, so it was never clipped and the test could not reach the
+  branch it was written for. The sample now asserts it exceeds the
+  budget before asserting anything about the cut.
+- The card **rendered from the owner's own bundle rows**, before and
+  after, rather than judged by eye.
+- The fixture goes through `init_db` and asserts `PRAGMA foreign_keys`
+  is on (§14).
+- Full suite green offline.
+
+### What is NOT claimed
+
+- **Whether RLMD was a good trade is unknown.** It is open. The thesis
+  is checkable — it names $3.80 as its own invalidation — and that is
+  the number to watch, not the card.
+- **"Should it have traded it" has no measured answer** and will not
+  until the refusal tracker and closed trades produce a sample. One
+  order is not a track record.
+- **This changes nothing about what the bot does.** `grep` over `risk/`,
+  `execution/` and `cost/` for the new symbols returns nothing; it is a
+  rendering change to a page.

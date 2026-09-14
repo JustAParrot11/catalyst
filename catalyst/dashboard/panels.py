@@ -5810,6 +5810,62 @@ def _timeline(st, p: str, index: int, steps=None) -> str:
     return "".join(out)
 
 
+#: How much of the model's own reasoning goes in the summary paragraph.
+#: Measured against the real theses on record rather than picked: the
+#: median is 712 characters and the longest 1,204, so the whole thing
+#: would swamp a paragraph the owner asked to be glanceable. 240 carries
+#: the first concrete claim - on RLMD, both officers' purchases, their
+#: sizes, their prices and the fall the thesis is about - and the full
+#: text is a fold away on the same card.
+REASON_EXCERPT_CHARS = 240
+
+#: A sentence boundary is only worth cutting on if the sentence SAYS
+#: something. Below this it is a stub - "Yes." or "Long." - and a
+#: word-boundary cut carries more.
+#:
+#: MEASURED IN WORDS, NOT IN A SHARE OF THE BUDGET, and the first
+#: version got that wrong: at 0.4 x 240 characters it threw away a
+#: complete 68-character sentence ("Insiders bought heavily last week
+#: and the stock has not re-rated yet.") in favour of a clause cut off
+#: mid-phrase 237 characters in - the worse read of the two, and found
+#: by exercising the branch rather than by reading it. Eight words is
+#: about the shortest span that can carry a subject, a claim and a
+#: reason, and it is a fact about prose rather than about a layout.
+_SENTENCE_MIN_WORDS = 8
+
+
+def _reason_excerpt(thesis, budget: int = REASON_EXCERPT_CHARS):
+    """The model's reasoning, short enough to read, cut where it reads.
+
+    Returns `(text, clipped)`. NOTHING IS PARAPHRASED - the words are
+    the model's own, and `clipped` is what lets the caller say so, so a
+    reader is never shown a fragment presented as the whole thought.
+
+    Cut BY RULE, not by slicing (house rule 7): prefer a sentence end
+    inside the budget, fall back to a word boundary, and never split a
+    word - a thesis mid-word reads as corrupted data rather than as an
+    excerpt.
+    """
+    text = " ".join(str(thesis or "").split())
+    # NO SEPARATE EMPTY-STRING BRANCH. One was written here and it was
+    # unfailable: "" is shorter than the budget, so the line below
+    # already returns ("", False), and sabotaging the extra branch came
+    # back GREEN because it changed nothing. What actually stops an
+    # empty quote reaching the page is the caller's `if reason:`, which
+    # has its own sabotage. Section 25's lesson: machinery no test can
+    # make load-bearing is removed, not kept and explained.
+    if len(text) <= budget:
+        return text, False
+    window = text[:budget]
+    cut = max(window.rfind(". "), window.rfind("? "), window.rfind("! "))
+    if cut > 0:
+        sentences = window[:cut + 1].strip()
+        if len(sentences.split()) >= _SENTENCE_MIN_WORDS:
+            return sentences, True
+    space = window.rfind(" ")
+    return (window[:space] if space > 0 else window).strip(), True
+
+
 def _trade_summary(st) -> str:
     """WHAT HAPPENED, IN ONE PARAGRAPH A PERSON CAN READ.
 
@@ -5843,18 +5899,59 @@ def _trade_summary(st) -> str:
     else:
         bits.append(f"Ordered {what}, but the fill is not reconciled yet, "
                     "so the price paid is not on record")
-    because = {"insider_cluster": "several insiders were buying it",
-               "earnings_drift": "it beat on earnings and kept drifting",
-               }.get(str(st.catalyst_type), None)
-    if because:
-        bits.append(f", because {because}")
-    elif st.catalyst_type:
-        bits.append(f", on a {esc(str(st.catalyst_type)).replace('_', ' ')}")
+    # HOW IT WAS FOUND, NEVER WHY IT WAS BOUGHT. Until 2026-09-14 this
+    # clause read ", because several insiders were buying it" - from a
+    # TWO-ENTRY TABLE keyed on `catalyst_type`. So every insider-cluster
+    # trade the bot will ever make opened with the same seven words, the
+    # arm's name standing in for the model's reasoning, and the actual
+    # reasoning sat four sections below the chart. The owner read it and
+    # said the card left them "quite clueless as to the reason the
+    # supposed agentically thinking bot traded it and what the driving
+    # factors were" - correctly, because the only reason on offer was
+    # the name of the screen.
+    #
+    # A type is now stated as a type (house rule 7: by rule, so all 19
+    # read correctly rather than the 2 somebody listed), and the WHY is
+    # the model's own words, below.
+    kind = str(st.catalyst_type or "").replace("_", " ").strip()
+    if kind:
+        # "a insider cluster" was the first render of this. Six of the
+        # nineteen catalyst types begin with a vowel (insider_cluster,
+        # earnings, earnings_result, earnings_drift, asset_deal,
+        # analyst_action), so the article is chosen by rule rather than
+        # hard-coded for the one type that happened to be on screen.
+        article = "an" if kind[:1].lower() in "aeiou" else "a"
+        bits.append(f". The screen matched it on {article} "
+                    f"<b>{esc(kind)}</b> catalyst")
+    # THAT CLAUDE DID ITS OWN RESEARCH IS THE ANSWER TO "IS THIS
+    # AGENTIC", and it was recorded from the start while only ever
+    # appearing in a fold. Three searches on RLMD found the CMO
+    # departure, the analyst target and the moving averages the thesis
+    # turns on - none of which is in any feed this bot reads.
+    n_search = len(st.searches or ())
+    if n_search:
+        bits.append(f", then Claude ran <b>{n_search} web search"
+                    f"{'es' if n_search != 1 else ''}</b> of its own before "
+                    "judging it")
     if st.conviction is not None:
         bits.append(f". Claude rated the call <b>{float(st.conviction):.2f}</b>"
                     " - roughly how often it expected to be right on setups "
                     "like this")
+        # PRICED-IN IS HALF THE DECISION and the card never said it up
+        # front. 276 of the 302 views on record were declined FOR being
+        # priced in, so a trade is one of the few where the model said
+        # the move was still there.
+        bits.append(", and judged the move <b>"
+                    + ("already partly priced in" if st.priced_in
+                       else "not yet priced in") + "</b>")
     bits.append(". ")
+    reason, clipped = _reason_excerpt(st.thesis)
+    if reason:
+        bits.append("<b>Why, in Claude's own words:</b> &ldquo;"
+                    + esc(reason) + ("&hellip;&rdquo;" if clipped
+                                     else "&rdquo;"))
+        bits.append(" (the rest is under <i>What Claude concluded</i> "
+                    "below.) " if clipped else " ")
 
     # ---- the close, or where it stands
     if st.realized_pnl_cents is not None:

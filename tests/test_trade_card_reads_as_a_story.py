@@ -126,7 +126,25 @@ class TestTheCardOpensWithWhatHappened:
         assert "$400" in s and "$5.06" in s and "18 Jun" in s
 
     def test_it_says_why_the_stock_was_picked_in_words(self):
-        assert "insiders were buying" in summary(card(embc()))
+        """PINNED TO THE PROPERTY, NOT THE PHRASING (section 29).
+
+        This asserted `"insiders were buying" in summary(...)` - the
+        output of a two-entry lookup table keyed on `catalyst_type`,
+        which WAS the defect: the same seven words on every
+        insider-cluster trade ever, naming the screen where the reason
+        belongs. The owner read it and said the card left them "quite
+        clueless as to the reason ... and what the driving factors
+        were".
+
+        The intent of this test was always right and is now better
+        served: the summary says why in words, and the words are the
+        model's own. Third time a test pinned to phrasing broke on a
+        rewording that improved it (sections 26, 27).
+        """
+        s = summary(card(embc()))
+        assert "in Claude's own words" in s, s
+        # The fixture's whole thesis - quoted, not categorised.
+        assert "Two insiders bought $1.2M at $5.02." in s, s
 
     def test_it_translates_the_conviction_rather_than_printing_it(self):
         s = summary(card(embc()))
