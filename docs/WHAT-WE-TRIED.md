@@ -3132,3 +3132,137 @@ trade page keeps the raw status word in its timeline: that is the
 pinned to phrasing broke on a rewording that improved it, which is worth
 stating as a rule: **assert the property the reader depends on, not the
 string that currently expresses it.**
+
+---
+
+## 28. It traded. And 82% of that day's money went to the one path with no caching
+
+**2026-09-14: THE BOT PLACED ITS FIRST ORDER.** RLMD, $398.62, 88.6812
+shares at $4.4949, stop $4.05, exit 2026-09-29. Owner-asked: *"Do the
+logs for today look correct? Has it made the correct decision or bought
+by mistake, is the logic fully sound? All I see is the attached image,
+that doesnt feel like any agentic trading calls at all, it feels heavily
+insider trade focused"* — then, separately: *"it has spent $10 today
+which is almost exactly double usage cost previous month. Are we fully
+optimizing these tokens or wasting alot"*.
+
+### The order was correct, checked against the bundle rather than the card
+
+| the card | the rows | agrees |
+|---|---|---|
+| $399 at $4.49 | `notional_usd` 398.62, `qty` 88.6812 → $4.4949 | yes |
+| stop $4.05, 9.8% below | `stop_price` 4.05 → 9.9% of the fill | yes |
+| rated 0.58 | `conviction` 0.58, floor 0.50, **`priced_in: 0`** so no premium | yes |
+| 15 days, closes 29 Sep | model asked 15; `max_hold_days` 31 **not binding** | yes |
+
+**Risk on the position: $39.45** (88.6812 × $0.4449 of stop distance)
+against a 2%-of-$2,000 hard bound of $40.00 — sized to within 55 cents
+and stopped. `limit_applications` records both hard bounds as
+**not binding** and the two adaptive numbers as binding: 8% assumed gap,
+10% stop width. That is §11's arithmetic landing exactly where it should.
+
+All 15 maintenance checks `ok`. Reconciliation for 09-13 agrees **to the
+cent** ($1.3777 local vs $1.3777 billed).
+
+**A misread of my own, recorded because it nearly became a false
+alarm:** I first read `maintenance_checks` for `ok`/`detail` and reported
+15 FAILs. The fields are `state`/`summary`; all 15 were green. *A
+bundle's schema is a fact to check, not to guess.*
+
+### "Heavily insider focused" — right about the OUTPUT, backwards about the SPEND
+
+| | |
+|---|---|
+| directional views, lifetime | **24 of 26 from insider clusters** |
+| today's research calls | insider 26, conjunction 25, drift 6, hunt 1 — **near-even** |
+| today's SPEND | **hunt $8.09 (82%)**, all research $1.78 (18%) |
+
+So the rotation (§13 row 13) is working and the money is going to the
+agentic half. It is not insider-*focused*; it is insider-*converting*.
+The arm to question is **conjunctions: ~114 paid calls, zero directional
+views, ever** — §4's open trigger is now overdue for a decision.
+
+The hunt did run and nominated `hunt-MU-2026-09-30` on a confirmed
+earnings date, so the path is alive.
+
+### THE WASTE, MEASURED: the hunt had no caching at all
+
+$9.87 spent against a **$10.00/day** ceiling (`daily_cap_cents` =
+monthly ÷ 30 × 3). MTD $43.15 on the 14th ≈ $3.08/day, projecting ~$92
+of $100 — **the month is on track; the day hit the rate ceiling.**
+
+Where it went:
+
+```
+component   requests  raw input tokens   cache_w   cache_r    cost
+hunt              39         3,638,866         0         0   $8.09
+research          16            ~7,000   426,866   305,553   $1.78
+```
+
+**Every hunt request carried `cache_creation = 0` and `cache_read = 0`.**
+§21 wrapped the RESEARCH prompt in `cacheable_prompt_message` and missed
+this path — and it is the path where caching pays most, because a hunt
+runs 4-5 turns and `messages` accumulates, so the prompt is re-sent in
+full on every one.
+
+**Three of the nine calls opened at exactly 45,865 input tokens** — the
+same unchanged digest, paid for at full price 39 times:
+
+```
+re-sent uncached   39 x 45.8k = 1.79M tokens   (49% of all hunt input)
+with one write     45.8k x 1.25 + 38 x 45.8k x 0.1 = 0.23M
+saving             ~1.56M tokens/day = ~$3.12 at $2/MTok
+```
+
+About a third of the day's entire spend, and **the model reads
+byte-identical text** — the marker changes the container, not a word.
+
+**One line, and it imports the SAME helper** rather than copying the
+marker: two copies drift, and the drift is invisible until a path turns
+out never to have had one, which is precisely what happened here. A test
+asserts `"cache_control": {` appears in exactly **one** file.
+
+**One breakpoint, on the prompt, nothing on the tail** — §21's decision,
+unchanged and for its documented reason. Four breakpoints is the API
+limit and a hunt can run five turns, so a marker that moved could
+overrun it.
+
+### The same test trap as yesterday, one day later
+
+`test_hunt_has_hands.py` asserted `"YOU HAVE HANDS" in
+p["messages"][0]["content"]` — the **container**, which is now a block
+list. §21 hit this exact failure on the research path and fixed it with a
+`_prompt_text()` helper **local to `test_boundary.py`**, so the hunt
+tests could not reach it and broke identically a day later.
+
+Now in `tests/payload_text.py`, imported by both — the same reasoning as
+the production change. **A helper that solves a recurring trap has to
+live where every caller can reach it, or it solves it once.**
+
+### Verification
+
+- **8 sabotage breakages, all 8 caught red**, each verified to still
+  parse first: the hunt stops wrapping; the hunt copies the marker inline
+  instead of importing it; a second marker on the growing tail; the
+  1-hour TTL substituted; the wrapper altering the prompt text; the
+  wrapper sending an `assistant` turn; the empty-text-block guard
+  reverted; and the recorded prompt no longer being the prompt sent.
+- **One sabotage was a NO-OP on the first pass and is recorded as such,
+  not as caught.** It altered the wrapper to `prompt.strip()` — and
+  neither prompt carries surrounding whitespace, so it changed nothing
+  and came back GREEN. Retargeted at `prompt[:-1]`, which genuinely
+  changes the bytes, it goes red. **A sabotage whose edit is a no-op
+  against the real input proves nothing about the test** (§18).
+- Full suite green offline.
+
+### What is NOT claimed
+
+- **The saving is arithmetic from today's tokens, not an observed bill.**
+  The number to watch is `cache_read_input_tokens` on the Cost page for
+  the hunt component: if it stays at zero, the marker is not reaching the
+  request and this bought nothing.
+- **Whether the hunt ever converts to a tradeable view is unmeasured** —
+  11 lifetime paid calls, 0 directional views. §14's bound still holds:
+  40 calls costs under $5, and the demotion rule throttles it after that.
+- **One order is not a track record.** RLMD is open; whether the
+  judgement was right is unknown until it closes.

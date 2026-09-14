@@ -58,6 +58,11 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from catalyst.discovery import Candidate
+# THE SAME HELPER THE RESEARCH PATH USES, deliberately not a second copy
+# of the marker: one definition means the TTL and the block shape cannot
+# drift apart between the two paths, which is how this path came to have
+# no caching at all while the other did.
+from catalyst.research.boundary import cacheable_prompt_message
 
 _log = logging.getLogger("catalyst.hunt")
 
@@ -904,7 +909,42 @@ def hunt(events: list, as_of: datetime, transport, cost_context,
     usages: list = []
     offered = client_tools + web_search_tools()
     forced = {"type": "tool", "name": "nominate_candidates"}
-    messages = [{"role": "user", "content": result.prompt}]
+    # ASK FOR THE PROMPT TO BE CACHED, exactly as the research path does.
+    #
+    # MEASURED, owner's bundle for 2026-09-14 (the day it first traded):
+    #
+    #   component   requests  raw input tokens  cost
+    #   hunt              39         3,638,866  $8.09   <- 82% of the day
+    #   research          16            ~7,000  $1.78
+    #
+    # Every one of those 39 hunt requests carried cache_creation = 0 and
+    # cache_read = 0: `cache_control` had never reached this path. Section
+    # 21 wrapped the RESEARCH prompt and this one was missed, and it is
+    # the path where caching pays most - a hunt runs 4-5 turns and
+    # `messages` accumulates, so the prompt is re-sent in full on every
+    # one of them.
+    #
+    # THE PROMPT IS ~45.8k TOKENS AND IDENTICAL ACROSS CALLS. Three of
+    # the nine calls that day opened at exactly 45,865 input tokens,
+    # which is what an unchanged digest looks like. So:
+    #
+    #   re-sent uncached   39 x 45.8k  = 1.79M tokens  (49% of hunt input)
+    #   with one write     45.8k x 1.25 + 38 x 45.8k x 0.1 = 0.23M
+    #   saving             ~1.56M tokens/day = ~$3.12 at $2/MTok
+    #
+    # That is roughly a third of the day's entire spend, and the model
+    # sees BYTE-IDENTICAL input - `cacheable_prompt_message` returns the
+    # same text in a one-block list, because cache_control attaches to a
+    # content block rather than to a bare string.
+    #
+    # ONE BREAKPOINT, ON THE PROMPT, and nothing on the growing tail -
+    # the same decision section 21 made and for the same documented
+    # reason: marking the tail pays a write premium on bytes nothing
+    # reads back. The tail here is search results, which the API covers
+    # with its own write once a request uses caching at all. If the
+    # ledger later shows the tail is still the cost, that is the moment
+    # to revisit it, with a number.
+    messages = [cacheable_prompt_message(result.prompt)]
     payload = {
         "model": model,
         "max_tokens": 4000,
