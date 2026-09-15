@@ -300,7 +300,18 @@ class TestAClosedTradeGetsTheWholeBreakdown:
         conn.close()
         html = _page(path)
         assert "a loss" in html
-        assert "stop_hit" in html
+        # RE-PINNED 2026-09-15 to what this test is actually about. It
+        # asserted `"stop_hit" in html` - the raw enum - which passed
+        # only because the summary's fallback leaked the token, and the
+        # sibling card test forbids an enum anywhere on the card. The
+        # subject here is that a loss is reported as a loss WITH ITS
+        # REASON, so it asserts the reason in words. `stop_hit` is also
+        # not a value production writes: `reconcile.py` writes `stop` or
+        # `hard_exit`, so pinning to it was testing an impossible row.
+        assert "stop hit" in html, (
+            "the exit reason is not stated at all")
+        assert "stop_hit" not in html, (
+            "the raw enum is back on the card")
 
 
 class TestEveryOrderIncludingTheFailures:

@@ -4022,3 +4022,272 @@ on `nominated_at`, which was already a registered time column.
   correct on the next cycle that rebuilds the candidate, so an arm that
   has stopped emitting a given candidate keeps its old stamp — correctly,
   since nothing is claiming it.
+
+---
+
+## 33. The P&L chart put a wrong number on a settled trade, and never said when
+
+Owner-reported 2026-09-15, with a screenshot of a closed trade's card:
+*"this graph kind of makes sense, it is still confusing make clearer but
+level of detail is good, there isnt a live continuously updating version
+for an active trade however, only a past"*.
+
+**Measured by rendering the owner's own case rather than judging the
+picture.** Six defects, and the first is money.
+
+### 1. THE CLOSED TRADE SHOWED A FIGURE THAT WAS NEVER BANKED
+
+```
+the card said : +$20.10 unrealised
+actually banked: +$11.95
+discrepancy    : $8.15
+```
+
+The line ended at the last **bar** and the dot was labelled with that
+bar's mark-to-market — under the word *"unrealised"*, on a trade that had
+settled. `TradeStory.exit_price` and `TradeStory.realized_pnl_cents` have
+both existed since that dataclass was written, and **neither reached the
+chart.** Eleventh instance of this project's most recurring defect (§12,
+§14, §17, §22, §23, §26, §29, §30, §31) and the first to put a **wrong
+money figure** on a page rather than merely an unhelpful one.
+
+The sale is a **point on the line** now, so the line ends where it sold.
+Which number is shown is named, not implied: the broker's realised figure
+when there is one (*"that is the broker's own realised figure, so it
+carries whatever the fill and the fees actually were"*), else the
+multiplication with *"it carries no fees"* said out loud.
+
+**The dot's height and its label come from one number.** The broker's
+figure and `(exit − fill) × qty` differ by fees, so drawing at one and
+labelling with the other would be the two-numbers-one-meaning trap §18
+and §30 have already paid for — on money this time.
+
+### 2. THE EXIT MARK COULD BE DROPPED SILENTLY
+
+The mark window is `first <= at <= last`, and a bar is stamped at the
+**start** of its interval — so a sale settling after the final bar, which
+is the ordinary case, was dropped without a word. §10b calls the exit the
+single most important mark on a closed trade.
+
+Fixed **by construction** rather than by widening the window: the sale is
+now the last point, so `last` moves with it.
+
+**And the entry had the same defect at the other end.** The purchase is
+now a point too, worth **exactly zero** — `(fill − fill) × qty`, arithmetic
+rather than an assumption. Three things follow: the line visibly departs
+from break-even instead of starting partway up at an unexplained height,
+the first bar of the entry day stops deciding where the chart begins, and
+"Bought" can no longer be dropped for sitting before it.
+
+### 3. TWO THIRDS OF THE CHART WAS A LINE ACROSS A SHUT MARKET
+
+This is what the owner was reading as price movement, and it was the
+loudest thing in the picture. Measured on a three-day hold at 30-minute
+bars:
+
+```
+drawn x-span                          54.0 hours
+gaps with no bars in them             36.0 hours  (2 overnight closures)
+SHARE OF THE WIDTH THAT WAS A
+STRAIGHT LINE ACROSS NO DATA           67%
+```
+
+Alpaca returns session bars only, so an overnight gap is 17.5 hours of
+horizontal distance with nothing in it — and one polyline renders that as
+a long clean diagonal between two jagged runs. The owner's screenshot is
+exactly that shape.
+
+**The line breaks per session now, and the rule is one session** —
+`SESSION_MINUTES`, the number already in the module rather than a second
+one to drift. A gap longer than the market can be open in one day cannot
+be anything but a closure, so the caption's claim *is* the rule. A
+**daily** series is never broken: one point per trading day is what a
+daily series is, so a weekend is not a gap in it.
+
+**And blank is its own confusion.** Breaking the line left 66% of the
+width empty, which reads as missing data or a broken chart, so the
+closures are **shaded** — neutral ink, not a status colour, because
+nothing went wrong there. Same segmentation read twice rather than two
+rules that could disagree.
+
+### 4. THERE WAS NO TIME AXIS AT ALL
+
+Measured: **not one text element on the chart carried anything date- or
+time-like.** A reader could not tell an afternoon from a fortnight.
+§10b fixed precisely this on the **price** chart (*"the card had no time
+axis"*) and the P&L chart repeated it.
+
+The ticks fall at each session start plus the final moment — the same rule
+that breaks the line, so one mechanism does both. Same-day holds are
+labelled by the clock, longer ones by the date. Two things were found by
+rendering, not reading:
+
+- **the axis printed "14 Sep" twice**, because the final moment usually
+  falls on a day a session tick already named — §10b's
+  five-identical-captions defect in miniature, introduced by the fix
+  for it;
+- **twenty-one session starts measured as eleven dates across 510px**,
+  which is clutter rather than an axis. How many fit is now derived from
+  how wide a label is, keeping the first and last always.
+
+### 5. FIVE CAPTIONS READING "Review", WITH HOVERS THAT ALL SAID "hold"
+
+Claude's actual reasoning is at index 3 of the same tuple. With every
+caption identical the hover was the only thing that could tell them
+apart, and it carried the machine action. It now carries the date and
+what Claude said.
+
+**And the exit hover read `Sold: hard_exit`** — caught by an existing
+test, `test_the_exit_reason_is_words_not_an_enum`. The words for it were a
+dict literal **inside** `_trade_summary`, so the second caller could not
+reach them. Twelfth instance of the same defect, and the cheapest yet to
+have avoided. Extracted as `_exit_words`, with a **rule** for the
+fallback (de-underscore) rather than printing a token nobody listed.
+
+**TRIED AND REVERTED:** putting the raw exit reason in the exact-numbers
+fold, to satisfy a sibling test that asserted `"stop_hit" in html`.
+Checked against production instead of reasoned about — `reconcile.py`
+writes exactly **two** values, `stop` and `hard_exit`, which map to two
+distinct sentences. So the machine string buys no audit detail the words
+do not carry, and `stop_hit` was never a row production could produce.
+That test is re-pinned to its real subject.
+
+### 6. THE SHADED RISK BAND WAS NAMED NOWHERE
+
+It has been drawn since the chart shipped and no prose mentioned it, so
+it read as "the bad region" or as something that had happened. It is
+named now — **by position, never by colour**, because there are two shaded
+regions on this chart and this project's standing rule is that nothing is
+identified by a hue a reader may not be able to use. The closures'
+sentence is gated on there being closures, because §18 paid three times
+for a sentence shown to a reader it did not apply to.
+
+### The owner's own point: it never updated itself
+
+Correct, and measured. `refresh_seconds` existed with **exactly one
+caller** — the detailed Overview — so this page fetched a live quote on
+load and then sat still until the reader reloaded by hand.
+
+The Trades page refreshes now, **gated on a position actually being
+open**, for the reason the Overview's summary view is deliberately not
+refreshed: a page that reloads under the reader fights them for the
+scroll position, and on a page of settled trades every figure is final
+and nothing could change. A meta refresh, not a script — `page()`'s own
+reasoning is that a failed script stops the numbers while still looking
+current, which is the exact failure the live/settled distinction exists to
+prevent.
+
+### Two defects in my own change, both found by measuring
+
+- **The axis labels overlapped the event lane by 3.3px in all 72 cases**,
+  because `EVENT_LANE_TOP` was a typed `21.0` against a measured box. That
+  is §18's two-numbers-one-meaning defect for the **third** time in this
+  file (`FONT_SIZE + 2` vs 14.3; a 12px row pitch vs 12.35). The lane's
+  top is derived from the axis band's height now, so they cannot drift.
+  A 2px gap satisfied the arithmetic and still measured as colliding —
+  `svg_measure.overlaps` treats anything within 2px as one block,
+  correctly — so the gap is half a line of the font.
+- **A dead `try/except`.** `_any_position_open` wrapped its query in
+  `except Exception`, and `Db.q` **does not raise** — it returns a result
+  carrying `error`. A sabotage came back GREEN and that is how it was
+  found. It reads `got.error` now, which is the path that actually
+  happens (§25: machinery no test can make load-bearing is removed, not
+  kept and explained).
+
+### TRIED AND DELETED: an x-distance guard on the axis labels
+
+It rejected a label too close to one already placed. **Probed across 595
+shapes** — every hold from 1 to 24 sessions, five bar resolutions,
+partial final sessions — and it changed the outcome **zero** times,
+because the label thinning and the duplicate-text check always reach it
+first. Deleted rather than kept and explained. The **edge anchoring**
+beside it was probed the same way and fires on 1168 labels, so it stays —
+and the test that missed its sabotage was measuring the **viewBox** when
+the boundary that guard defends is the **plot**.
+
+### Verification
+
+- **34 sabotage breakages, all 34 caught red**, each verified to still
+  parse first. Weighted at the worst directions for a money chart: the
+  sale never becoming a point, the computed figure overriding the
+  broker's, the dot's height and label diverging, "unrealised" on a
+  settled trade, and the purchase drawn at something other than zero.
+- **28 red on the first pass. Five of the six misses were my own
+  weaknesses, and two were no-ops** (§28):
+  - *the purchase drawn at the first bar's value*: the fixture's first bar
+    priced at **exactly** the fill, so its P&L was 0.00 — identical to the
+    purchase point — and the edit changed nothing. Worse, the fill landed
+    exactly on a bar boundary, so **no purchase point was inserted at
+    all** and the test written for it was asserting against a bar. The
+    fixture now opens seven minutes into the session, as a real fill does.
+  - *an open position no longer explaining "unrealised"*: the test
+    asserted the **word**, which the label at the front of the line
+    supplies, so the sentence saying what it MEANS was untested.
+  - *the edge anchoring*: measured the viewBox, not the plot.
+  - the x-distance guard: unreachable, deleted (above).
+  - one **NOT APPLIED** after the dead `try/except` was replaced, and one
+    from an f-string my target had mis-split — both recorded as not
+    applied, retargeted, then red.
+- **Geometry measured, not eyeballed:** zero overlaps and zero labels
+  outside the viewBox across **72 cases** (1–21 day holds × 0–30 reviews ×
+  open and closed), and every axis label inside the plot bounds.
+- Full suite green offline on a settled tree.
+
+### AND A TEST WAS SITTING ON THE SUITE'S TIMEOUT, 0.26s FROM RED
+
+Found while chasing an intermittent failure in the full run that did not
+reproduce in six file-level runs. It was never a wrong assertion:
+
+```
+Failed: Timeout (>60.0s) from pytest-timeout
+```
+
+Measured on an idle machine, three runs:
+
+| | |
+|---|---|
+| `test_a_pass_that_found_nothing_still_records_that_it_answered` | **59.74s** |
+| the suite's per-test timeout (`pyproject.toml`) | **60s** |
+| margin | **0.26s** |
+| its sibling in the same class | 0.06s |
+
+**Why only that one.** It stubs `fetch_form4` to *succeed*, so the pass
+continues into EDGAR full-text search — **17 queries** — and the news
+feed, each retrying four times with exponential backoff against the
+suite's network block. The sibling is instant because `RateLimitBlocked`
+skips every SEC feed for the pass, which the code says in as many words.
+
+**And the class asserts only about `edgar_form4`** — both tests filter
+`_reads` to it — so those 59 seconds bought nothing at all. The two
+enriching feeds are stubbed in the fixture now:
+
+```
+59.74s  ->  0.09s        (660x, assertions unchanged)
+```
+
+Sabotage-checked after the change: removing
+`_record_feed_read("edgar_form4", …)` still goes red, so speeding it up
+did not make it vacuous.
+
+**Why this belonged in this change rather than a later one:** `upgrade.sh`
+runs the full suite on the owner's VPS and rolls back on **any** failure.
+A test with 0.26s of margin on this sandbox is a near-certain rollback on
+a slower machine — §25 happening again from a new cause, and I was about
+to tell the owner to upgrade. The rest of the suite was then swept for the
+same fragility: the next slowest test is **17.71s**, so nothing else is
+close.
+
+### What is NOT claimed
+
+- **"Live" still means fresh on load, refreshed every 15 seconds — not
+  streaming.** The newest point carries its own clock time, so a page
+  left open cannot read as current.
+- **No intraday bar has ever been fetched in production** (unchanged from
+  §30). The first thing to check is whether an open position's caption
+  reads *"Drawn from Alpaca 1Min bars"* or *"Drawn from cached daily
+  closes"*; if always the latter, the fetch is failing and the fallback is
+  hiding it.
+- **Whether the chart is now clear is the owner's judgement**, not
+  something the measurements settle. What they settle is narrower: the
+  figure on a settled trade is the one that was banked, the exit is always
+  marked, no line is drawn across a closed market, and there is an axis.
