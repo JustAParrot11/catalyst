@@ -4478,3 +4478,327 @@ naming the wrong id, one of two answered).
   unmeasured.** This restores a turn that was being thrown away; what the
   model does with it is the open question, and the funnel per arm is
   where it will show.
+
+---
+
+## 35. The hunt's cost was measured per HTTP request and spent per hunt
+
+Owner-asked 2026-09-15: *"i worry about the API spending, we have yet
+again spent near $8. I'm unsure if we're really being optimal here."*
+
+**The worry was justified, the accounting was not at fault, and the cause
+was a measured number measured in the wrong unit.**
+
+### First: nothing is mis-accounted
+
+| check | result |
+|---|---|
+| reconciliation for 2026-09-14 | local **1034.845c** vs billed **1034.845c**, discrepancy **0** |
+| unacknowledged discrepancies | 0 |
+| unpriced rows | 0 |
+| ledger cross-check | agrees |
+
+So the spend is real. $10.35 on 09-14 and $10.02 on 09-15 against a
+`daily_cap_cents` of **$10.00** — and the cap bound, 8 denies with
+`daily_cap_exceeded`. The hard stop works.
+
+### Where it went, measured from the owner's own bundle
+
+| component | requests | spend | share |
+|---|---|---|---|
+| **hunt** | 56 | **$7.39** | **73.8%** |
+| research | 23 | $2.56 | 25.5% |
+| position_review | 1 | $0.07 | 0.7% |
+
+**§28's caching fix IS working** — the hunt's rows now carry
+`cache_creation=1,604,993` and `cache_read=2,417,032` where they were
+**0 and 0**. Cache writes at 1.25x are now the dominant line
+(~$4.01 of the $7.39), which is inherent to a growing conversation
+rather than a defect.
+
+### THE DEFECT: a call is not a request
+
+`cost_events` holds **one row per HTTP request**. A hunt is several
+requests — the digest turn, its tool turns, the nomination — all sharing
+one `api_call_id`. `observed_call_cents` returned the 75th percentile of
+the **per-row** figure, and three callers that meant "what does a whole
+hunt cost" read it:
+
+```
+hunt      56 rows  =  17 hunts, 3.3 requests each
+          per-REQUEST p75  15.32c   <- what they were reading
+          per-CALL    p75  56.16c   <- what they meant
+          ratio             3.7x
+research  23 rows  =  22 calls, 1.0 requests each  (no error here)
+```
+
+`hunts_per_day` divides the daily budget by that figure, so:
+
+| | at the owner's $100 cap |
+|---|---|
+| before | **10 hunts/day** authorised (17 actually ran) |
+| after | **2 hunts/day** |
+
+**§14 IS PARTLY SUPERSEDED BY THIS.** That section removed a typed
+`min(4, …)` ceiling on the strength of *"the budget afforded fourteen"*
+— a figure computed from the per-request reading. The budget affords
+**two**. The typed ceiling of 4 was closer to right than the derivation
+that replaced it, which is an uncomfortable row and the reason it is
+written down: **a number being derived rather than typed does not make
+it correct, it makes it correct-if-the-unit-is-right.**
+
+### And the belief was stated in a docstring, in as many words
+
+`hunt._turn_estimate`'s own docstring said *"a hunt's cost is recorded
+per CALL … what can be measured is the whole hunt"*, and reasoned that
+using a whole hunt's cost for one turn was deliberately pessimistic. It
+was reading a turn's price all along. **The reasoning was inverted and
+the value happened to be right** — so that caller now asks for
+`observed_request_cents` by name, and the three that meant a whole hunt
+get `observed_call_cents`, which groups by `api_call_id`.
+
+Same shape as §14's `orders.decision_id` and §22's spread sentinel: **a
+field's meaning lived in one module's comments and every other reader
+took it at face value.**
+
+### The trap in the fix, and it would have been silent
+
+Grouping by `api_call_id` collapses **every row with no id into one
+group**. That would take a hundred calls to a sample of one, fall under
+`MIN_OBSERVED_CALLS`, and silently return the seed — loosening every
+limit that reads it while looking like it had measured something. **A row
+with no `api_call_id` is its own call**, keyed on its own row id.
+
+### Verification
+
+- Both readings computed against the owner's real `cost_events` rows
+  replayed into a fresh schema: 56/17 for the hunt, 23/22 for research.
+- `hunts_per_day` returns **2** at $100 after the change, **10** before.
+- Full suite green offline.
+
+### What is NOT claimed
+
+- **The saving is arithmetic, not an observed bill.** At 2 hunts a day
+  instead of 17 the hunt's share should fall from ~$7.39 to ~$1.12. The
+  number to watch is the hunt's row count on the Cost page.
+- **Whether the hunt ever converts is still unmeasured** — 0 directional
+  views lifetime. §14's bound (40 paid calls) is now correctly priced at
+  about **$22**, not under $5, which makes that experiment four times
+  dearer than it was recorded as being.
+- The month is on track either way: $53.65 MTD on the 15th, projecting
+  ~$107 against a $100 cap, so the monthly cap would have gone dark for
+  the last two or three days of the month.
+
+---
+
+## 36. "did you publish, ive got the same warning" — and the page could not say
+
+Owner-reported 2026-09-15, the day after §34 shipped.
+
+**The fix WAS published and the warning WAS still correct to show.**
+Settled from the owner's own logic bundle rather than reasoned about:
+
+| | |
+|---|---|
+| the fault's `called_at` | **2026-09-15T02:22:14** |
+| §34's fix committed | **2026-09-15T11:29:54** |
+| occurrences in the bundle | **1** |
+| paid research calls after it | ran until 19:05, none hit it again |
+
+So the fault predates the fix by **nine hours** — it could not have been
+the running code, because that code did not exist yet. One row, already
+history.
+
+### What the page could not say, and why "N calls have succeeded since" cannot say it
+
+`_fault_age` printed *"N research call(s) have succeeded since without
+hitting it. That is not proof it is fixed, only that it has not
+recurred"* — honest, and unable to answer the actual question. Absence
+of recurrence is not evidence of a fix; **a change of code is**, and
+nothing recorded which code produced a row.
+
+A FAULT also stayed in NEEDS ATTENTION for `FEED_FAULT_WINDOW_DAYS` = 3
+from its last occurrence, so a fault fixed this morning necessarily
+still showed this afternoon.
+
+- **The build is recorded against every research call**, in a side table
+  (`research_call_builds`) — never a column, because `research_calls` is
+  written with positional INSERTs in several places.
+- **A FAULT no running build recorded is filed behind the disclosure the
+  same day**, not after three. That is the owner's case, gone.
+- The write is wrapped: **the audit trail outranks the provenance.** A
+  call that has already been billed must land in `research_calls` even
+  if the build row cannot be written, and an unstamped row reads as
+  "not recorded", which the page says out loud.
+
+### Four verdicts, not two, and only one of them settles anything
+
+| verdict | when | filed as |
+|---|---|---|
+| `running` | the running build recorded it | needs attention |
+| `superseded` | no build still running recorded it | **history** |
+| `not_recorded` | no build stored (every row on the owner's database today) | needs attention |
+| `uncomparable` | the checkout is `+dirty` | needs attention |
+
+**A DIRTY BUILD CAN NEVER SETTLE ANYTHING.** `abc+dirty` names a commit
+PLUS edits git cannot see, so it can never equal a recorded `abc` even
+when the defect is there word for word — and that is precisely the
+reading where "the code has changed since" would talk the reader out of
+a live fault. Found by running it: a development checkout is dirty, so
+without pinning a clean build every test would have exercised one branch
+and agreed with any bug in the other three.
+
+**The two unknowns are named apart** because they send the reader
+somewhere different. Telling an owner with a dirty checkout that their
+build "was not stored" — when it was — is simply false.
+
+### TWO DEFECTS IN MY OWN WORDING, both found by rendering, neither by reading
+
+1. **The line contradicted itself.** Assembled from two independent
+   halves, a superseded fault with nothing successful behind it read
+   *"nothing has succeeded since, so treat it as live"* immediately
+   followed by *"the code has changed since — filed as history"*. Two
+   halves of one sentence disagreeing is how a reader learns to stop
+   believing the page. The whole sentence is now assembled in one
+   function, and **"treat it as live" is a claim about the code, so it is
+   only made when the code has not been shown to have changed** — which
+   keeps the noisy reading for the case with no evidence in any
+   direction.
+2. **"Which build recorded it was not stored" was shown to a reader whose
+   build WAS stored** (the dirty case). §18's lesson for the fourth time:
+   a sentence that says "you did X" must be gated on the reader having
+   done X.
+
+### And the classification no longer reads the WORDING
+
+The stale/current decision was `"have succeeded since" in str(detail)` —
+so **rewording a label moved a fault between "act on this" and
+"history".** Twice in the previous two days a test pinned to phrasing had
+broken on a rewrite that improved the thing (§26, §27); this is the same
+defect in production code rather than in a test. It reads the count
+directly now, and a test monkeypatches the label to something else
+entirely and asserts the filing is unchanged.
+
+### Verification
+
+- The owner's fault reproduced and rendered **eight ways** before and
+  after, against databases built through `init_db` with
+  `PRAGMA foreign_keys` asserted on.
+- A **missing side table cannot empty the drop list** — read separately
+  rather than as a join, because a join against an absent table returns
+  an error with no rows and would take the panel's whole contents with
+  it. Tested by dropping the table.
+- `research_call_builds` is in the logic bundle scope, so a bundle can
+  reproduce the panel's own verdict.
+- Full suite green offline.
+
+### What is NOT claimed
+
+- **The owner's running build hash could not be found in this
+  repository.** The bundle reports `43dc91d6b0ec`; `git cat-file` does
+  not know it. The installed `pnl.py` matches PR #153, and #154 touched
+  no dashboard file, so the manifest cannot distinguish them. This is
+  worth its own look — it means the footer's build hash may not be a
+  commit the owner can look up — and it is not what this change fixes.
+- **Whether the fault recurs on the fixed code is unmeasured.** One
+  occurrence, nine hours before the fix existed, is not a sample.
+
+---
+
+---
+
+## 37. The emergency stop
+
+Owner-asked 2026-09-15: *"Add an emergency pause button that suspends
+everything and just lets current trades that are active just sit until
+they hit the hard exit data incase we suddenly run out of money. The bot
+just suspends claude API activity and wont trade except sell what it
+currently has at the date."*
+
+**Dashboard → Overview, top of the page, in both states.**
+
+### What it stops, at one chokepoint each
+
+| what | where | why there |
+|---|---|---|
+| every paid Claude call | `cost.governor.authorize`, **ahead of its own integrity gate** | the single gate every billable call passes. A per-caller check is a list, and a list misses the next caller nobody thought of (house rule 7) |
+| every new entry | `cycle.block_entries` | the single gate every candidate crosses on the way to being sized — so a view formed BEFORE the stop cannot still become a position after it |
+
+Both kinds of spend refuse, scheduled and manual: *"suspends claude API
+activity"* has no carve-out for a human at a keyboard, and the switch
+exists for the case where there is no money left, which does not care who
+is spending it.
+
+### What it deliberately does NOT stop, because stopping it is the dangerous direction
+
+- **The hard exit date.** A position still sells when its date arrives.
+  Suspending that turns "hold days to weeks" into an open-ended hold.
+- **The stops resting at the broker.** Fractional stops are DAY-only and
+  expire nightly (TRAPS.md), so `reopen_stops` must keep re-placing them.
+  **A pause that removed the stops would INCREASE risk while reading to
+  the owner as caution.**
+
+Both run **earlier in `run_cycle`** than the entry gate, so they are
+untouched by construction rather than by a second check somebody has to
+remember — and both are asserted by driving the real `run_cycle`, not by
+reading which line sets `block_entries`. The existing
+`TestKillTripProtection` proves the identical property for a kill
+switch; this is the same shape for a switch thrown by hand.
+
+### The asymmetry, in three places
+
+| | |
+|---|---|
+| **engaging** | one click, no confirmation. A switch for "we are running out of money" that needs a typed word is a switch that is not there when it is wanted — and it spends nothing and buys nothing |
+| **releasing** | needs `RESUME` typed. Resuming is the direction that starts spending, and a stray click on a page opened to check something must not restart a bot stopped deliberately |
+| **the bot's own power over it** | none. Nothing in this system releases its own stop, because a bot that can lift the switch that stops it is not stopped |
+
+### An unreadable switch: BOTH directions, and they are not symmetric
+
+This project has needed this asymmetry four times (§16, §22, §27, §31)
+and got it wrong by guessing every time.
+
+| | |
+|---|---|
+| a failed read **does not engage** a stop | inventing a pause from a database hiccup suspends the bot with nobody having asked — §16's failure, a transient answer becoming a verdict. And the money guard the owner actually asked for is the monthly and daily cap, which does not depend on this table at all |
+| a failed read **can never release** one | the last state this process read successfully is remembered and a failed read falls back to it. A process that has seen the stop engaged keeps it engaged, and the gate still refuses — asserted directly |
+
+### Why a table and not a setting
+
+The other settings live in the credentials file, 0600 and rewritten
+wholesale to change one field — the wrong shape for a switch flipped in a
+hurry, and no place for an audit trail. `emergency_stop_events` is
+**append-only**, like `benchmark_baselines`, whose append-only design is
+the only reason §16's month of overwritten tracking was recoverable.
+Every engage and release is its own row.
+
+### Found by running it: the dashboard cannot write its own switch
+
+`Db` opens the database **read-only**, so the first version of my own
+check wrote through `db.conn` and got *"attempt to write a readonly
+database"*. That is the property, not a problem: **no rendering path can
+ever flip this switch** — only the POST handler's own writable
+connection can. It is now a test.
+
+### Verification
+
+- Engaged, released, and both failure modes driven end to end against a
+  real database; every refusal appears in `cost_governor_events`.
+- A DUE position still sells at market and an undue one still gets its
+  stop re-placed, both through the real `run_cycle` with a transport
+  that **raises if any paid call is attempted**.
+- The drop reason is classified **LIMIT, not FAULT** — a bot obeying its
+  owner is working, and an unknown reason on the `researched` stage
+  defaults to FAULT in red.
+- The state line says `SUSPENDED by you`, so a suspended bot cannot read
+  as a quiet one.
+- Full suite green offline.
+
+### What is NOT claimed
+
+- **It has never been engaged in production.** The chain is verified
+  offline.
+- **It is not a substitute for the budget caps** and does not change
+  them. The monthly and daily caps are what stop the bot spending
+  everything without anyone present; this is the switch for when the
+  owner decides to stop it themselves.

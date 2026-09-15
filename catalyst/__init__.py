@@ -111,6 +111,14 @@ def _stamped(line: int) -> str:
 #: this whole file exists to prevent.
 
 
+#: What `__build__` carries when the checkout has uncommitted edits.
+#: Exported rather than typed twice: anything comparing a recorded build
+#: against the running one has to know that such a build names a commit
+#: PLUS something git cannot see, so the two can never be equal even
+#: when the commit is.
+DIRTY_SUFFIX = "+dirty"
+
+
 def _commit() -> str:
     """The short commit this code is actually running from."""
     stamped = os.environ.get("CATALYST_BUILD_COMMIT")
@@ -128,7 +136,7 @@ def _commit() -> str:
     head = _run("git", "-C", str(repo), "rev-parse", "--short=12", "HEAD")
     if head:
         dirty = _run("git", "-C", str(repo), "status", "--porcelain")
-        return head + ("+dirty" if dirty else "")
+        return head + (DIRTY_SUFFIX if dirty else "")
     return _stamped(1)[:12] or "unknown"
 
 

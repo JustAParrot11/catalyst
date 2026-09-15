@@ -145,10 +145,18 @@ def route_overview(db: Db, params: dict) -> str:
     # so it survives a refresh and can be linked to.
     detailed = (params.get("view") or [""])[0] == "detailed" if isinstance(
         params.get("view"), list) else params.get("view") == "detailed"
+    # THE EMERGENCY STOP IS NOT FOLDED. Every other panel here collapses
+    # its explanation into a disclosure to keep the page an instrument
+    # rather than an essay - but this one is the switch the owner asked
+    # for "incase we suddenly run out of money", and a switch behind a
+    # fold is not there when it is wanted. It renders in both states,
+    # because a paused bot that looks like a quiet one is the failure
+    # this dashboard has already been reported for three times.
     body = (
         panels.state_line(db, p="state")
         + panels.overview_switch(detailed)
         + (panels.detailed_overview(db, p="pro") if detailed else "")
+        + panels.emergency_stop_panel(db, p="estop")
         + digest(panels.value_reconciliation_panel(db, p="ovval"))
         + digest(panels.performance_panel(db, p="perf"))
         + digest(panels.funnel_panel(db, p="funnel"))
@@ -507,6 +515,13 @@ MAX_BYTES_PER_TABLE = 6_000_000
 #: {table: (fk, parent table, parent key, parent time column)}
 _WINDOW_VIA_PARENT = {
     "research_call_turns": ("call_id", "research_calls", "id", "called_at"),
+    # Which build recorded a call. Same shape and the same reason: one
+    # row per research call, no clock of its own, and the call it
+    # belongs to is timestamped - so the window is exact rather than
+    # approximate. Without this it would be dumped entire on every
+    # bundle at every window, which is how research_call_turns reached
+    # 17.5MB unnoticed.
+    "research_call_builds": ("call_id", "research_calls", "id", "called_at"),
 }
 
 #: Tables that legitimately come out whole, with the reason. A table
@@ -516,6 +531,16 @@ _WINDOW_VIA_PARENT = {
 _ALWAYS_WHOLE = {
     "positions": "the CURRENT open positions - a window would hide the "
                  "position you are asking about",
+    # THE NEWEST ROW IS THE STATE, so a window is the wrong shape here
+    # even though the table looks like an event log. A bundle taken two
+    # days into a suspension would carry no rows and read as "never
+    # suspended" - the exact wrong answer, and the same
+    # historical-fact-rendered-as-a-live-one failure as sections 16 and
+    # 27. Bounded by how often a human presses a button.
+    "emergency_stop_events": "every engage and release of the owner's "
+                             "emergency stop; the newest row IS the "
+                             "current state, so cutting it by date "
+                             "would hide an active suspension",
     "pricing_overrides": "the rate table in force now; every row is "
                          "current by definition",
     "limit_applications": "which rule bound which decision; keyed by "
@@ -590,8 +615,15 @@ DIAGNOSTIC_SCOPES = {
         # meant inferring the arm from the candidate id's prefix, which
         # works only by luck of the id format and cannot see a stale
         # stamp at all.
+        #
+        # research_call_builds IS WHY A FAULT READS AS HISTORY. The
+        # funnel now files a skipped-research fault behind its
+        # disclosure when no build still running recorded it, so a
+        # bundle without this table cannot reproduce the panel's own
+        # verdict - the reader would see a fault called settled with
+        # nothing anywhere saying on what evidence.
         "tables": ("candidates", "candidate_origin", "research_calls",
-                   "research_call_turns",
+                   "research_call_builds", "research_call_turns",
                    "research_views", "risk_decisions", "limit_applications",
                    "refusals", "adaptive_param_log", "position_reviews"),
         "sections": ("funnel",),
@@ -1356,6 +1388,53 @@ def untrack_stock(db_file: str, form: dict) -> tuple[bool, str]:
                   "the next stock. Nothing else changed.")
 
 
+def set_emergency_stop(db_file: str, want: str, confirm: str
+                       ) -> tuple[bool, str]:
+    """Engage or release the owner's emergency stop.
+
+    OWNER-ASKED 2026-09-15: "Add an emergency pause button that suspends
+    everything ... incase we suddenly run out of money."
+
+    ENGAGING IS ONE CLICK, ON PURPOSE. It is the safe direction - it
+    spends nothing and buys nothing - and a switch for "we are running
+    out of money" that needs a typed confirmation is a switch that is
+    not there when it is wanted.
+
+    RELEASING NEEDS THE WORD, because resuming is the direction that
+    starts spending again, and a stray click on a page the owner opened
+    to check something should not restart a bot they stopped
+    deliberately. Same asymmetry as everywhere else in this system:
+    tighten fast, loosen slowly.
+    """
+    from catalyst import emergency_stop
+    from catalyst.storage import init_db
+
+    engaging = str(want or "").strip().lower() in ("engage", "on", "pause",
+                                                   "stop", "1", "true")
+    if not engaging and str(confirm or "").strip().upper() != "RESUME":
+        return False, ("type RESUME to confirm: this starts Claude "
+                       "spending and new trades again")
+    try:
+        conn = init_db(db_file)
+    except Exception as exc:  # noqa: BLE001 - shown, never raised
+        return False, f"the database could not be opened: {exc}"
+    try:
+        if engaging:
+            emergency_stop.engage(conn, reason="engaged from the dashboard",
+                                  set_by="owner")
+        else:
+            emergency_stop.release(conn, reason="released from the dashboard",
+                                   set_by="owner")
+    except Exception as exc:  # noqa: BLE001 - shown, never raised
+        return False, f"the switch could not be written: {exc}"
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return True, ""
+
+
 def rebuild_spy_series(confirm: str) -> tuple[bool, str]:
     """Throw the SPY comparison away and refetch it on a feed the
     current Alpaca keys can actually reach.
@@ -1691,6 +1770,28 @@ class Handler(BaseHTTPRequestHandler):
                             alarm(esc(message))
                             + "<p><a href='/costs'>back to the cost page</a></p>"),
                     "/costs", db.path)
+            finally:
+                db.close()
+            return self._send_html(400, body)
+
+        if parsed.path == "/emergency-stop":
+            okay, message = set_emergency_stop(
+                db_file, form.get("want", ""), form.get("confirm", ""))
+            if okay:
+                self.send_response(303)
+                self.send_header("Location", "/?stop=ok")
+                _no_store_headers(self, "text/plain", 0)
+                self.end_headers()
+                return
+            db = Db(db_file)
+            try:
+                body = render_page(
+                    "Nothing changed",
+                    section("stop-fail", "The switch was not changed",
+                            alarm(esc(message))
+                            + "<p>The bot is exactly as it was.</p>"
+                            "<p><a href='/'>back to the overview</a></p>"),
+                    "/", db.path)
             finally:
                 db.close()
             return self._send_html(400, body)

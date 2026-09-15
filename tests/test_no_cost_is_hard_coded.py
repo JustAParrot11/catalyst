@@ -60,6 +60,33 @@ from catalyst.storage import init_db
 NOW = datetime.now(timezone.utc)
 
 
+def _measured_readers() -> tuple[str, ...]:
+    """Every public way to read what the ledger says a call cost.
+
+    DERIVED FROM THE MODULE, not typed here. There are two readings -
+    `observed_call_cents` sums a call's requests by `api_call_id`, and
+    `observed_request_cents` prices a single turn - and the guards below
+    care that a seed reads ONE OF THEM, never which. Naming them by hand
+    is how these checks came to break on a rename that changed no
+    behaviour, and a third reading added later should not need this file
+    edited to be recognised.
+    """
+    from catalyst.cost import observed
+
+    return tuple(sorted(
+        name for name in dir(observed)
+        if name.startswith("observed_") and name.endswith("_cents")
+        and callable(getattr(observed, name))))
+
+
+def _reads_the_ledger(fn) -> bool:
+    """True when this function's source names any measured reading."""
+    import inspect
+
+    src = inspect.getsource(fn)
+    return any(name in src for name in _measured_readers())
+
+
 @pytest.fixture
 def db(tmp_path):
     conn = init_db(str(tmp_path / "c.db"))
@@ -321,12 +348,26 @@ class TestTheChainReachesTheAdminAPI:
         assert "learn_from_closed_day" in src
 
     def test_the_estimate_reads_what_the_rate_priced(self):
+        """ASSERTED THROUGH THE WHOLE MODULE, not one function's source.
+
+        Pinned to `observed_call_cents`, this broke when the per-call and
+        per-request readings were split apart and the shared query moved
+        into a private body - a change that alters nothing about whether
+        the estimate reads the priced ledger. Third time in three days
+        that a check pinned to a name broke on a rewrite that improved
+        the thing (WHAT-WE-TRIED sections 26, 27, 35); the property is
+        that EVERY public reading reads the ledger.
+        """
         import inspect
 
         from catalyst.cost import observed
 
-        src = inspect.getsource(observed.observed_call_cents)
-        assert "cost_events" in src and "priced_cents" in src
+        readers = _measured_readers()
+        assert readers, "no public reading of the ledger exists at all"
+        for name in readers:
+            src = inspect.getsource(getattr(observed, name))
+            body = src + inspect.getsource(observed._observed)
+            assert "cost_events" in body and "priced_cents" in body, name
 
     def test_the_admin_api_stays_read_only(self):
         """It may read the bill and must never change an account."""
@@ -356,16 +397,108 @@ class TestTheSeedsAreLabelledAsSeeds:
         assert Decimal(str(value)) > 0
 
     def test_the_measured_path_is_named_where_each_seed_lives(self):
-        """So the next reader knows the constant is not the authority."""
+        """So the next reader knows the constant is not the authority.
+
+        WHICH reading is not this test's business, and pinning it to one
+        name made a correct split look like a regression: `_turn_estimate`
+        estimates a single turn and must read the per-REQUEST figure,
+        while the two throttles mean a whole call.
+        """
+        from catalyst.discovery import hunt
+        from catalyst.orchestrator import cycle
+
+        for fn in (cycle.research_per_cycle, hunt.hunts_per_day,
+                   hunt._turn_estimate):
+            assert _reads_the_ledger(fn), fn
+
+    def test_a_whole_CALL_and_a_single_TURN_are_read_APART(self):
+        """THE DEFECT THIS SPLIT FIXED, asserted so it cannot come back.
+
+        `cost_events` holds one row per HTTP REQUEST. A hunt is several
+        requests sharing an `api_call_id`, so the per-row figure is a
+        TURN's price - and `hunts_per_day` divides the daily budget by
+        it, meaning a whole hunt. Measured on the owner's 2026-09-15
+        bundle: 56 rows were 17 hunts, per-request p75 15.32c against a
+        per-call p75 of 56.16c, so the throttle authorised 3.7x the
+        hunts the budget affords.
+        """
         import inspect
 
         from catalyst.discovery import hunt
         from catalyst.orchestrator import cycle
 
-        assert "observed_call_cents" in inspect.getsource(
-            cycle.research_per_cycle)
-        assert "observed_call_cents" in inspect.getsource(hunt.hunts_per_day)
-        assert "observed_call_cents" in inspect.getsource(hunt._turn_estimate)
+        # The throttles mean a whole call.
+        for fn in (cycle.research_per_cycle, hunt.hunts_per_day):
+            assert "observed_call_cents" in inspect.getsource(fn), fn
+        # One turn means one request.
+        assert "observed_request_cents" in inspect.getsource(
+            hunt._turn_estimate)
+
+    def test_a_call_costs_at_least_as_much_as_one_of_its_requests(self, db):
+        """The behavioural half: the two readings must not be the same
+        number when a call spans several requests."""
+        from catalyst.cost.observed import (
+            observed_call_cents, observed_request_cents,
+        )
+
+        for call in range(MIN_OBSERVED_CALLS + 2):
+            for _turn in range(3):
+                conn = db
+                conn.execute(
+                    "INSERT INTO cost_events (id,raw_usage_json,model,kind,"
+                    "component,priced_cents,priced_at,api_call_id) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (str(uuid.uuid4()), "{}", "m", "scheduled", "hunt",
+                     "15.0", (NOW - timedelta(days=1)).isoformat(),
+                     f"hunt-{call}"))
+        db.commit()
+        per_call, n_calls = observed_call_cents(db, "hunt", Decimal("60"))
+        per_req, n_reqs = observed_request_cents(db, "hunt", Decimal("60"))
+        assert n_reqs == 3 * n_calls, (n_reqs, n_calls)
+        assert per_call == per_req * 3, (per_call, per_req)
+
+    def test_the_hunt_RATE_is_derived_from_the_whole_call(self, db):
+        """BEHAVIOURAL, because the grep could not see the defect.
+
+        Sabotaging `hunts_per_day` back to the per-request reading came
+        back GREEN: `observed_call_cents` also appears on the IMPORT line
+        inside that same function, so the substring survived the edit.
+        Section 22's corollary, word for word - a substring that also
+        occurs elsewhere in the same function is not a call-site
+        assertion - so this asserts the RATE instead.
+
+        Ten hunts of three requests each at 15c: 45c a hunt, and at the
+        owner's $100 cap the budget affords 3 (333c // 90c). Read per
+        request it would afford 11, which is the defect that let 17 hunts
+        run on a day that hit the ceiling.
+        """
+        from catalyst.discovery.hunt import hunts_per_day
+
+        for call in range(10):
+            for _turn in range(3):
+                db.execute(
+                    "INSERT INTO cost_events (id,raw_usage_json,model,kind,"
+                    "component,priced_cents,priced_at,api_call_id) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (str(uuid.uuid4()), "{}", "m", "scheduled", "hunt",
+                     "15.0", (NOW - timedelta(days=1)).isoformat(),
+                     f"hunt-{call}"))
+        db.commit()
+        assert hunts_per_day(Decimal("10000"), db) == 3
+
+    def test_an_UNSTAMPED_row_is_its_own_call(self, db):
+        """THE SILENT TRAP IN THE FIX. Grouping by `api_call_id` would
+        collapse every row with no id into ONE group, take a hundred
+        calls to a sample of one, fall under the minimum, and return the
+        SEED - loosening every limit that reads it while looking like it
+        had measured something."""
+        from catalyst.cost.observed import observed_call_cents
+
+        for _ in range(MIN_OBSERVED_CALLS + 2):
+            spend(db, "hunt", 15)          # api_call_id is None
+        value, n = observed_call_cents(db, "hunt", Decimal("60"))
+        assert n == MIN_OBSERVED_CALLS + 2, n
+        assert value == Decimal("15"), value
 
 
 class TestThePageSaysWhichIsMeasured:
@@ -496,7 +629,7 @@ class TestNoNewHARDCODEDCostAppears:
 
         for fn in (cycle.research_per_cycle, hunt.hunts_per_day,
                    hunt._turn_estimate):
-            assert "observed_call_cents" in inspect.getsource(fn), fn
+            assert _reads_the_ledger(fn), fn
         # boundary's two seeds are measured by its own calibration
         assert "observed_tokens_per_search" in inspect.getsource(boundary)
 

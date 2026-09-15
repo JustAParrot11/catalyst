@@ -1130,15 +1130,23 @@ def funnel_panel(db: Db, p: str = "funnel") -> str:
                     + "</span></li>"
                     for reason, n, detail in stale)
                 out.append(
+                    # THE SUMMARY NO LONGER ASSERTS THE WINDOW. A fault
+                    # recorded only by a build this machine no longer
+                    # runs is filed here the same day, so "not seen for
+                    # over N days" would be false for exactly the rows
+                    # this disclosure exists to absorb. Each item
+                    # carries its own reason for being settled.
                     f'<details id="{p}-drops-old-{esc(stage.key)}">'
                     f"<summary>{len(stale)} older reason(s), settled and "
-                    f"not seen for over {queries.FEED_FAULT_WINDOW_DAYS} "
-                    "day(s) - kept for the record</summary>"
+                    "no longer something to act on - kept for the "
+                    "record</summary>"
                     f"<ul class='funnel-why-list'>{older}</ul>"
-                    "<p class='prov'>Each of these stopped happening and "
-                    "the bot has worked past it. They are here because a "
-                    "fault that disappears silently cannot be told apart "
-                    "from one that never happened.</p></details>")
+                    "<p class='prov'>Each of these either stopped happening "
+                    "and the bot has worked past it, or was recorded by a "
+                    "build this machine no longer runs. The line beside "
+                    "each one says which. They are here because a fault "
+                    "that disappears silently cannot be told apart from "
+                    "one that never happened.</p></details>")
             explained = 0
             for _r, n, _d in stage.drops:
                 try:
@@ -4468,6 +4476,19 @@ def state_line(db: Db, p: str = "state") -> str:
     # because pricing an unknown field at zero is the TRAPS.md failure
     # this whole subsystem exists to prevent. Failing closed is right.
     # Failing closed QUIETLY, while the owner is away for a week, is not.
+    # THE OWNER'S OWN SWITCH, FIRST OF THE THREE. If they engaged it,
+    # every other "it has stopped" clause below is a consequence rather
+    # than news, and this is the one that says why.
+    try:
+        from catalyst import emergency_stop
+
+        stop = emergency_stop.current(db.conn)
+        if stop.engaged:
+            bits.append('<b class="neg">SUSPENDED by you - no Claude '
+                        "spending and no new positions; open positions keep "
+                        "their stops and still sell on their exit date</b>")
+    except Exception:  # noqa: BLE001
+        pass
     try:
         blocked = db.q("SELECT COUNT(*) n FROM cost_reconciliation_events "
                        "WHERE action_taken = 'scheduled_paused' "
@@ -4490,6 +4511,119 @@ def state_line(db: Db, p: str = "state") -> str:
 
     return (f'<p class="state-line" id="{p}-line">'
             + " &middot; ".join(bits) + "</p>")
+
+
+def emergency_stop_panel(db: Db, p: str = "estop") -> str:
+    """The owner's switch, and what it is currently doing.
+
+    OWNER-ASKED 2026-09-15: "Add an emergency pause button that suspends
+    everything and just lets current trades that are active just sit
+    until they hit the hard exit data incase we suddenly run out of
+    money."
+
+    IT RENDERS IN BOTH STATES AND NEVER HIDES. A button that appears
+    only in an emergency is a button nobody can find in one, and a
+    paused bot that looks like a quiet one is the failure this project
+    has already paid for three times.
+
+    WHAT IT SAYS WHEN ENGAGED IS THE LIST OF WHAT STILL HAPPENS, not
+    only what stopped. "Everything is suspended" would be false and
+    frightening in the wrong direction: the stops are still resting at
+    the broker and a position still sells on its hard exit date, which
+    is the whole point of the design.
+    """
+    from catalyst import emergency_stop
+
+    try:
+        state = emergency_stop.current(db.conn)
+        past = emergency_stop.history(db.conn, limit=8)
+    except Exception as exc:  # noqa: BLE001 - a panel must not 500
+        return section(p, "Emergency stop",
+                       alarm("The switch could not be read: "
+                             + esc(str(exc)))
+                       + prov("So this panel cannot say whether the bot is "
+                              "suspended. The monthly and daily budget caps "
+                              "do not depend on it and are still in force."))
+
+    if state.read_failed:
+        head = alarm(
+            "The switch could not be read, so the bot is being treated as "
+            + ("<b>SUSPENDED</b>" if state.engaged else "running")
+            + " - that is what this process last read successfully.")
+        head += prov("The exact response: " + esc(state.read_failed))
+    elif state.engaged:
+        head = alarm(
+            "<b>THE BOT IS SUSPENDED.</b> It is not asking Claude anything "
+            "and it will not open a new position.")
+        head += (
+            "<p>What is still happening, deliberately: the stop under each "
+            "open position is still resting at the broker and is still "
+            "re-placed every session, and every position still sells when "
+            "its hard exit date arrives. Nothing is being held open "
+            "indefinitely.</p>")
+        if state.at:
+            head += prov(f"Suspended at {esc(state.at[:16])} by "
+                         f"{esc(state.set_by or 'owner')}"
+                         + (f" - {esc(state.reason)}" if state.reason else ""))
+    else:
+        # TERSE ON PURPOSE, and it is the state the page is in almost
+        # always. `test_the_overview_is_no_longer_mostly_prose` caps the
+        # Overview at 75 visible words per figure, and that guard has
+        # already caught a CORRECTNESS bug once (section 18: a sentence
+        # shown to the wrong reader). The switch has to be on the
+        # surface; the explanation of what it does belongs in the fold
+        # below, which is the convention every other panel here follows.
+        head = "<p>Running normally.</p>"
+
+    # THE FORM. Engaging is one click; releasing needs the word typed,
+    # because resuming is the direction that starts spending again.
+    if state.engaged:
+        form = (
+            f'<form method="post" action="/emergency-stop" id="{p}-resume">'
+            '<input type="hidden" name="want" value="release">'
+            '<label for="' + p + '-confirm">Type RESUME to start Claude '
+            'research and new trades again</label> '
+            f'<input id="{p}-confirm" name="confirm" size="10" '
+            'autocomplete="off">'
+            '<button type="submit">Resume the bot</button></form>')
+    else:
+        form = (
+            f'<form method="post" action="/emergency-stop" id="{p}-engage">'
+            '<input type="hidden" name="want" value="engage">'
+            '<button type="submit">SUSPEND EVERYTHING NOW</button>'
+            '</form>'
+            + f'<details id="{p}-what"><summary>what this does</summary>'
+            "<p>It stops the bot asking Claude anything and stops it "
+            "opening any new position. One click, no confirmation: a "
+            "switch for running out of money has to be there when it is "
+            "wanted, and engaging it spends nothing and buys nothing.</p>"
+            "<p>What keeps working, deliberately: the stop under every "
+            "open position stays resting at the broker and is still "
+            "re-placed each session, and every position still sells when "
+            "its hard exit date arrives. Nothing is held open "
+            "indefinitely. Resuming needs the word RESUME typed, because "
+            "that is the direction that starts spending again.</p>"
+            "</details>")
+
+    body = head + form
+    if past:
+        rows = "".join(
+            "<tr><td>"
+            + ("suspended" if str(r["state"]) == emergency_stop.ENGAGED
+               else "resumed")
+            + f"</td><td>{esc(str(r['at'])[:16])}</td>"
+            f"<td>{esc(r['set_by'] or 'owner')}</td>"
+            f"<td>{esc(r['reason'] or '')}</td></tr>"
+            for r in past)
+        body += (
+            f'<details id="{p}-history"><summary>{len(past)} change(s) to '
+            "this switch</summary><table><thead><tr><th>what</th>"
+            "<th>when (UTC)</th><th>by</th><th>note</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table>"
+            + prov("Every change is kept. Nothing here is ever deleted, so "
+                   "a suspension that lasted six hours on a Tuesday stays "
+                   "answerable.") + "</details>")
+    return section(p, "Emergency stop", body)
 
 
 def brain_view_controls(p: str, zoom: float, nodes: int,

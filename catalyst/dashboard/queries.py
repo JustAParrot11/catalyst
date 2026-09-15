@@ -15,6 +15,7 @@ from decimal import Decimal, InvalidOperation
 
 from urllib.parse import quote
 
+import catalyst
 from catalyst import benchmark
 from catalyst.data import sources
 from catalyst.dashboard.db import Db, QueryResult, START_CAPITAL_CENTS, bars_path, jload
@@ -886,6 +887,11 @@ LIMIT_SKIPS = (
     # A closed-market snapshot reaching the risk engine. It cannot size,
     # by design (risk review F5), and saying so is not an error.
     "price_not_live_cannot_size",
+    # THE OWNER'S OWN SWITCH. A limit rather than a fault: they asked
+    # for it, they engaged it, and a bot obeying it is working. It is
+    # NOT routine either - routine is attrition nobody needs to see, and
+    # a suspended bot is the single most important thing on the page.
+    "emergency_stop_engaged",
 )
 
 #: WHERE AN UNRECOGNISED REASON IS A FAULT, and where it is not. This
@@ -942,7 +948,68 @@ def _last_seen(last_at, first_at=None) -> str:
     return f"{when} ({day}{span})"
 
 
-def _fault_age(last_at, first_at, n_ok_since: int) -> str:
+#: What a set of recorded builds can say about a fault. UNKNOWN IS NOT
+#: "a different build": a row written before builds were recorded proves
+#: nothing either way, and calling it history would be a guess - the same
+#: asymmetry the benchmark baseline and the market-state sentence both
+#: needed. Saying a live fault is settled hides a real problem; saying a
+#: settled one is live is only annoying, so every uncertain answer goes
+#: the noisy way.
+#:
+#: The two unknowns are SEPARATE because they send the reader to
+#: different places. "Nothing was recorded" is a gap in the record that
+#: the next occurrence closes by itself; "the checkout has uncommitted
+#: edits" is a fact about the machine, and telling that reader their
+#: build was not stored - when it was - is simply false.
+BUILD_RUNNING = "running"
+BUILD_SUPERSEDED = "superseded"
+BUILD_NOT_RECORDED = "not_recorded"
+BUILD_UNCOMPARABLE = "uncomparable"
+
+#: Everything that is not positive evidence of a change in the code.
+BUILD_UNSETTLED = (BUILD_RUNNING, BUILD_NOT_RECORDED, BUILD_UNCOMPARABLE)
+
+
+def build_verdict(builds, running) -> str:
+    """Is a fault recorded by these builds still in the running code?
+
+    A DIRTY running build can never settle anything. `abc123+dirty`
+    names a commit PLUS edits git cannot see, so it can never equal a
+    recorded `abc123` even when the defect is still there word for word
+    - and that is exactly the case where claiming "the code has changed
+    since" would talk the reader out of a live fault.
+    """
+    now = str(running or "").strip()
+    known = {str(b).strip() for b in builds if str(b or "").strip()}
+    if not known:
+        return BUILD_NOT_RECORDED
+    if not now or catalyst.DIRTY_SUFFIX in now:
+        return BUILD_UNCOMPARABLE
+    return BUILD_RUNNING if now in known else BUILD_SUPERSEDED
+
+
+def _build_sentence(verdict: str, running, recorded) -> str:
+    """Say what the build evidence is, in the reader's terms."""
+    now = str(running or "").strip() or "unknown"
+    if verdict == BUILD_RUNNING:
+        return (f"the code that recorded it is the code running now "
+                f"(build {now}), so the defect behind it is still here")
+    if verdict == BUILD_SUPERSEDED:
+        was = ", ".join(sorted(str(b).strip() for b in recorded
+                               if str(b or "").strip())) or "an older build"
+        return (f"it was recorded by build {was} and this machine now runs "
+                f"{now}, so the code has changed since - that is why it is "
+                f"filed as history rather than something to act on")
+    if verdict == BUILD_UNCOMPARABLE:
+        return (f"this checkout has uncommitted changes ({now}), so what is "
+                f"running cannot be compared with what recorded the fault")
+    return ("which build recorded it was not stored, so whether the code "
+            "running now still has this defect cannot be told from here")
+
+
+def _fault_age(last_at, first_at, n_ok_since: int,
+               verdict: str = BUILD_NOT_RECORDED, running="",
+               recorded=()) -> str:
     """Date a FAULT with what is actually known, and nothing more.
 
     THE OLD WORDING WAS A GUESS DRESSED AS A FINDING: "NOT since, so
@@ -956,15 +1023,34 @@ def _fault_age(last_at, first_at, n_ok_since: int) -> str:
     without hitting it again. That is a measurement, so it is what gets
     printed; the reader draws their own conclusion from a number rather
     than from the dashboard's opinion.
+
+    THE BUILD EVIDENCE OUTRANKS THE RECURRENCE COUNT, and the whole
+    sentence is assembled here for that reason. Rendered separately, a
+    superseded fault that nothing had succeeded since read "nothing has
+    succeeded since, so treat it as live" immediately followed by "the
+    code has changed since - filed as history": two halves of one line
+    contradicting each other, which is how a reader learns to stop
+    believing the page. "Treat it as live" is a claim about the code, so
+    it is only made when the code has not changed.
     """
     base = _last_seen(last_at, first_at)
     if not base:
         return ""
-    if n_ok_since <= 0:
-        return base + " - nothing has succeeded since, so treat it as live"
-    return (f"{base} - {n_ok_since} research call(s) have succeeded since "
-            "without hitting it. That is not proof it is fixed, only that "
-            "it has not recurred")
+    since = (
+        "nothing has succeeded since" if n_ok_since <= 0 else
+        f"{n_ok_since} research call(s) have succeeded since without "
+        "hitting it, which is not proof it is fixed, only that it has "
+        "not recurred")
+    build = _build_sentence(verdict, running, recorded)
+    # WHO SAYS "TREAT IT AS LIVE". Not the superseded case, where the
+    # build sentence says the opposite; not the running case either,
+    # where it already says the defect is still here. It is for the two
+    # uncertain verdicts with no successful call behind them, which is
+    # the reading with no evidence in any direction at all.
+    live = ("  Nothing anywhere says it is fixed, so treat it as live."
+            if n_ok_since <= 0
+            and verdict in (BUILD_NOT_RECORDED, BUILD_UNCOMPARABLE) else "")
+    return f"{base} - {since}. And {build}.{live}"
 
 
 @dataclass
@@ -1629,20 +1715,33 @@ def funnel(db: Db) -> Funnel:
     # --- researched: reasons drawn only from candidates that left here
     left_res = s_cand - s_res
     skip_q = _grouped(db,
-        "SELECT candidate_id, skipped_reason, called_at FROM research_calls "
-        "WHERE skipped_reason IS NOT NULL")
+        "SELECT id, candidate_id, skipped_reason, called_at "
+        "FROM research_calls WHERE skipped_reason IS NOT NULL")
+    # Read SEPARATELY, not as a join. A join against a table an older
+    # database has not got would come back as a QueryResult carrying an
+    # error and no rows - which would empty the whole drop list and take
+    # the panel's entire contents with it. Missing provenance has to
+    # degrade to "not recorded", never to "nothing stopped here".
+    build_of: dict[str, str] = {}
+    builds_q = db.q("SELECT call_id, build FROM research_call_builds")
+    for r in builds_q.rows:
+        build_of[str(r["call_id"])] = str(r["build"] or "")
     res_reasons: dict[str, list] = {}
+    res_builds: dict[str, set] = {}
     for r in skip_q.rows:
         if str(r["candidate_id"]) not in left_res:
             continue
         key = f"research skipped: {r['skipped_reason']}"
         res_reasons.setdefault(key, []).append(r["called_at"])
+        res_builds.setdefault(key, set()).add(build_of.get(str(r["id"]), ""))
 
     # How much research has SUCCEEDED, for dating faults against work
     # done rather than against the calendar.
     ok_q = db.q("SELECT COUNT(*) AS n, MAX(called_at) AS last_ok "
                 "FROM research_calls WHERE skipped_reason IS NULL")
     n_ok_total = int(ok_q.rows[0]["n"]) if ok_q.rows else 0
+
+    running_build = str(getattr(catalyst, "__build__", "") or "")
 
     def _date_drop(reason: str, whens: list) -> str:
         last, first = max(whens), min(whens)
@@ -1659,7 +1758,10 @@ def funnel(db: Db) -> Funnel:
                 (str(last),)).rows[0]["n"])
         except Exception:  # noqa: BLE001 - a label must not break the page
             since = n_ok_total
-        return _fault_age(last, first, since)
+        recorded = res_builds.get(reason, set())
+        return _fault_age(last, first, since,
+                          build_verdict(recorded, running_build),
+                          running_build, recorded)
 
     drops = [(k, len(v), _date_drop(k, v))
              for k, v in sorted(res_reasons.items(), key=lambda kv: -len(kv[1]))]
@@ -1679,9 +1781,29 @@ def funnel(db: Db) -> Funnel:
     for reason, n, detail in drops:
         whens = res_reasons[reason]
         last = _as_date(max(whens))
-        settled = ("have succeeded since" in str(detail)
-                   or skip_kind(reason) != "FAULT")
-        if last is not None and last < cutoff and settled:
+        # A FAULT NO LIVE BUILD RECORDED IS HISTORY, WHATEVER THE DATE.
+        # This is the one piece of evidence stronger than the window:
+        # the machine is not running the code that produced it. Waiting
+        # three days is what made the owner see the same warning the day
+        # after the fix shipped.
+        superseded = (skip_kind(reason) == "FAULT"
+                      and build_verdict(res_builds.get(reason, set()),
+                                        running_build)
+                      not in BUILD_UNSETTLED)
+        # Structural, not a substring of the sentence above it: this
+        # decided the panel's contents off the wording of a label, and
+        # rewording a label is not supposed to move a fault.
+        n_ok_since = 0
+        if skip_kind(reason) == "FAULT":
+            try:
+                n_ok_since = int(db.q(
+                    "SELECT COUNT(*) AS n FROM research_calls "
+                    "WHERE skipped_reason IS NULL AND called_at > ?",
+                    (str(max(whens)),)).rows[0]["n"])
+            except Exception:  # noqa: BLE001 - a label must not break the page
+                n_ok_since = n_ok_total
+        settled = n_ok_since > 0 or skip_kind(reason) != "FAULT"
+        if superseded or (last is not None and last < cutoff and settled):
             stale_drops.append((reason, n, detail))
         else:
             current_drops.append((reason, n, detail))

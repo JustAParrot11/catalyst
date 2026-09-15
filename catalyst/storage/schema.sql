@@ -78,6 +78,42 @@ CREATE TABLE IF NOT EXISTS research_call_turns (
     PRIMARY KEY (call_id, turn_index)
 );
 
+-- THE OWNER'S EMERGENCY STOP, append-only.
+--
+-- Owner-asked 2026-09-15: "Add an emergency pause button that suspends
+-- everything and just lets current trades that are active just sit
+-- until they hit the hard exit data incase we suddenly run out of
+-- money."
+--
+-- Every engage and every release is its own row, so "when did we stop
+-- spending and who started it again" is answerable afterwards. The
+-- newest row is the state; no rows means running. Append-only for the
+-- same reason benchmark_baselines is - that design is the only reason a
+-- month of overwritten tracking was recoverable.
+CREATE TABLE IF NOT EXISTS emergency_stop_events (
+    id       TEXT PRIMARY KEY,
+    state    TEXT NOT NULL CHECK (state IN ('engaged','released')),
+    reason   TEXT NOT NULL DEFAULT '',
+    set_by   TEXT NOT NULL DEFAULT '',
+    at       TEXT NOT NULL
+);
+
+-- WHICH BUILD RECORDED A RESEARCH CALL.
+--
+-- A side table, never a column on research_calls: that table is written
+-- with positional INSERTs in several places and a new column silently
+-- shifts every one of them.
+--
+-- It answers one question the dashboard could not answer at all: is a
+-- recorded fault something the code running NOW would hit again, or
+-- something a commit this machine no longer runs did once? The owner
+-- read the same skipped-research warning after the fix had shipped,
+-- and "how many calls have succeeded since" cannot tell those apart.
+CREATE TABLE IF NOT EXISTS research_call_builds (
+    call_id  TEXT PRIMARY KEY REFERENCES research_calls(id),
+    build    TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS research_views (
     candidate_id           TEXT PRIMARY KEY REFERENCES candidates(id),
     direction              TEXT NOT NULL CHECK (direction IN ('long','short','no_trade')),

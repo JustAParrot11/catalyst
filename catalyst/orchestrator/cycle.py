@@ -1016,7 +1016,21 @@ def run_cycle(conn, broker: Broker, transport, feed_fetch, build_candidates_fn,
     # and a queued market order fills at an open price unrelated to the
     # mid that sized it (risk review F5).
     block_entries: str | None = None
-    if not stops_ok:
+    # THE EMERGENCY STOP FIRST, because it is the most specific reason
+    # and the owner has to be told which thing stopped their bot. It
+    # sits ahead of the market clock deliberately: "the market is shut"
+    # would be true as well, and it is not the answer.
+    #
+    # Only ENTRIES are blocked here. The hard exits and the stop
+    # re-placing both ran earlier in this function, so they are
+    # unaffected by construction rather than by a second check - which
+    # is the owner's own requirement: "just lets current trades that are
+    # active just sit until they hit the hard exit data".
+    from catalyst import emergency_stop
+
+    if emergency_stop.is_engaged(conn):
+        block_entries = emergency_stop.STOP_REASON
+    elif not stops_ok:
         block_entries = "unprotected_position_blocks_entries"
     else:
         try:
