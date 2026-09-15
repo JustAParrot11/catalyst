@@ -599,6 +599,10 @@ MAX_EVIDENCE_PER_KIND = 6
 #: or a security title is data this project does not control.
 MAX_FIELD_CHARS = 80
 
+#: Injectable as `evidence_since(..., scan_rows=N)` for ONE reason:
+#: without it the truncation branch needs 20,000 seeded rows to reach,
+#: so it would ship untested - and it is the branch that decides
+#: whether an INCOMPLETE answer reads as a complete one.
 #: How many `raw_events` rows one evidence check reads.
 #:
 #: THE FEED SWEEPS ~562 FORM 4s A DAY, so a position held three weeks
@@ -699,7 +703,8 @@ def _describe_transaction(owner_name: str, role: str, tx: dict) -> str:
     return " ".join(bits)
 
 
-def evidence_since(conn, ticker: str, since) -> Evidence:
+def evidence_since(conn, ticker: str, since,
+                   scan_rows: int = EVIDENCE_SCAN_ROWS) -> Evidence:
     """Filings, insider transactions and news naming this company since
     `since`. Never raises: a database missing a table returns nothing
     found, because a review that cannot read the feed must still run.
@@ -732,7 +737,7 @@ def evidence_since(conn, ticker: str, since) -> Evidence:
             "WHERE fetched_at > ? AND source IN "
             "('edgar_form4','alpaca_news','edgar_fts','edgar_xbrl') "
             "ORDER BY fetched_at DESC LIMIT ?",
-            (cutoff, EVIDENCE_SCAN_ROWS)).fetchall()
+            (cutoff, int(scan_rows))).fetchall()
     except sqlite3.Error:
         return Evidence()
 
@@ -793,7 +798,7 @@ def evidence_since(conn, ticker: str, since) -> Evidence:
     return Evidence(sales=tuple(sales), purchases=tuple(purchases),
                     other_insider=tuple(other), filings=tuple(filings),
                     news=tuple(news), omitted=omitted,
-                    truncated=len(rows) >= EVIDENCE_SCAN_ROWS)
+                    truncated=len(rows) >= int(scan_rows))
 
 
 def requested_check_at(conn, position_id: str):

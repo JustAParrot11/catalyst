@@ -367,6 +367,105 @@ class TestTheCycleWiresItThrough:
                 "database read")
 
 
+class _Ctx:
+    """The fields `review_position` reads off a cost context, and no
+    more. Nothing here spends: `authorize` is stubbed to refuse."""
+
+    kind = "scheduled"
+    governor_profit_share = 0
+    cycle_id = "c1"
+    owner_monthly_cap_cents = 10000
+
+
+class TestTheWiringIsAssertedByOutcome:
+    """SECTION 22's TRAP, AND I WALKED INTO IT RE-PINNING ITS OWN TEST.
+
+    `render_prompt(now=None, evidence=None)` has sensible defaults - the
+    clock falls back to the real one so a caller that forgets cannot
+    silently reintroduce a dateless prompt, and a missing evidence
+    argument renders no section rather than an empty heading. Both are
+    the right behaviour, and both mean a test that CALLS `render_prompt`
+    directly proves the renderer and says nothing about the wiring.
+
+    Measured: a sabotage cutting `now=now` out of `review_position` came
+    back GREEN against exactly such a test. So both are asserted here
+    through the real function, by capturing what it passed.
+    """
+
+    def _captured(self, conn, monkeypatch, pinned):
+        import catalyst.research.position_review as mod
+
+        seed(conn, [("edgar_form4", form4(
+            "TRAVERSA SERGIO", "officer:Chief Executive Officer",
+            "S", "D", "120000", "5.20"))])
+        # The position row must EXIST: `init_db` turns foreign keys on,
+        # so the skip this review records has a parent to point at - the
+        # same discipline section 14 records paying for.
+        conn.execute("INSERT INTO positions VALUES (?,?,?,?,?,?,?)",
+                     ("p1", "RLMD", "[]", None, OPEN.isoformat(),
+                      (NOW + timedelta(days=5)).date().isoformat(), "open"))
+        conn.commit()
+        got = {}
+        real = mod.render_prompt
+
+        def spy(position, view, market, now=None, evidence=None,
+                market_is_live=None):
+            got["now"] = now
+            got["evidence"] = evidence
+            got["live"] = market_is_live
+            return real(position, view, market, now=now, evidence=evidence,
+                        market_is_live=market_is_live)
+
+        monkeypatch.setattr(mod, "render_prompt", spy)
+
+        # STOP BEFORE SPENDING. A denied budget is a recorded skip, not
+        # an exception, so this is the review's own ordinary path: the
+        # prompt is built, the governor says no, and nothing is billed.
+        # The test is about what reached the renderer.
+        class Denied:
+            authorized = False
+            reason = "stopped by the test before any spend"
+
+        monkeypatch.setattr(mod, "authorize", lambda *a, **kw: Denied(),
+                            raising=False)
+        mod.review_position(
+            conn,
+            {"id": "p1", "ticker": "RLMD", "opened_at": OPEN.isoformat(),
+             "opened_at_date": OPEN.date().isoformat(),
+             "planned_exit_date": (NOW + timedelta(days=5)).date()
+             .isoformat()},
+            {"thesis": "t", "invalidation": "i"},
+            {"entry_price": 4.49, "last_price": 5.05, "move_pct": "12",
+             "market_is_live": True},
+            transport=None, cost_context=_Ctx(), now=pinned)
+        assert got, "render_prompt was never reached by review_position"
+        return got
+
+    def test_the_review_hands_its_own_clock_to_the_prompt(self, conn,
+                                                          monkeypatch):
+        pinned = datetime(2019, 3, 14, 11, 22, tzinfo=timezone.utc)
+        got = self._captured(conn, monkeypatch, pinned)
+        assert got["now"] == pinned, (
+            "review_position did not pass its own clock, so the prompt's "
+            f"date is whatever the wall clock says: {got['now']}")
+
+    def test_the_review_gathers_the_evidence_and_passes_it(self, conn,
+                                                           monkeypatch):
+        got = self._captured(conn, monkeypatch, NOW)
+        assert got["evidence"] is not None, (
+            "review_position rendered its prompt with NO evidence - the "
+            "state this whole change exists to fix")
+        assert got["evidence"].sales, (
+            "the evidence was gathered but the disposal on record was not "
+            "found: the cutoff or the ticker match is wrong")
+
+    def test_the_market_state_reaches_the_renderer(self, conn, monkeypatch):
+        got = self._captured(conn, monkeypatch, NOW)
+        assert got["live"] is True, (
+            "the market state did not reach the renderer, so every "
+            f"absence would read as 'nobody looked': {got['live']}")
+
+
 class TestTheAdversarialReadsOwnFindings:
     """Two defects the house-rule-5 read found in my own change, neither
     of which any test above would have caught."""
@@ -387,6 +486,17 @@ class TestTheAdversarialReadsOwnFindings:
             f"an upstream field reached the prompt unbounded: "
             f"{len(ev.sales[0])} chars")
         assert "A" * (P.MAX_FIELD_CHARS + 1) not in ev.sales[0]
+
+    def test_truncation_is_DETECTED_not_merely_rendered(self, conn):
+        """The gap a sabotage found. Every other test here builds
+        `Evidence(truncated=True)` BY HAND, so DETECTION shipped
+        untested: `truncated=False` always would have passed all of
+        them. The scan limit is injectable for exactly this reason."""
+        seed(conn, [("edgar_form4", form4(f"S{i}", "director", "S", "D"))
+                    for i in range(4)])
+        assert P.evidence_since(conn, "RLMD", OPEN, scan_rows=2).truncated
+        assert not P.evidence_since(conn, "RLMD", OPEN,
+                                    scan_rows=50).truncated
 
     def test_a_truncated_scan_says_so_rather_than_reading_as_quiet(self):
         """THE DANGEROUS DIRECTION. A scan that hit its limit and found
