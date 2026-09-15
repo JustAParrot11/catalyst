@@ -4291,3 +4291,190 @@ close.
   something the measurements settle. What they settle is narrower: the
   figure on a settled trade is the one that was banked, the exit is always
   marked, no line is drawn across a closed market, and there is an axis.
+
+---
+
+## 34. Three call sites answered a tool call with plain text
+
+Owner-reported 2026-09-15, from the live logs:
+
+```
+fault research skipped: invalid_request_not_sent: message 3 calls
+tool_use toolu_015PG6wEFAvX7XHwsnfiWjXD and the next message carries
+no matching tool_result - the API rejects this outright
+```
+
+**The guard did its job and the candidate was still lost.**
+`invalid_payload_reason` refused the request before it was sent, so
+nothing was paid for a certain 400 — but the research call was skipped
+and the candidate went unresearched. That is the distinction worth
+keeping: the money was saved, the work was not.
+
+### Reproduced character for character before changing anything
+
+The Messages API requires a `tool_result` immediately after every client
+`tool_use`. Rebuilding the message list the repair branch produces gave
+the owner's sentence back verbatim, id included — so message 3 is the
+**first forced extraction turn's echo**:
+
+```
+0  user       the prompt
+1  assistant  early submission          -> tool_use
+2  user       tool_result               (this one was already correct)
+3  assistant  forced extraction turn    -> tool_use
+4  user       "Your submission was not accepted: ..."   <- PLAIN TEXT
+```
+
+### ONE DEFECT, THREE SITES — and the fix for it was already in the file
+
+| site | how it is reached | was |
+|---|---|---|
+| `boundary.py` repair turn | the owner's fault. Two of the three routes here leave a real `tool_use` in the echo: an `invalid_view` (the call parsed, the view did not build) and a truncated submission (`stop_reason: max_tokens`) | plain text |
+| `position_review.py` forced turn | reached *because* an early submission failed, so the echo almost always carries a `tool_use` | plain text |
+| `boundary.py` pause continuation | a `pause_turn` is continued by sending the assistant turn back with **no** user message — correct for a pause, impossible if the same turn also made a client call | refused locally, turn wasted |
+
+**Fifty lines above the repair branch, the exploration echo already
+answered its tool calls, with a comment explaining exactly why and
+naming the five live calls that died of it.** The repair branch was
+written without that fix; the review has it in its only forced turn; and
+the third site cannot be fixed the same way at all.
+
+So the fix is **one definition**, not three patches. `client_tool_use_ids`
+is now the single answer to "what must this code answer", called by the
+guard, by the answerer, and by the pause loop — because the guard and the
+answerer each inlined their own copy, which is how three call sites came
+to disagree with the guard at once. That is the
+two-numbers-one-meaning trap (§18, §30, §33) applied to a **rule**
+rather than a number.
+
+The pause site is fixed differently and deliberately: if a paused turn
+carries a client call the loop **stops**, which costs nothing, because
+the extraction path below reads the submission out of that very turn,
+accepts it if the view builds, and otherwise answers the call properly on
+its way to the forced turn.
+
+**And `ask` now comes from the caller.** It was hardcoded to
+`submit_research_view` plus "Required fields are missing or invalid" —
+the wrong sentence for a repair, the wrong cause for a truncation, and
+the wrong tool entirely for a position review. Every caller needs the
+same *shape* and a different sentence, so the shape lives in the helper
+and the sentence travels in.
+
+### WHY NO TEST COULD HAVE CAUGHT IT: the fixture had no tool_use ids
+
+`extraction_response` in `test_boundary.py` built blocks like this:
+
+```python
+{"type": "tool_use", "name": "submit_research_view", "input": {...}}
+```
+
+**No `id`.** An id is what marks a call as answerable — a `tool_result`
+has to name one — so `client_tool_use_ids` correctly returns `[]` for
+that block, and **every existing boundary test exercised the branch where
+there is nothing to answer.** The defect was unreachable from the suite.
+
+Fourth instance of *a fixture that cannot produce the owner's state
+agrees with the bug* — §14 (foreign keys off), §23 (`g1` entity ids),
+§24 (the 553-day cache), and now this. The fixture issues a distinct id
+per call, because the API never repeats one and a wrong-id bug must not
+be able to pass.
+
+### A FLAW IN MY OWN TEST HARNESS, and it made the new tests vacuous
+
+My first `transport_script` logged the payload **by reference**.
+`investigate` appends to ONE `messages` list and hands the same object to
+every request, so the log showed every call the *final* conversation
+rather than what each request carried. Measured: a call made when
+`messages` held one message logged four.
+
+So `every_payload_is_sendable(log)` — the assertion at the centre of
+these tests — was judging a list that no longer resembled anything sent,
+and **would have passed while an intermediate request was exactly the
+shape the owner reported.** The transport now deep-copies the payload and
+records the guard's verdict *at send time*, which is the only moment the
+real request exists.
+
+### AND MY REVIEW CALL-SITE ASSERTION MATCHED THE IMPORT
+
+Recorded because it is §22's corollary, word for word, caught by a
+sabotage coming back GREEN:
+
+```python
+src = inspect.getsource(position_review.review_position)
+assert "answer_tool_calls" in src
+```
+
+The import of that name is **inside the function**, so the substring
+matched the import while the call site was replaced with plain text.
+*A substring that also occurs elsewhere in the same function is not a
+call-site assertion.* Replaced by driving the real `review_position`
+with an injected transport whose first turn submits a review that cannot
+be built — the only way to reach the forced turn — and asserting the
+second request is one the API would accept.
+
+### An existing test broke on a change that alters nothing the model reads
+
+`test_repair_turn_recovers_an_incomplete_view` read
+`["content"]` and substring-matched it. The follow-up is a `tool_result`
+list now, so a substring check became a list-membership check and failed.
+**Fourth instance of this exact trap** (§21 on the research path, §28 on
+the hunt path, §33 on a P&L index), and the first on a user turn rather
+than a prompt — so `payload_text.message_text` joins `prompt_text` in the
+shared module, reading `text` blocks *and* `tool_result` contents.
+
+### House rule 5's written read
+
+Both files carry the `MONEY-CRITICAL` marker.
+
+| question | answer |
+|---|---|
+| **worst input** | a turn with many `tool_use` blocks, or ids that repeat. Each id gets its own `tool_result`; a turn with none still gets plain text, because inventing a `tool_result` for a call never made is rejected too. A sabotage holds each half |
+| **broker/API lies, times out, answers half** | unchanged — this is the request *builder*. A truncated turn (`max_tokens`) is now answered rather than refused locally, which is the whole point |
+| **can it place, size or cancel anything it could not before** | **no.** It changes the shape of a user message. The research path's only power is to write a view that `risk/evaluate.py` then judges; the review's only power is `exit_now`, and `bring_exit_forward` still refuses any date at or beyond the original — so the worst this can cause is an **earlier** exit |
+| **cost** | strictly lower. Every request it changes is one that was previously refused locally *after* the preceding turn had been paid for, or sent and 400'd. Nothing new is called |
+| **the second call, and the retry** | the repair turn is bounded at one attempt, unchanged. The pause loop now stops one round earlier in the case that could not have succeeded |
+
+**What the read cleared:** `answer_tool_calls` and `client_tool_use_ids`
+appear nowhere under `risk/`, `execution/` or `cost/`; the guard was made
+stricter about nothing and looser about nothing — its own refusals are
+sabotage-tested in both directions (plain text after a call, a result
+naming the wrong id, one of two answered).
+
+### Verification
+
+- **15 sabotage breakages, all 15 caught red**, each verified to still
+  parse first. Weighted at the directions that lose evidence or spend
+  money: the owner's exact fault restored, the reason dropped from the
+  answer, the exploration echo un-answered, a server tool counted as a
+  client call (which would refuse requests the API accepts), only the
+  first of two calls answered, and a rejection no longer flagged as an
+  error.
+- **11 red on the first pass. Three of the four misses were real gaps in
+  my own tests**, all three the same species — the test never reached the
+  branch:
+  - the exploration echo: every test started with a plain `end_turn`, so
+    that echo never carried a call. A test where the exploration turn
+    itself submits a bad view was added.
+  - the review: the call-site grep matched the import (above).
+  - the fixture's ids: no test asserted the fixture was
+    production-shaped, so removing the ids again was invisible. Now
+    asserted, including that two calls do not share one id.
+- Full suite green offline on a settled tree.
+
+### What is NOT claimed
+
+- **No production call has been made with these payloads.** What is
+  verified is that the three shapes the owner's log reported are now
+  ones `invalid_payload_reason` accepts at send time, driven through
+  the real `investigate` and the real `review_position` with injected
+  transports — and that the guard still refuses the next three ways of
+  getting it wrong.
+- **How often this was firing is unknown.** The fault is recorded per
+  call as a `skipped_reason`, so the count is readable from
+  `research_calls` on the Pipeline page; it was not measured here because
+  the owner's report carried one instance and the cause was certain from
+  the message.
+- **Whether the repaired submissions then produce usable views is
+  unmeasured.** This restores a turn that was being thrown away; what the
+  model does with it is the open question, and the funnel per arm is
+  where it will show.

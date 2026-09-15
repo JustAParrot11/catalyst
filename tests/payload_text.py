@@ -33,3 +33,42 @@ def cache_marked(payload: dict, index: int = 0) -> bool:
         return False
     return any(isinstance(b, dict) and b.get("cache_control")
                for b in content)
+
+
+def message_text(payload: dict, index: int = -1) -> str:
+    """Everything the model would READ in one message, whatever shape it
+    is in: a bare string, `text` blocks, or the `content` of
+    `tool_result` blocks.
+
+    FOURTH INSTANCE of the trap this module opens with, and the first on
+    a user turn rather than the prompt. Section 33's fix makes the repair
+    and review follow-ups `tool_result` lists instead of plain strings -
+    because the Messages API requires a `tool_result` after a `tool_use`
+    and rejects the request outright without one - so a test asserting
+    `"invalidation" in content` went from a substring check to a list
+    membership check and failed on a change that alters not one word the
+    model reads.
+
+    `prompt_text` above deliberately reads only `text` blocks, which is
+    right for a prompt; a follow-up turn's words can live in either, so
+    this reads both.
+    """
+    content = payload["messages"][index]["content"]
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    out = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text":
+            out.append(str(block.get("text") or ""))
+        elif block.get("type") == "tool_result":
+            inner = block.get("content")
+            if isinstance(inner, str):
+                out.append(inner)
+            elif isinstance(inner, list):
+                out.extend(str(b.get("text") or "")
+                           for b in inner if isinstance(b, dict))
+    return "".join(out)

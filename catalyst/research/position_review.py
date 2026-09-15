@@ -973,6 +973,7 @@ def review_position(conn, position: dict, view: dict, market: dict,
         record_usage,
     )
     from catalyst.research.boundary import (
+        answer_tool_calls,
         exploration_turn_estimate_cents,
         extraction_turn_estimate_cents,
         invalid_payload_reason,
@@ -1074,8 +1075,25 @@ def review_position(conn, position: dict, view: dict, market: dict,
     content = (response or {}).get("content")
     if isinstance(content, list) and content:
         messages.append({"role": "assistant", "content": content})
-        messages.append({"role": "user", "content": (
-            "Submit your review now via submit_position_review.")})
+        # ANSWER THE TOOL CALL, SAME AS THE RESEARCH PATH.
+        #
+        # This branch is reached precisely BECAUSE an early submission
+        # failed - either `make_review_from_tool_input` raised just
+        # above, or `_tool_input` refused two calls at once - so the echo
+        # it appends almost always carries a `tool_use` block. Appending
+        # plain text after it is the shape the Messages API rejects
+        # outright, and `invalid_payload_reason` in `run()` above then
+        # refuses the payload and the whole review is skipped.
+        #
+        # The owner reported this on the RESEARCH path on 2026-09-15
+        # ("message 3 calls tool_use ... no matching tool_result"). This
+        # is the identical defect in the review, found by auditing the
+        # other paid paths rather than by a second report - and there is
+        # now one shared `answer_tool_calls` so a third site cannot
+        # disagree with the guard again.
+        messages.append({"role": "user", "content": answer_tool_calls(
+            {"content": content}, None,
+            ask="Submit your review now via submit_position_review.")})
     response, error = run(_review_turn_payload(
         prompt, REVIEW_SEARCHES, messages=messages, forced=True,
         model=model))

@@ -17,6 +17,7 @@ from catalyst.discovery import Candidate
 from catalyst.research import boundary, prompts
 from catalyst.research.boundary import CostContext, investigate
 from catalyst.research.schema import make_view_from_tool_input
+from payload_text import message_text
 
 #: THE CURRENT MONTH, ALWAYS - house rule 6.
 #:
@@ -102,8 +103,27 @@ def end_turn(content=None):
             "stop_reason": "end_turn", "usage": dict(USAGE)}
 
 
+#: A REAL `tool_use` BLOCK CARRIES AN `id`, and this fixture did not.
+#:
+#: That is why no test in this suite could reach the defect the owner
+#: reported on 2026-09-15: `client_tool_use_ids` filters on the id, so an
+#: id-less block looks like "nothing to answer" and every test here
+#: exercised the harmless branch. Third instance of a fixture that cannot
+#: produce the owner's state agreeing with the bug (WHAT-WE-TRIED
+#: sections 14, 23, 24, 32). The counter makes each id distinct, because
+#: the API never repeats one and a `tool_result` has to name the right
+#: call.
+_TOOL_USE_SEQ = [0]
+
+
+def tool_use_id() -> str:
+    _TOOL_USE_SEQ[0] += 1
+    return f"toolu_01FIXTURE{_TOOL_USE_SEQ[0]:04d}"
+
+
 def extraction_response(view=None):
-    return {"content": [{"type": "tool_use", "name": "submit_research_view",
+    return {"content": [{"type": "tool_use", "id": tool_use_id(),
+                         "name": "submit_research_view",
                          "input": view or dict(GOOD_VIEW)}],
             "stop_reason": "tool_use", "usage": dict(USAGE)}
 
@@ -261,9 +281,17 @@ class TestInvestigate:
         result = investigate(candidate(), ctx(db), transport)
         assert result.parsed_view is not None
         assert result.skipped_reason is None
-        # the repair request told the model what was wrong
-        repair_msg = log[2]["messages"][-1]["content"]
-        assert "invalidation" in repair_msg
+        # THE REPAIR REQUEST TOLD THE MODEL WHAT WAS WRONG.
+        #
+        # RE-PINNED: this read `["content"]` and substring-matched it,
+        # which broke when the follow-up became a `tool_result` list -
+        # on a change that alters not one word the model reads. Read
+        # through the shared helper now (section 28's own lesson, fourth
+        # instance), and assert the payload is one the API would ACCEPT,
+        # which is the property that actually failed in production.
+        assert "invalidation" in message_text(log[2])
+        assert boundary.invalid_payload_reason(log[2]) is None, (
+            boundary.invalid_payload_reason(log[2]))
         assert len(result.api_turns) == 3
         assert db.execute("SELECT COUNT(*) FROM research_views"
                           ).fetchone()[0] == 1   # the repaired view landed
