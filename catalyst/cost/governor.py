@@ -200,6 +200,31 @@ def authorize(
     as_of = as_of or datetime.now(timezone.utc).date()
     spent = month_to_date_cents(estimate.kind, conn, as_of)
 
+    # THE OWNER'S EMERGENCY STOP, AHEAD OF EVERYTHING INCLUDING THE
+    # INTEGRITY GATE. Owner-asked 2026-09-15: "The bot just suspends
+    # claude API activity and wont trade except sell what it currently
+    # has at the date."
+    #
+    # This is the only chokepoint every billable call in the system
+    # passes through, which is why it is enforced here rather than once
+    # per caller - a per-caller check is a list, and a list misses the
+    # next caller nobody thought of (house rule 7).
+    #
+    # BOTH KINDS, scheduled and manual. "Suspends claude API activity"
+    # has no carve-out for a human at a keyboard, and the switch exists
+    # for the case where there is no money left - which does not care
+    # who is spending it.
+    from catalyst import emergency_stop
+
+    if emergency_stop.is_engaged(conn):
+        decision = GovernorDecision(
+            authorized=False, kind=estimate.kind, estimate=estimate,
+            cap_cents=Decimal("0"), period_to_date_cents=spent,
+            shortfall_cents=None, reason=emergency_stop.STOP_REASON,
+        )
+        _log(decision, conn, cycle_id)
+        return decision
+
     # ONE integrity gate, not two. An unpriced row is a hole in the
     # count the budget stop depends on, so nothing is authorised until it
     # is priced - that IS the budget stop working.

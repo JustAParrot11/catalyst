@@ -27,6 +27,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Callable, Literal
 
+import catalyst
 from catalyst.cost import CostEstimate
 from catalyst.cost.governor import authorize
 from catalyst.cost.pricing import (
@@ -960,6 +961,19 @@ def _persist(log: ResearchCallLog, conn) -> None:
          json.dumps(list(log.tools_offered)), str(log.cost_cents),
          log.latency_ms, log.skipped_reason,
          datetime.now(timezone.utc).isoformat()))
+    # WHICH CODE RECORDED THIS. A side table, because research_calls is
+    # written with positional INSERTs in several places.
+    #
+    # Wrapped, because the audit trail outranks the provenance: a call
+    # that has already been billed must land in research_calls even if
+    # this row cannot be written. An unstamped row reads as "not
+    # recorded", which the dashboard says out loud rather than guessing.
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO research_call_builds (call_id, build) "
+            "VALUES (?,?)", (log.id, str(catalyst.__build__ or "")))
+    except sqlite3.Error:
+        pass
     for t in log.api_turns:
         conn.execute(
             """INSERT INTO research_call_turns
