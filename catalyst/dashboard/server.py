@@ -180,8 +180,47 @@ def route_performance(db: Db, params: dict) -> str:
 
 
 def route_trades(db: Db, params: dict) -> str:
+    """THE PAGE REFRESHES ITSELF ONLY WHILE SOMETHING IS ACTUALLY LIVE.
+
+    Owner-reported 2026-09-15: *"there isnt a live continuously updating
+    version for an active trade, only a past"*. Correct, and measured -
+    `refresh_seconds` existed and had exactly one caller, the detailed
+    Overview, so the P&L chart was fetching a live quote on load and then
+    sitting still until the reader reloaded by hand.
+
+    GATED ON AN OPEN POSITION, for the reason the Overview's own summary
+    view is not refreshed: a page that reloads under the reader fights
+    them for the scroll position, and on a page of closed trades there is
+    nothing that could change - every figure on it is settled. So the
+    meta refresh is attached when, and only when, a position is open and
+    its chart has a live quote to go back for.
+
+    A meta refresh rather than a script, which is `page()`'s own
+    reasoning: if a script fails the numbers stop moving while still
+    looking current, and that is the exact failure the live/settled
+    distinction on this chart exists to prevent.
+    """
     return render_page("Trades", panels.trades_panel(db, params, p="tr"),
-                       "/trades", db.path, db=db)
+                       "/trades", db.path, db=db,
+                       refresh_seconds=(panels.DESK_REFRESH_SECONDS
+                                        if _any_position_open(db) else 0))
+
+
+def _any_position_open(db: Db) -> bool:
+    """A failed count must cost a refresh, never the page.
+
+    THE ERROR IS READ, NOT CAUGHT. My first version wrapped this in
+    `try/except Exception` - and `Db.q` does not raise: it returns a
+    `QueryResult` carrying `error` and no rows. So the handler was
+    unreachable, which a sabotage found by coming back GREEN. Checking
+    `got.error` puts the same intent on the path that actually happens
+    (section 25's lesson: machinery no test can make load-bearing is
+    removed, not kept and explained).
+    """
+    got = db.q("SELECT COUNT(*) n FROM positions WHERE status = 'open'")
+    if got.error or not got.rows:
+        return False
+    return bool(got.rows[0]["n"])
 
 
 def route_arms(db: Db, params: dict) -> str:

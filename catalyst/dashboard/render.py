@@ -411,6 +411,30 @@ h3 { font-size: 11px; margin: 14px 0 5px 0; text-transform: uppercase;
    the only point on the chart that is not a settled bar, which is why it
    is drawn differently and labelled with its own clock time. */
 .pnl-live { fill: var(--series-1); stroke: var(--surface); stroke-width: 2; }
+/* THE SALE, which is a different claim from the live reading: one will
+   move again, the other is banked. Same hue as the price line - the
+   outcome is NOT carried by colour here either, it is carried by the
+   dot's position against break-even and by its own "sold" label - but
+   hollow, because a settled end and a moving end should not look
+   identical. A test asserts it does not change colour with profit or
+   loss. */
+.pnl-final { fill: var(--surface); stroke: var(--series-1);
+  stroke-width: 2.5; }
+/* A session with a single bar in it: drawn as a dot, because a
+   zero-length polyline renders as nothing and would lose a day. */
+.pnl-dot { fill: var(--series-1); }
+/* THE TIME AXIS. This chart shipped without one - measured, not one text
+   element on it carried anything date- or time-like, so a reader could
+   not tell an afternoon from a fortnight. The ticks fall at the start of
+   each session, which is the same rule that breaks the line. */
+.pnl-axis-tick { stroke: var(--ink-2); stroke-width: 1; opacity: .5; }
+.pnl-axis-label { fill: var(--ink-2); font-size: 9.5px; }
+/* WHEN THE MARKET WAS SHUT. Breaking the line stops the chart claiming
+   movement that never happened; shading the span stops the resulting
+   blank reading as a broken chart. Neutral ink, not a status colour -
+   nothing went wrong here, the market was simply closed - and faint
+   enough that the line and the rules stay the foreground. */
+.pnl-shut { fill: var(--ink-2); opacity: .06; }
 /* Events get their own lane under the plot - the lesson from the review
    "picket fence" of 2026-09-11, where full-height rules striped the
    price line. A short stem into the plot marks the moment; the label

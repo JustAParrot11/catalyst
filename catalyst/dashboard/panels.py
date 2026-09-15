@@ -5956,14 +5956,8 @@ def _trade_summary(st) -> str:
     # ---- the close, or where it stands
     if st.realized_pnl_cents is not None:
         won = st.realized_pnl_cents >= 0
-        why_out = {
-            "hard_exit": "The clock ran out",
-            "hard_exit_date": "The clock ran out",
-            "stop": "The stop was hit",
-            "stop_filled": "The stop was hit",
-            "thesis_invalidated": "Claude decided the thesis had broken",
-        }.get(str(st.exit_reason), f"It exited ({esc(str(st.exit_reason))})")
-        bits.append(f"<b>{why_out}</b>")
+        why_out = _exit_words(st.exit_reason)
+        bits.append(f"<b>{esc(why_out[:1].upper() + why_out[1:])}</b>")
         if st.actual_holding_days is not None:
             bits.append(f" after <b>{st.actual_holding_days} days</b>")
             if st.expected_holding_days:
@@ -6148,6 +6142,17 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
                          ("Dollars committed", st.notional_usd),
                          ("Stop price", st.stop_price),
                          ("Sale price", st.exit_price),
+                         # NO EXIT REASON HERE, DELIBERATELY, and it was
+                         # tried. `test_the_exit_reason_is_words_not_an_enum`
+                         # forbids the raw token anywhere on this card,
+                         # and checked against production that is right:
+                         # `reconcile.py` writes exactly TWO values,
+                         # `stop` and `hard_exit`, which map to two
+                         # distinct sentences - so putting the machine
+                         # string back buys no audit detail the words do
+                         # not already carry. The verbatim row is in
+                         # `closed_trades`, which the execution bundle
+                         # exports whole.
                          ("Account equity at entry", st.equity_at_entry)):
         if value not in (None, ""):
             exact.append(f"<tr><th>{esc(label)}</th>"
@@ -7592,8 +7597,79 @@ EVENT_CHAR_PX = charts.CHAR_W * (EVENT_FONT_PX / charts.FONT_SIZE)
 EVENT_GAP_PX = 8.0
 #: Rows available. Two, because a third pushes labels into the caption.
 EVENT_ROWS = 2
-#: Where the first label row sits below the plot floor.
-EVENT_LANE_TOP = 21.0
+
+def _exit_words(reason) -> str:
+    """Why a position closed, in words rather than as an enum.
+
+    EXTRACTED 2026-09-15, because it was a dict literal INSIDE
+    `_trade_summary` - so the P&L chart's exit hover read `Sold:
+    hard_exit`, the raw enum, and `test_the_exit_reason_is_words_not_an_enum`
+    caught it. That test exists because the tiles had the same defect;
+    the words were written once and the second caller could not reach
+    them. Twelfth instance of this project's most recurring defect
+    (sections 12, 14, 17, 22, 23, 26, 29, 30, 31), and the cheapest yet
+    to have avoided.
+
+    THE FALLBACK IS A RULE, NOT A SHRUG (house rule 7): an exit reason
+    nobody listed is de-underscored rather than printed raw, so the
+    first reason added later reads as words instead of as machinery.
+    """
+    key = str(reason or "").strip()
+    known = {
+        "hard_exit": "the clock ran out",
+        "hard_exit_date": "the clock ran out",
+        "stop": "the stop was hit",
+        "stop_filled": "the stop was hit",
+        "thesis_invalidated": "Claude decided the thesis had broken",
+    }
+    if key in known:
+        return known[key]
+    return key.replace("_", " ").strip() or "no reason was recorded"
+
+
+#: The P&L chart's drawable bounds, at module level so a test can assert
+#: against THE SAME numbers the chart draws with. A test that repeated
+#: them would be the two-numbers-one-meaning trap yet again - it would
+#: agree with the chart right up to the day somebody changed one.
+PNL_W = 660
+PNL_R = 62
+PNL_PLOT_LEFT = 92
+PNL_PLOT_RIGHT = PNL_W - PNL_R
+
+#: The axis band, between the plot's bottom edge and the event lane.
+#:
+#: DERIVED, BECAUSE A TYPED `EVENT_LANE_TOP` ALREADY COLLIDED WITH IT.
+#: Measured with the project's own tool on the first render: the date
+#: labels' boxes ran to y=176.8 and the first event row's began at
+#: y=173.5 - a 3.3px overlap in all 72 cases. That is section 18's
+#: two-numbers-one-meaning defect for the third time in this file
+#: (`FONT_SIZE + 2` vs a 14.3px box; then a 12px row pitch vs 12.35).
+#: The lane's top is now a consequence of the axis's height, so the two
+#: cannot drift apart again.
+AXIS_TICK_PX = 4.0
+#: Baseline of a date label: below the tick, by one ascent.
+AXIS_LABEL_BASE = AXIS_TICK_PX + EVENT_FONT_PX
+#: Where the label's box actually ends - `svg_measure` reports a box of
+#: [baseline - size, baseline + size * (LINE_H - 1)], so the descender
+#: matters and guessing it is what produced the overlap above.
+AXIS_BAND_PX = AXIS_LABEL_BASE + EVENT_FONT_PX * (charts.LINE_H - 1.0)
+
+#: How much of Claude's reasoning a review's hover carries. A tooltip is
+#: read in one glance and the full text is in the reviews table below, so
+#: this is a pointer rather than the record. Sized against the theses on
+#: file (median 712 characters), the same measurement
+#: `REASON_EXCERPT_CHARS` was taken from.
+REVIEW_HOVER_CHARS = 160
+#: Where the first label row sits below the plot floor: clear of the
+#: axis band above it, by one ascent plus half a line of air. DERIVED -
+#: see AXIS_BAND_PX for the overlap a typed 21.0 produced.
+#:
+#: THE HALF-LINE IS NOT DECORATION. A 2px gap satisfied the arithmetic
+#: and `svg_measure.overlaps` still flagged every case, because it
+#: treats anything within 2px as colliding - correctly, since two boxes
+#: that close read as one block. Sized off the font so it stays a
+#: visible gap at any size.
+EVENT_LANE_TOP = AXIS_BAND_PX + EVENT_FONT_PX + EVENT_FONT_PX / 2
 
 
 def _place_event_labels(marks, x_of):
@@ -7644,10 +7720,24 @@ def _pnl_marks(st):
         when, action, skipped = row[0], str(row[1] or ""), row[5]
         if skipped:
             continue
+        # WHAT CLAUDE ACTUALLY SAID IS IN THE SAME TUPLE, at index 3,
+        # and the hover was showing `action` - the single word "hold" -
+        # on every one of them. With five reviews all captioned "Review"
+        # (section 10b's five-identically-labelled-controls defect) the
+        # hover was the only thing that could tell them apart, and it
+        # could not. It now carries the moment and the reasoning.
+        said = str(row[3] or "").strip() if len(row) > 3 else ""
+        detail = _pretty_date(when) or str(when)
+        if said:
+            detail += ": " + (said[:REVIEW_HOVER_CHARS].rstrip()
+                              + ("..." if len(said) > REVIEW_HOVER_CHARS
+                                 else ""))
+        else:
+            detail += f": {action}" if action else ""
         marks.append({"at": when, "kind": "review",
                       "label": {"exit_now": "Exit call",
                                 "hold": "Review"}.get(action, "Review"),
-                      "detail": action})
+                      "detail": detail})
     # NEWS NAMING THE COMPANY. This is the signal that brings a review
     # forward, and until now it appeared on the chart nowhere at all.
     for src in (st.sources or ()):
@@ -7657,8 +7747,12 @@ def _pnl_marks(st):
             marks.append({"at": when, "kind": "news", "label": "News",
                           "detail": head})
     if st.closed_at:
+        # WORDS, NOT THE ENUM. This hover read "hard_exit" - the machine
+        # value - while `_trade_summary` had the sentence for it inline
+        # and out of reach. An existing test caught it.
+        sold = _pretty_date(st.closed_at) or str(st.closed_at)
         marks.append({"at": st.closed_at, "kind": "exit", "label": "Sold",
-                      "detail": str(st.exit_reason or "")})
+                      "detail": f"{sold}: {_exit_words(st.exit_reason)}"})
     return marks
 
 
@@ -7717,12 +7811,21 @@ def _pnl_series(st, now=None, broker=None, fetch=True):
         got = live.quotes_for([st.ticker], broker=broker, now=now)
         quote = got.get(str(st.ticker or "").upper())
 
+    # WHAT IT ACTUALLY SOLD FOR, AND WHAT WAS ACTUALLY BANKED. Both have
+    # been on `TradeStory` since it was written and neither reached this
+    # chart, so a closed trade's dot carried the last BAR's
+    # mark-to-market - measured $8.15 out on the owner's own card, under
+    # the word "unrealised", on a settled trade.
+    booked = (Decimal(st.realized_pnl_cents) / 100
+              if st.realized_pnl_cents is not None else None)
     s = pnl.build(fill=st.entry_price, qty=st.qty, stop=st.stop_price,
                   bars=bars, opened=opened, timeframe=tf,
                   side=str(st.direction or "long"),
                   marks=_pnl_marks(st),
                   live_price=(quote.mid if quote and quote.live else None),
-                  live_at=(quote.at if quote and quote.live else None))
+                  live_at=(quote.at if quote and quote.live else None),
+                  exit_price=st.exit_price, exit_at=st.closed_at,
+                  realised_pnl=booked)
     s.source = source
     # HOUSE RULE 3: when there is no line, the upstream reason travels
     # with the absence rather than being replaced by a tidy sentence.
@@ -7760,7 +7863,7 @@ def _pnl_chart(st, p: str, index: int, series=None) -> str:
     # single case, and found by measuring rather than by looking. Same
     # class of defect as section 18's label stack escaping through the
     # top: written for the common case, overflowing in the real one.
-    W, L, R, T, PLOT_H = 660, 92, 62, 18, 144
+    W, L, R, T, PLOT_H = PNL_W, PNL_PLOT_LEFT, PNL_R, 18, 144
     B = int(EVENT_LANE_TOP + (EVENT_ROWS + 1) * EVENT_ROW_PX
             + EVENT_FONT_PX * (charts.LINE_H - 1.0) + 2) + 1
     H = T + PLOT_H + B
@@ -7789,6 +7892,20 @@ def _pnl_chart(st, p: str, index: int, series=None) -> str:
                    f'width="{W - L - R}" height="{abs(bot - top):.1f}" '
                    f'class="pnl-risk"/>')
 
+    # THE CLOSURES, SHADED. Drawn before the rules and the line so it
+    # sits behind them. Measured: breaking the line left 66% of a
+    # three-day chart's width blank, and blank reads as a broken chart
+    # rather than as a shut market.
+    for start_at, end_at in s.gaps:
+        gx, gw = x(start_at), x(end_at) - x(start_at)
+        if gw <= 0:
+            continue
+        out.append(f'<rect x="{gx:.1f}" y="{T}" width="{gw:.1f}" '
+                   f'height="{plot_bottom - T:.1f}" class="pnl-shut">'
+                   f'<title>market shut - no prices between '
+                   f'{esc(_clock(start_at))} and {esc(_clock(end_at))} '
+                   f'UTC</title></rect>')
+
     rules = [(0.0, "pnl-zero", "break even")]
     if s.stop_pnl is not None:
         rules.append((s.stop_pnl, "pnl-floor",
@@ -7799,28 +7916,111 @@ def _pnl_chart(st, p: str, index: int, series=None) -> str:
         out.append(f'<text x="{L - 6}" y="{y(value) + 3:.1f}" '
                    f'text-anchor="end" class="pos-label">{esc(label)}</text>')
 
-    pts = " ".join(f"{x(pt.at):.1f},{y(pt.pnl):.1f}" for pt in s.points)
-    out.append(f'<polyline points="{pts}" class="pnl-line"/>')
+    # ONE POLYLINE PER SESSION, BROKEN WHERE THE MARKET WAS SHUT.
+    # Measured: on a three-day hold at 30-minute bars, 67% of the width
+    # was a single straight line across hours when nothing traded, which
+    # reads as smooth price movement. `Series.segments` holds the rule.
+    for run in s.segments:
+        if len(run) < 2:
+            # A LONE POINT STILL GETS DRAWN, as a dot rather than a
+            # zero-length line: a single session with one bar in it is
+            # real, and dropping it would lose a day from the picture.
+            if run:
+                out.append(f'<circle cx="{x(run[0].at):.1f}" '
+                           f'cy="{y(run[0].pnl):.1f}" r="1.6" '
+                           f'class="pnl-dot"/>')
+            continue
+        pts = " ".join(f"{x(pt.at):.1f},{y(pt.pnl):.1f}" for pt in run)
+        out.append(f'<polyline points="{pts}" class="pnl-line"/>')
 
-    # THE NEWEST READING, labelled with its own value and clock time -
-    # the reader must be able to tell a live quote from a settled bar,
-    # and a stale page from a fresh one.
+    # THE LAST READING, labelled with its own value - and the label says
+    # WHICH KIND of last it is. A live quote will move again; a sale is
+    # banked. Before this the sale was drawn with the live point's class
+    # and the word "unrealised", which is false on a settled trade.
     now = s.points[-1]
     out.append(f'<circle cx="{x(now.at):.1f}" cy="{y(now.pnl):.1f}" r="4" '
-               f'class="pnl-live"/>')
-    label = _signed_money(now.pnl)
+               f'class="{"pnl-final" if now.final else "pnl-live"}"/>')
+    label = _signed_money(now.pnl) + (" sold" if now.final else "")
     anchor = "end" if x(now.at) > W - R - 60 else "start"
     dx = -8 if anchor == "end" else 8
     out.append(f'<text x="{x(now.at) + dx:.1f}" y="{y(now.pnl) - 8:.1f}" '
                f'text-anchor="{anchor}" class="pnl-val">{esc(label)}</text>')
+
+    # THE TIME AXIS, WHICH THIS CHART HAD NONE OF. Measured on the
+    # owner's card: not one text element carried anything date- or
+    # time-like, so a reader could not tell whether the picture spanned
+    # an afternoon or a fortnight. Section 10b fixed exactly this on the
+    # PRICE chart ("the card had no time axis") and the P&L chart
+    # repeated it.
+    #
+    # The ticks are the start of each session plus the final moment, so
+    # the same rule that breaks the line labels the axis - one mechanism,
+    # not two that can disagree.
+    axis_y = plot_bottom + AXIS_LABEL_BASE
+    stamps = [run[0].at for run in s.segments if run] + [now.at]
+    fmt = "%H:%M" if span <= 86400 else "%-d %b"
+    # HOW MANY LABELS FIT, DERIVED FROM HOW WIDE THEY ARE. A three-week
+    # hold has 21 session starts; labelling all of them measured as
+    # eleven dates across 510px, which is clutter rather than an axis.
+    # The clear space each label needs is its own width either side, so
+    # the count follows from the geometry and no chart width or hold
+    # length can put a number here out of date.
+    label_px = max(len(datetime.now(timezone.utc).strftime(fmt)), 5) \
+        * EVENT_CHAR_PX
+    room = max(int((W - L - R) / (label_px * 3.0)), 2)
+    if len(stamps) > room:
+        # EVENLY THROUGH THE LIST, always keeping the first and the last:
+        # those two are the ones a reader looks for, and dropping either
+        # leaves the axis unable to say when the position began or ended.
+        step = (len(stamps) - 1) / (room - 1)
+        stamps = [stamps[min(int(round(i * step)), len(stamps) - 1)]
+                  for i in range(room)]
+    drawn_text: set = set()
+    for at in stamps:
+        ax = x(at)
+        text = at.strftime(fmt)
+        half = len(text) * EVENT_CHAR_PX / 2
+        # NEVER PRINT THE SAME LABEL TWICE. The final moment usually
+        # falls on a day a session tick already named, so the first
+        # render put "14 Sep" on the axis twice - which is section 10b's
+        # five-identical-captions defect in miniature, introduced by the
+        # fix for it. Found by rendering, not by reading.
+        #
+        # AND THERE WAS A SECOND GUARD HERE, DELETED RATHER THAN KEPT: an
+        # x-distance check rejecting a label too close to one already
+        # placed. Probed across 595 shapes - every hold length from 1 to
+        # 24 sessions, five bar resolutions, partial final sessions - and
+        # it changed the outcome ZERO times, because the thinning above
+        # and this dedupe always reach it first. Section 25's lesson:
+        # machinery no input can make load-bearing is removed, not kept
+        # and explained. If the thinning is ever loosened, the geometry
+        # test is what will say so.
+        if text in drawn_text:
+            continue
+        drawn_text.add(text)
+        anchor, at_x = "middle", ax
+        if ax - half < L:
+            anchor, at_x = "start", L
+        elif ax + half > W - R:
+            anchor, at_x = "end", W - R
+        out.append(f'<line x1="{ax:.1f}" y1="{plot_bottom:.1f}" '
+                   f'x2="{ax:.1f}" y2="{plot_bottom + 4:.1f}" '
+                   f'class="pnl-axis-tick"/>')
+        out.append(f'<text x="{at_x:.1f}" y="{axis_y:.1f}" '
+                   f'text-anchor="{anchor}" class="pnl-axis-label">'
+                   f'{esc(text)}</text>')
 
     # EVENTS IN THEIR OWN LANE, never across the line. Every mark gets a
     # rule and a hover; labels are placed only where they fit.
     for mark in s.marks:
         mx = x(mark.at)
         cls = "pnl-event-exit" if mark.kind == "exit" else "pnl-event"
-        out.append(f'<line x1="{mx:.1f}" y1="{plot_bottom - 6:.1f}" '
-                   f'x2="{mx:.1f}" y2="{plot_bottom + 10:.1f}" '
+        # THE RULE STOPS AT THE PLOT'S EDGE so the axis band below it is
+        # the axis's own. It used to run to plot_bottom + 10, which is
+        # where the date labels now sit - measured, not assumed: a mark
+        # and a tick sharing an x would have overprinted.
+        out.append(f'<line x1="{mx:.1f}" y1="{plot_bottom - 8:.1f}" '
+                   f'x2="{mx:.1f}" y2="{plot_bottom:.1f}" '
                    f'class="{cls}"><title>{esc(mark.label)}: '
                    f'{esc(mark.detail)}</title></line>')
     placed, dropped = _place_event_labels(s.marks, x)
@@ -7861,16 +8061,55 @@ def _pnl_block(st, p: str, index: int, series=None) -> str:
     now = s.last
     money = _signed_money(now.pnl)
     share = _pct_of(abs(now.pnl), s.fill * s.qty) if s.fill and s.qty else ""
-    when = ("read moments ago" if now.live
-            else "the last settled price on record")
-    lead = (f"<b>{money}</b> unrealised"
+    # "UNREALISED" IS FALSE ON A SETTLED TRADE, and it was printed on one
+    # - beside a figure taken from the last bar rather than the sale.
+    # Banked and not-yet-banked are the whole distinction this sentence
+    # exists to make, so it is the first word, not a suffix.
+    if now.final:
+        kind = "realised" if s.realised_is_broker else "realised (computed)"
+        when = f"sold at ${now.price:,.4f} on {_pretty_date(now.at)}"
+    else:
+        kind = "unrealised"
+        when = (f"at ${now.price:,.4f}, "
+                + ("read moments ago" if now.live
+                   else "the last settled price on record"))
+    lead = (f"<b>{money}</b> {kind}"
             + (f", {share} of the ${s.fill * s.qty:,.0f} committed" if share
                else "")
-            + f" &mdash; at ${now.price:,.4f}, {when}"
+            + f" &mdash; {when}"
             + (f" ({_clock(now.at)} UTC)" if now.live else "") + ". ")
+    if now.final and s.realised_is_broker:
+        lead += ("That is the broker's own realised figure, so it carries "
+                 "whatever the fill and the fees actually were. ")
+    elif now.final:
+        lead += ("No realised figure is on record for this trade, so that "
+                 "is the sale price times the quantity &mdash; it carries "
+                 "no fees. ")
     if s.stop_pnl is not None:
-        lead += (f"The floor is <b>{_signed_money(s.stop_pnl)}</b>: the most "
-                 "this can lose while the stop rests at the broker. ")
+        # WHAT THAT REGION IS. It has been drawn since this chart shipped
+        # and named nowhere, so it read as "the bad region" or as
+        # something that had happened. It is the span the stop bounds.
+        #
+        # NAMED BY POSITION, NEVER BY COLOUR. There are now two shaded
+        # regions on this chart and my first wording called this one "the
+        # shaded band", which is ambiguous the moment the other exists -
+        # and this project's standing rule is that nothing is identified
+        # by its colour, because a reader may not be able to use it.
+        lead += (f"The band between break-even and the dashed line below it "
+                 f"is what the stop bounds: down to "
+                 f"<b>{_signed_money(s.stop_pnl)}</b>, the most this "
+                 + ("could have lost while the stop rested at the broker. "
+                    if now.final else
+                    "can lose while the stop rests at the broker. "))
+    if s.gaps:
+        # ONLY SAID WHEN THERE IS SOMETHING TO SAY IT ABOUT. Section 18
+        # paid three times for a sentence shown to a reader it did not
+        # apply to; a single-session position has no closures and must
+        # not be told about shading it cannot see.
+        lead += (f"The {len(s.gaps)} greyed column"
+                 + ("s are" if len(s.gaps) > 1 else " is")
+                 + " when the market was shut, which is why the line "
+                   "breaks there rather than running across. ")
     # WHICH SOURCE DREW IT. Section 24's lesson, applied to a second
     # chart: "Alpaca said" and "a file on disk said" are not the same
     # claim and the page has to be able to say which.
@@ -7882,18 +8121,21 @@ def _pnl_block(st, p: str, index: int, series=None) -> str:
     if st.status == "open" and not now.live:
         lead += ("<b>Not live:</b> " + esc(s.quote_error or "no quote was "
                  "available") + ". ")
-    lead += ("Unrealised means nothing is banked until it closes, and this "
-             "line carries no spread or fees.")
+    if not now.final:
+        lead += ("Unrealised means nothing is banked until it closes, and "
+                 "this line carries no spread or fees.")
     return (f'<p class="trade-sum">{lead}</p>' + chart
             # prov() ESCAPES, so an entity written here reaches the page
             # as a literal "&mdash;". Fourth instance of that trap in
             # this file's history (section 20); the caption is plain
             # text with a plain dash, so neither helper can get it wrong.
-            + prov("Time across, money up. Above the break-even line is "
-                   "profit and below it is loss - that, and the figure on "
-                   "the dot, is how the sign is carried, never colour. "
-                   "Each rule in the lane is something that happened; "
-                   "hover it for what."))
+            + prov("Time across the bottom, money up the side. Above the "
+                   "break-even line is profit and below it is loss - that, "
+                   "and the figure on the dot, is how the sign is carried, "
+                   "never colour. The line breaks where no prices exist, "
+                   "because drawing across a closure would read as "
+                   "movement that never happened. Each rule in the lane is "
+                   "something that happened; hover it for what."))
 
 
 def _clock(at) -> str:

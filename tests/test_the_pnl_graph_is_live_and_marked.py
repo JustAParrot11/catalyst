@@ -28,6 +28,7 @@ from decimal import Decimal
 import pytest
 
 from catalyst.dashboard import panels, pnl
+from catalyst.dashboard.queries import TradeStory
 
 # Anchored to a REAL hold length measured from now, never to a calendar
 # date (house rule 6): the code under test compares against a clock.
@@ -53,24 +54,26 @@ def series(**over):
     return pnl.build(**kw)
 
 
-class Story:
-    """The fields `_pnl_chart` reads, and nothing else."""
+def Story(**over):
+    """A REAL `TradeStory`, not a stub of one.
 
-    ticker = "RLMD"
-    entry_price = FILL
-    qty = QTY
-    stop_price = STOP
-    status = "open"
-    direction = "long"
-    opened_at = OPEN.isoformat()
-    closed_at = ""
-    exit_reason = ""
-    reviews = ()
-    sources = ()
-
-    def __init__(self, **over):
-        for k, v in over.items():
-            setattr(self, k, v)
+    The stub this replaced listed the fields `_pnl_chart` happened to
+    read, and went out of date the moment the chart started reading
+    `exit_price` and `realized_pnl_cents` - raising `AttributeError`
+    against fields production has always carried. That is this project's
+    fixture-drift defect (sections 14, 23, 24) in its harmless
+    direction, and the fix that ends it is to stop stubbing: every field
+    on `TradeStory` has a default, so the production dataclass IS the
+    fixture and a field added later cannot be missing here.
+    """
+    st = TradeStory(ticker="RLMD", entry_price=FILL, qty=QTY,
+                    stop_price=STOP, status="open", direction="long",
+                    opened_at=OPEN.isoformat())
+    for k, v in over.items():
+        if not hasattr(st, k):     # a typo must fail, never be absorbed
+            raise AttributeError(f"TradeStory has no field {k!r}")
+        setattr(st, k, v)
+    return st
 
 
 class TestTheMoneyArithmetic:
@@ -82,10 +85,37 @@ class TestTheMoneyArithmetic:
             "the floor is not the real trade's own risk figure")
 
     def test_pnl_is_price_minus_fill_times_quantity(self):
+        """RE-PINNED: this read `points[0]`, which is now the PURCHASE.
+
+        The arithmetic it exists to check is unchanged; the index it was
+        pinned to moved when the entry became a point of its own. Pinned
+        to the bar by its price instead, so it cannot break again on a
+        change that adds or reorders points without altering any of
+        them.
+        """
+        at = OPEN + timedelta(hours=1)
+        s = series(bars=[{"t": at.isoformat(), "c": 5.0}])
+        drawn = [p for p in s.points if p.price == pytest.approx(5.0)]
+        assert len(drawn) == 1, [
+            (p.at.isoformat(), p.price) for p in s.points]
+        assert drawn[0].pnl == pytest.approx(
+            (5.0 - float(FILL)) * float(QTY))
+
+    def test_the_purchase_ITSELF_is_a_point_worth_exactly_nothing(self):
+        """At the instant it was bought the position had made and lost
+        nothing, so the line departs from break-even rather than
+        starting partway up at an unexplained height.
+
+        This is also what stops the "Bought" mark being dropped for
+        sitting before the first bar - the same silent omission the exit
+        had at the other end.
+        """
         s = series(bars=[{"t": (OPEN + timedelta(hours=1)).isoformat(),
                           "c": 5.0}])
-        assert s.points[0].pnl == pytest.approx(
-            (5.0 - float(FILL)) * float(QTY))
+        assert s.points[0].at == OPEN
+        assert s.points[0].pnl == 0.0
+        assert s.points[0].price == pytest.approx(float(FILL))
+        assert s.points[0].live is False and s.points[0].final is False
 
     def test_break_even_is_always_inside_the_drawn_range(self):
         """A chart that crops zero cannot show whether it is winning."""

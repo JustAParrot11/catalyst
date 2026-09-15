@@ -96,6 +96,11 @@ class Point:
     #: closed bar. The chart labels it and dates it; a reader must be
     #: able to tell a settled bar from a quote read seconds ago.
     live: bool = False
+    #: True only for the SALE of a closed position. `live` and `final`
+    #: are different claims about the last point and the caption has to
+    #: tell them apart: one is a quote that will move again, the other is
+    #: money already banked. A point is never both.
+    final: bool = False
 
 
 @dataclass(frozen=True)
@@ -133,10 +138,68 @@ class Series:
     #: has no live price BY DESIGN; an open one that cannot be quoted is
     #: a fault, and the caption must be able to tell them apart.
     quote_error: str = ""
+    #: True when the final point is the BROKER'S OWN realised figure
+    #: rather than this module's multiplication. Named because the two
+    #: differ by fees and slippage, and a caption that says "banked" must
+    #: only say it about the first.
+    realised_is_broker: bool = False
 
     @property
     def last(self):
         return self.points[-1] if self.points else None
+
+    @property
+    def segments(self) -> list:
+        """The line broken wherever the market was shut.
+
+        MEASURED 2026-09-15, on a three-day hold at 30-minute bars:
+        **67% of the chart's width was a straight line drawn across
+        hours when nothing traded.** Alpaca returns session bars only, so
+        an overnight gap is 17.5 hours of horizontal distance with no
+        prices in it - and a single polyline renders that as a long clean
+        diagonal between two jagged runs. That is what the owner was
+        reading as price movement, and it was the loudest feature of the
+        picture.
+
+        THE BREAK RULE IS ONE SESSION, and `SESSION_MINUTES` is the
+        number already in this module rather than a new one to drift
+        (sections 18 and 30 both cost a second constant meaning the same
+        thing). A gap longer than the market can be open in one day
+        cannot be anything but a closure, so the caption's claim - the
+        line breaks where the market was shut - is exactly the rule. A
+        shorter hole inside a session stays connected, because at that
+        scale interpolating is not a lie worth a broken line.
+
+        A DAILY SERIES IS NEVER BROKEN: one point per trading day is what
+        a daily series IS, so a weekend is not a gap in it.
+        """
+        if len(self.points) < 2:
+            return [list(self.points)]
+        if str(self.timeframe or "") == "1Day":
+            return [list(self.points)]
+        limit = timedelta(minutes=SESSION_MINUTES)
+        runs, run = [], [self.points[0]]
+        for prev, pt in zip(self.points, self.points[1:]):
+            if pt.at - prev.at > limit:
+                runs.append(run)
+                run = []
+            run.append(pt)
+        runs.append(run)
+        return runs
+
+    @property
+    def gaps(self) -> list:
+        """(from, to) for every closure the line breaks across.
+
+        Breaking the line stops the chart claiming movement that never
+        happened, and on a three-day hold that leaves two thirds of the
+        width blank. **Blank is its own confusion** - it reads as missing
+        data or a broken chart rather than as a closed market - so the
+        spans are shaded, and this is the same segmentation rule read a
+        second way rather than a second rule that could disagree with it.
+        """
+        runs = [r for r in self.segments if r]
+        return [(a[-1].at, b[0].at) for a, b in zip(runs, runs[1:])]
 
     @property
     def lo(self) -> float:
@@ -187,7 +250,8 @@ def _as_float(value) -> float | None:
 
 
 def build(*, fill, qty, stop=None, bars=(), live_price=None, live_at=None,
-          opened=None, marks=(), timeframe="", side="long") -> Series:
+          opened=None, marks=(), timeframe="", side="long",
+          exit_price=None, exit_at=None, realised_pnl=None) -> Series:
     """The P&L series for one position.
 
     `bars` are Alpaca bar dicts (`t` and `c`) or anything with `.day`
@@ -234,12 +298,61 @@ def build(*, fill, qty, stop=None, bars=(), live_price=None, live_at=None,
         out.points.append(Point(at=at, price=price, pnl=(price - f) * q))
     out.points.sort(key=lambda p: p.at)
 
+    # THE PURCHASE IS A POINT, AND ITS VALUE IS ZERO BY DEFINITION.
+    # `(fill - fill) x qty` is nothing modelled or assumed - at the
+    # instant it was bought the position had made and lost nothing. Three
+    # things follow, and the third is a defect fixed by construction:
+    #   - the line visibly DEPARTS from break-even instead of starting
+    #     somewhere unexplained partway up;
+    #   - the first bar of the entry day no longer decides where the
+    #     chart begins;
+    #   - the "Bought" mark can no longer be dropped for sitting before
+    #     the first bar - the same silent omission the exit had at the
+    #     other end, which is recorded below.
+    if open_at is not None and out.points and out.points[0].at > open_at:
+        out.points.insert(0, Point(at=open_at, price=f, pnl=0.0))
+
     lp, la = _as_float(live_price), _as_dt(live_at)
     if lp is not None and lp > 0 and la is not None:
         # THE LIVE POINT REPLACES A BAR AT THE SAME MINUTE rather than
         # sitting beside it, so the line cannot double back on itself.
         out.points = [p for p in out.points if p.at < la]
         out.points.append(Point(at=la, price=lp, pnl=(lp - f) * q, live=True))
+
+    # THE SALE IS A POINT ON THE LINE, NOT A TICK BESIDE IT.
+    #
+    # MEASURED 2026-09-15 on the owner's own closed card: the line ended
+    # at the last BAR and the dot was labelled with that bar's
+    # mark-to-market - `+$20.10 unrealised` against `+$11.95` actually
+    # banked, **$8.15 wrong**, on a trade that had settled. `exit_price`
+    # and `realized_pnl_cents` were both on `TradeStory` and neither
+    # reached this module. Eleventh instance of this project's most
+    # recurring defect, and the first to put a WRONG MONEY FIGURE on a
+    # page rather than merely an unhelpful one.
+    #
+    # It also fixes a second defect by construction. The mark window
+    # below is `first <= at <= last`, so an exit that settled after the
+    # final bar - the ordinary case, since a bar is stamped at the START
+    # of its interval - was SILENTLY DROPPED. Section 10b calls the exit
+    # the single most important mark on a closed trade, and the chart
+    # could omit it without saying so. Making the sale the last point
+    # moves `last`, so the mark can no longer fall outside the window.
+    xp, xa = _as_float(exit_price), _as_dt(exit_at)
+    if xp is not None and xp > 0 and xa is not None:
+        out.points = [p for p in out.points if p.at < xa]
+        # ONE NUMBER DRIVES BOTH THE DOT'S HEIGHT AND ITS LABEL. The
+        # broker's realised figure and this module's multiplication
+        # differ by fees and slippage, so picking one for the position
+        # and the other for the caption would put a dot at one value
+        # labelled another - the two-numbers-one-meaning trap sections 18
+        # and 30 have already paid for twice. The broker's figure wins
+        # when it exists, because it is what the account actually holds.
+        booked = _as_float(realised_pnl)
+        if booked is not None:
+            out.realised_is_broker = True
+        out.points.append(Point(at=xa, price=xp, final=True,
+                                pnl=booked if booked is not None
+                                else (xp - f) * q))
 
     if not out.points:
         out.empty_reason = (

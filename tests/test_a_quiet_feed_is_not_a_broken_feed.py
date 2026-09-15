@@ -241,6 +241,35 @@ class TestTheSchedulerRecordsTheAnswer:
 
         monkeypatch.setattr(cycle_mod, "run_cycle", _call_the_feed)
 
+        # THE TWO ENRICHING FEEDS ARE STUBBED, AND NOT FOR TIDINESS.
+        #
+        # MEASURED 2026-09-15: `test_a_pass_that_found_nothing_still_
+        # records_that_it_answered` took **59.74s against this suite's
+        # 60s per-test timeout** - 0.26s of margin - and intermittently
+        # failed with `Timeout (>60.0s)`. It was not asserting wrongly;
+        # it was running out of time.
+        #
+        # WHY only that one: it stubs `fetch_form4` to SUCCEED, so the
+        # pass continues into full-text search (17 queries) and the news
+        # feed, each retrying four times with exponential backoff against
+        # the suite's network block. Its sibling takes 0.06s because
+        # `RateLimitBlocked` skips every SEC feed for the pass.
+        #
+        # This class asserts only about `edgar_form4` - both tests filter
+        # `_reads` to it - so the other two feeds were 59 seconds spent
+        # on nothing, and the cost was a test that fails on any machine
+        # slower than this one. That matters beyond the suite: upgrade.sh
+        # runs these tests on the owner's VPS and rolls the upgrade back
+        # on ANY failure, which is section 25 happening again from a new
+        # cause.
+        from catalyst.data.sources import alpaca_news, edgar_fts
+
+        empty = type("E", (), {"events": [], "errors": [], "error": ""})
+        monkeypatch.setattr(edgar_fts, "fetch_events",
+                            lambda *a, **kw: empty())
+        monkeypatch.setattr(alpaca_news, "fetch_events",
+                            lambda *a, **kw: empty())
+
         db_file = str(tmp_path / "cycle.db")
         init_db(db_file).close()
         return db_file, called, monkeypatch
