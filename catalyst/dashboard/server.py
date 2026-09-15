@@ -541,7 +541,18 @@ DIAGNOSTIC_SCOPES = {
         # it was told, which is exactly the half you need to tell a wrong
         # thesis from an unlucky one. limit_applications is the same
         # story for the risk engine: which rule bound, and by how much.
-        "tables": ("candidates", "research_calls", "research_call_turns",
+        #
+        # candidate_origin IS WHICH ARM SPENT THE MONEY, and this scope's
+        # own `why` promises the funnel. WHAT-WE-TRIED section 3 says the
+        # funnel means the drop reason per stage AND PER ARM, because the
+        # per-arm split is what made 89 wasted calls visible - and this
+        # is the only table carrying the arm. Measured on the owner's
+        # 09-14 logic bundle: answering "which arm took the paid calls"
+        # meant inferring the arm from the candidate id's prefix, which
+        # works only by luck of the id format and cannot see a stale
+        # stamp at all.
+        "tables": ("candidates", "candidate_origin", "research_calls",
+                   "research_call_turns",
                    "research_views", "risk_decisions", "limit_applications",
                    "refusals", "adaptive_param_log", "position_reviews"),
         "sections": ("funnel",),
