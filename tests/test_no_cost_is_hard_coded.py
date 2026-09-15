@@ -457,6 +457,35 @@ class TestTheSeedsAreLabelledAsSeeds:
         assert n_reqs == 3 * n_calls, (n_reqs, n_calls)
         assert per_call == per_req * 3, (per_call, per_req)
 
+    def test_the_hunt_RATE_is_derived_from_the_whole_call(self, db):
+        """BEHAVIOURAL, because the grep could not see the defect.
+
+        Sabotaging `hunts_per_day` back to the per-request reading came
+        back GREEN: `observed_call_cents` also appears on the IMPORT line
+        inside that same function, so the substring survived the edit.
+        Section 22's corollary, word for word - a substring that also
+        occurs elsewhere in the same function is not a call-site
+        assertion - so this asserts the RATE instead.
+
+        Ten hunts of three requests each at 15c: 45c a hunt, and at the
+        owner's $100 cap the budget affords 3 (333c // 90c). Read per
+        request it would afford 11, which is the defect that let 17 hunts
+        run on a day that hit the ceiling.
+        """
+        from catalyst.discovery.hunt import hunts_per_day
+
+        for call in range(10):
+            for _turn in range(3):
+                db.execute(
+                    "INSERT INTO cost_events (id,raw_usage_json,model,kind,"
+                    "component,priced_cents,priced_at,api_call_id) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (str(uuid.uuid4()), "{}", "m", "scheduled", "hunt",
+                     "15.0", (NOW - timedelta(days=1)).isoformat(),
+                     f"hunt-{call}"))
+        db.commit()
+        assert hunts_per_day(Decimal("10000"), db) == 3
+
     def test_an_UNSTAMPED_row_is_its_own_call(self, db):
         """THE SILENT TRAP IN THE FIX. Grouping by `api_call_id` would
         collapse every row with no id into ONE group, take a hundred

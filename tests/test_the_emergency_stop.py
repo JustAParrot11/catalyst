@@ -287,8 +287,19 @@ class TestTheSwitchItself:
         assert emergency_stop.current(conn).engaged is False
 
     def test_the_newest_row_wins(self, conn):
+        """A VACUOUS ASSERTION UNTIL SABOTAGE CAUGHT IT. This read
+        engage -> release -> engage and asserted engaged, which is ALSO
+        what oldest-first returns for that sequence - so reversing the
+        ORDER BY changed nothing and the sabotage came back green.
+
+        The sequence that can tell them apart ends on a RELEASE, so a
+        reversed order returns the opening engage and the assertion
+        fails. Both directions are checked, because a switch that gets
+        the state backwards is the worst outcome available here.
+        """
         emergency_stop.engage(conn)
         emergency_stop.release(conn)
+        assert emergency_stop.is_engaged(conn) is False
         emergency_stop.engage(conn)
         assert emergency_stop.is_engaged(conn) is True
 
