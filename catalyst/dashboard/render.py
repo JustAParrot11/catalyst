@@ -387,6 +387,38 @@ h3 { font-size: 11px; margin: 14px 0 5px 0; text-transform: uppercase;
 .pos-tick-exit { stroke: var(--series-2); stroke-width: 2; }
 .pos-today { stroke: var(--series-2); stroke-width: 1.5; stroke-dasharray: 3 2; }
 .pos-label { fill: var(--muted); font-size: 10px; }
+/* THE P&L CHART, owner-asked 2026-09-14: "some live or semi live
+   profit/loss graph info ... almost live wall street like for current
+   trades, and a profit loss graph with lines detailing events so we can
+   see maybe when something happened".
+   Money up, time across, and THE BREAK-EVEN LINE IS THE REFERENCE -
+   above it is profit and below it is loss, which is how the sign is
+   carried. Deliberately NOT green-against-red, for the reason the
+   .pos-exit comment above states at length: that pair measures deltaE
+   4.1 under deuteranopia on the light surface. The line does not change
+   colour with the outcome, and a test holds that. */
+.pnl-chart { width: 100%; max-width: 660px; height: auto; margin: 10px 0 2px; }
+.pnl-zero { stroke: var(--ink-2); stroke-width: 1.5; }
+.pnl-floor { stroke: var(--critical); stroke-width: 1.5;
+  stroke-dasharray: 4 3; }
+/* The band between break-even and the stop: what the stop is there to
+   bound. Same token and opacity as .pos-risk, so the two charts read as
+   one system rather than two. */
+.pnl-risk { fill: var(--critical); opacity: .08; }
+.pnl-line { fill: none; stroke: var(--series-1); stroke-width: 2;
+  stroke-linejoin: round; }
+/* The live reading, ringed so it stays legible wherever it lands. It is
+   the only point on the chart that is not a settled bar, which is why it
+   is drawn differently and labelled with its own clock time. */
+.pnl-live { fill: var(--series-1); stroke: var(--surface); stroke-width: 2; }
+/* Events get their own lane under the plot - the lesson from the review
+   "picket fence" of 2026-09-11, where full-height rules striped the
+   price line. A short stem into the plot marks the moment; the label
+   sits in the lane. */
+.pnl-event { stroke: var(--muted); stroke-width: 1.5; }
+.pnl-event-exit { stroke: var(--series-2); stroke-width: 2; }
+.pnl-event-label { fill: var(--muted); font-size: 9.5px; }
+.pnl-val { fill: var(--ink); font-size: 10.5px; font-weight: 600; }
 /* Direct value labels on the plot - a price beside the mark it belongs
    to, so no value needs a tooltip to be read. */
 .pos-val { fill: var(--ink); font-size: 10.5px; }

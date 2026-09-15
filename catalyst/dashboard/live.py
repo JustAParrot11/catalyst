@@ -219,3 +219,60 @@ def clear_cache() -> None:
     """For tests, and for a caller that has just changed credentials."""
     with _lock:
         _cache.clear()
+
+
+#: Intraday bars are fetched per position per page load, so the result
+#: is held briefly rather than re-asked for every card on the page.
+#: Short on purpose: this feature exists to be SEMI-LIVE, and a long
+#: cache would quietly turn it into a stale picture that looks fresh.
+BARS_CACHE_S = 60
+
+_bars_cache: dict = {}
+
+
+def bars_for(ticker, start, end, timeframe, broker=None, now=None,
+             use_cache=True):
+    """Bars for one ticker, or (None, reason). Never raises.
+
+    OWNER-ASKED 2026-09-14: a P&L line for an OPEN position. Nothing in
+    this project had ever fetched an intraday bar - `grep` for `1Min`
+    returned only the drawdown watermark - so a position opened this
+    morning had no series at all and the card fell back to a price
+    ladder.
+
+    A MARKET-DATA GET, and that is the whole risk surface. It spends no
+    part of the API budget the governor bounds (that budget is Anthropic
+    tokens; this is Alpaca market data, already in the subscription),
+    and it writes nothing: unlike the daily history it does NOT touch
+    the bar cache, so it cannot become a second writer and corrupt the
+    history sizing measures a stop from - the failure section 18 found
+    in `BarCache`'s shared metadata.
+    """
+    now = now or datetime.now(timezone.utc)
+    key = (str(ticker or "").upper(), str(start), str(end), str(timeframe))
+    if use_cache:
+        with _lock:
+            hit = _bars_cache.get(key)
+        if hit and (now - hit[0]).total_seconds() < BARS_CACHE_S:
+            return hit[1], hit[2]
+
+    if broker is None:
+        broker, why = _broker()
+        if broker is None:
+            return None, why
+    try:
+        bars = broker.get_bars(key[0], start, end, timeframe=timeframe)
+    except Exception as exc:      # noqa: BLE001 - reported, never raised
+        # HOUSE RULE 3: the raw reason travels with the absence, so
+        # "the market has no bars" and "the call is broken" cannot look
+        # the same on the page.
+        return None, (f"intraday prices could not be fetched: "
+                      f"{type(exc).__name__}: {str(exc)[:160]}")
+    if not isinstance(bars, list):
+        return None, f"the broker returned {type(bars).__name__}, not a list"
+    out = [b for b in bars if isinstance(b, dict)]
+    reason = "" if out else "the broker returned no bars for this window"
+    if use_cache:
+        with _lock:
+            _bars_cache[key] = (now, out, reason)
+    return out, reason
