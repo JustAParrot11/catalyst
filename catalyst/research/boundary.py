@@ -346,24 +346,56 @@ Transport = Callable[[dict], dict]
 CLIENT_TOOL_USE = "tool_use"
 
 
-def _answer_tool_calls(echo: dict | None, why: str | None) -> list | str:
+def client_tool_use_ids(message_or_content) -> list:
+    """The CLIENT tool-call ids in one message, which are the ones this
+    code must answer.
+
+    ONE DEFINITION, because there were two and they could not both be
+    right. `invalid_payload_reason` inlined this list comprehension to
+    decide what needs answering, and `answer_tool_calls` inlined its own
+    copy to produce the answers - so the guard and the answerer had
+    separate ideas of what a client tool call is. That is the
+    two-numbers-one-meaning trap (WHAT-WE-TRIED sections 18, 30, 33) on
+    a rule rather than a number, and it is the shape that let three
+    separate call sites disagree with the guard at once.
+
+    `server_tool_use` is excluded deliberately: Anthropic runs web
+    search inside the same turn and answers it there, so demanding a
+    `tool_result` for one would refuse a request the API accepts.
+    """
+    content = (message_or_content.get("content")
+               if isinstance(message_or_content, dict)
+               else message_or_content)
+    if not isinstance(content, list):
+        return []
+    return [b.get("id") for b in content
+            if isinstance(b, dict) and b.get("type") == CLIENT_TOOL_USE
+            and b.get("id")]
+
+
+def answer_tool_calls(echo: dict | None, why: str | None, *,
+                      ask: str) -> list | str:
     """The user turn that follows an echoed assistant message.
 
     Plain text when there is nothing to answer; otherwise one
-    `tool_result` per `tool_use` in the echo, because the Messages API
-    requires the match and rejects the whole request without it.
+    `tool_result` per client `tool_use` in the echo, because the
+    Messages API requires the match and rejects the whole request
+    without it.
+
+    `ask` IS THE CALLER'S, not this function's. It used to hardcode
+    "Submit your conclusion now via submit_research_view" plus "Required
+    fields are missing or invalid" - which is the wrong sentence for the
+    repair turn, wrong for a truncated submission, and names the wrong
+    tool entirely for a position review. Every caller needs the same
+    SHAPE and a different sentence, so the shape lives here and the
+    sentence travels in.
     """
-    ask = "Submit your conclusion now via submit_research_view."
-    blocks = (echo or {}).get("content")
-    ids = [b.get("id") for b in blocks
-           if isinstance(b, dict) and b.get("type") == CLIENT_TOOL_USE
-           and b.get("id")] if isinstance(blocks, list) else []
+    ids = client_tool_use_ids(echo or {})
+    detail = (f"That submission was rejected: {why}. " if why else "")
     if not ids:
-        return ask
-    detail = (f"That submission was rejected: {why}. " if why else
-              "That submission could not be read. ")
+        return (detail + ask) if detail else ask
     return [{"type": "tool_result", "tool_use_id": tid, "is_error": True,
-             "content": detail + "Required fields are missing or invalid. "
+             "content": (detail or "That submission could not be read. ")
                         + ask}
             for tid in ids]
 
@@ -508,8 +540,7 @@ def invalid_payload_reason(payload: dict,
         content = message.get("content")
         if not isinstance(content, list):
             continue
-        pending = [b.get("id") for b in content if isinstance(b, dict)
-                   and b.get("type") == CLIENT_TOOL_USE and b.get("id")]
+        pending = client_tool_use_ids(content)
         if not pending:
             continue
         following = (messages[i + 1].get("content")
@@ -751,6 +782,20 @@ def investigate(
         echo = _assistant_echo(turn)
         if echo is None:
             break            # nothing to continue from; go to extraction
+        # A PAUSED TURN THAT ALSO SUBMITTED CANNOT BE CONTINUED BARE.
+        # A `pause_turn` is sent back with NO user message after it -
+        # that is what continuing means - but if the same turn also
+        # carries a CLIENT tool call, the API requires a `tool_result`
+        # immediately after, and those two demands cannot both be met.
+        #
+        # So the loop stops instead, which costs nothing: the extraction
+        # path below reads the submission out of this very turn, accepts
+        # it if the view builds, and otherwise answers the tool call
+        # properly on its way to the forced turn. Continuing would have
+        # been refused locally by the guard - a paid turn thrown away -
+        # or, before the guard existed, a 400.
+        if client_tool_use_ids(echo):
+            break
         messages.append(echo)
         turn = run_turn({
             "model": model, "max_tokens": MAX_EXPLORATION_TOKENS,
@@ -798,8 +843,9 @@ def investigate(
     #
     # The result also carries WHY the view was rejected, which is more
     # use to the model than "submit your conclusion" and costs the same.
-    messages.append({"role": "user",
-                     "content": _answer_tool_calls(echo, last_view_error)})
+    messages.append({"role": "user", "content": answer_tool_calls(
+        echo, last_view_error,
+        ask="Submit your conclusion now via submit_research_view.")})
 
     # ---- extraction: tool_choice FORCED. The model cannot answer in
     # prose; the only way out is the schema. Two live-API facts learned
@@ -848,10 +894,30 @@ def investigate(
             echo = _assistant_echo(turn)
             if echo is not None:
                 messages.append(echo)
-            messages.append({"role": "user", "content": (
-                "Your submission was not accepted: "
-                f"{last_error}. Submit again via submit_research_view "
-                "with EVERY required field present and complete.")})
+            # THE REPAIR TURN MUST ANSWER THE TOOL CALL TOO, and this is
+            # the defect the owner reported on 2026-09-15:
+            #
+            #   invalid_request_not_sent: message 3 calls tool_use
+            #   toolu_015PG6... and the next message carries no matching
+            #   tool_result - the API rejects this outright
+            #
+            # The extraction turn runs under FORCED tool_choice, so its
+            # reply almost always contains a `tool_use` - and this branch
+            # appended PLAIN TEXT after echoing it. Two of the three ways
+            # to reach here produce that shape: an `invalid_view` (the
+            # tool call parsed, the view did not build) and a truncated
+            # submission (`max_tokens`), both of which leave a real
+            # `tool_use` block in the echo.
+            #
+            # Fifty lines above, the exploration echo already answers its
+            # tool calls, with a comment explaining exactly why. THIS
+            # BRANCH WAS WRITTEN WITHOUT THAT FIX - the same defect, one
+            # branch away, which is this project's most repeated shape.
+            # There is one helper now and all three sites call it.
+            messages.append({"role": "user", "content": answer_tool_calls(
+                echo, last_error,
+                ask="Submit again via submit_research_view with EVERY "
+                    "required field present and complete.")})
     return finish(None, last_error or "extraction_failed")
 
 
