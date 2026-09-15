@@ -2194,7 +2194,16 @@ def _review_open_positions(conn, broker: Broker, transport,
             snapshot = build_market_snapshot(broker, position["ticker"], now)
             entry = position.get("entry_price")
             last = snapshot.last_close if snapshot is not None else None
+            # THE MARKET STATE REACHES THE REVIEW, from the SAME helper
+            # the research prompt uses rather than a second derivation
+            # (section 22: one source of truth, and `None` means nobody
+            # looked rather than "shut"). It decides how the review reads
+            # an ABSENCE of new filings: EDGAR publishes nothing while
+            # the market is closed, so "nothing filed" on a Sunday is an
+            # absence of opportunity, not of news.
+            from catalyst.research.prompts import market_is_live
             market = {"entry_price": entry, "last_price": last,
+                      "market_is_live": market_is_live(snapshot),
                       "move_pct": (
                           f"{((last - entry) / entry * 100):.1f}"
                           if entry and last and entry > 0 else "?")}
