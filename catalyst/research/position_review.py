@@ -333,8 +333,80 @@ def _days_between(a, b) -> int | None:
     return (end - start).days
 
 
+def _evidence_lines(ev, ticker: str, market_is_live) -> list:
+    """The evidence section of the review prompt, or a stated absence.
+
+    ABSENCE IS NOT EVIDENCE, and this is where that matters most. EDGAR
+    publishes nothing at a weekend or a holiday, so "no new filings"
+    means two completely different things depending on whether the
+    market has been open - and a review told "nothing has been filed"
+    on a Sunday would read it as the company being quiet. The market
+    state is passed in rather than computed from `weekday()` (house
+    rule 7: a holiday is the case nobody thinks of).
+
+    `market_is_live` is THREE-VALUED on purpose: True, False, or None
+    for "nobody looked". None must not read as closed, the same
+    asymmetry section 22 needed.
+    """
+    out = ["", "WHAT HAS BEEN FILED OR REPORTED SINCE THIS WAS OPENED"]
+    if ev.truncated:
+        # FIRST, because it changes how everything below reads - and it
+        # matters MOST when nothing was found, since that is the reading
+        # that would be wrong.
+        out.append("INCOMPLETE: this check reached its row limit, so what "
+                   "follows is the most recent part of the record and not "
+                   "all of it. Treat an absence below as unknown.")
+    if not ev.anything:
+        if market_is_live is False:
+            out.append(
+                f"Nothing new naming {ticker} is on file. THE MARKET IS "
+                "SHUT, and EDGAR publishes no filings while it is - so "
+                "this is an absence of OPPORTUNITY to file, not evidence "
+                "that nothing is happening.")
+        elif market_is_live is None:
+            out.append(
+                f"Nothing new naming {ticker} is on file, and whether the "
+                "market has been open was not checked - so this absence "
+                "carries no information either way.")
+        else:
+            out.append(
+                f"Nothing new naming {ticker} has been filed or reported "
+                "since. The feeds have been reading normally, so this is "
+                "a real quiet spell rather than a gap in the data.")
+        return out
+    # SALES FIRST. On a thesis built from insiders buying, an insider
+    # selling is the most direct contradiction available, and burying it
+    # under a list of option exercises would be a presentation choice
+    # with money attached.
+    if ev.sales:
+        out.append("Insiders DISPOSED of stock:")
+        out += [f"  - {line}" for line in ev.sales]
+    if ev.purchases:
+        out.append("Insiders bought more on the open market:")
+        out += [f"  - {line}" for line in ev.purchases]
+    if ev.other_insider:
+        out.append("Other insider transactions (option exercises, grants "
+                   "and similar are compensation mechanics more often than "
+                   "a view, so weigh them accordingly):")
+        out += [f"  - {line}" for line in ev.other_insider]
+    if ev.filings:
+        out.append("Filings naming the company:")
+        out += [f"  - {line}" for line in ev.filings]
+    if ev.news:
+        out.append("Headlines naming the company:")
+        out += [f"  - {line}" for line in ev.news]
+    if ev.omitted:
+        out.append(f"({ev.omitted} further item(s) exist and are not listed "
+                   "here - there is more than this section can carry.)")
+    out.append("This is what the feeds hold; it is not a verdict, and "
+               "none of it is checked against the invalidation condition "
+               "for you.")
+    return out
+
+
 def render_prompt(position: dict, view: dict, market: dict,
-                  now: datetime | None = None) -> str:
+                  now: datetime | None = None, evidence=None,
+                  market_is_live=None) -> str:
     """What the model sees. Facts only; it is never told the P&L in a
     way that invites loss aversion, but it IS told the price move,
     because a thesis that predicted a move which did not happen is
@@ -381,6 +453,16 @@ def render_prompt(position: dict, view: dict, market: dict,
         f"entry {market.get('entry_price', '?')}, "
         f"now {market.get('last_price', '?')} "
         f"({market.get('move_pct', '?')}%)",
+    ]
+    # THE EVIDENCE, BETWEEN THE INVALIDATION AND THE QUESTION. It is
+    # placed here deliberately: the model has just read what would prove
+    # the thesis wrong, and reads what has since happened before being
+    # asked whether it did. A caller that passes nothing gets no section
+    # at all rather than an empty heading.
+    if evidence is not None:
+        lines += _evidence_lines(evidence, str(position.get("ticker", "?")),
+                                 market_is_live)
+    lines += [
         "",
         "ANSWER",
         "1. Has that invalidation condition actually occurred? Answer on "
@@ -500,6 +582,223 @@ def news_since(conn, ticker: str, since: datetime) -> tuple[int, str]:
         if not newest:
             newest = str(parsed.get("headline") or "")[:120]
     return hits, newest
+
+
+#: How many items of each kind reach the prompt.
+#:
+#: A BOUND, not a preference. The review prompt is ~600 tokens; a busy
+#: name can file a dozen Form 4s in a fortnight, and an unbounded list
+#: would push the thesis out of the model's attention while multiplying
+#: the cost of a call that exists to be cheap. Six per kind keeps the
+#: new section comparable in size to the thesis it is being checked
+#: against, and anything dropped is COUNTED rather than silently lost.
+MAX_EVIDENCE_PER_KIND = 6
+
+#: Longest any single upstream field may be in a rendered line.
+#: Every value in a Form 4 payload comes from a filer, so a name, a role
+#: or a security title is data this project does not control.
+MAX_FIELD_CHARS = 80
+
+#: Injectable as `evidence_since(..., scan_rows=N)` for ONE reason:
+#: without it the truncation branch needs 20,000 seeded rows to reach,
+#: so it would ship untested - and it is the branch that decides
+#: whether an INCOMPLETE answer reads as a complete one.
+#: How many `raw_events` rows one evidence check reads.
+#:
+#: THE FEED SWEEPS ~562 FORM 4s A DAY, so a position held three weeks
+#: sits behind more rows than it is worth scanning on every review. The
+#: order is `fetched_at DESC`, so a truncation drops the OLDEST - the
+#: right direction, because the newest filings are the ones a thesis has
+#: not already been judged against. And when it truncates it SAYS SO:
+#: an incomplete answer that reads as a complete one is exactly how a
+#: review would conclude "nothing has happened" while a disposal sat one
+#: row past the limit.
+EVIDENCE_SCAN_ROWS = 20000
+
+#: Transaction codes worth naming in words. Everything else is passed
+#: through AS THE CODE rather than guessed at - house rule 7 in the
+#: direction that matters here, because mislabelling a transaction is
+#: worse than printing a letter the model can ask about. `P` and `S` are
+#: the two that bear on an insider-cluster thesis: one is more of the
+#: same, the other contradicts it.
+TRANSACTION_WORDS = {"P": "open-market purchase", "S": "sale"}
+
+
+@dataclass(frozen=True)
+class Evidence:
+    """What has arrived about this company since a moment.
+
+    OWNER-ASKED 2026-09-14: *"what sort of extra checks will it do next,
+    its still not clear, will it check what the CEO does next or will it
+    see if a partner of them did for example"*.
+
+    THE ANSWER WAS "NEITHER", AND THAT WAS A REAL GAP. `render_prompt`
+    carried the thesis, the invalidation condition, the price move and
+    the dates - and no new evidence of any kind. So a review was asked
+    "has the invalidation occurred?" with nothing to check it against
+    except the price.
+
+    Worse, `news_since` was already being computed to decide WHEN to
+    review, and never shown TO the review: the trigger knew and the
+    prompt did not. Tenth instance of this project's recurring defect.
+
+    PURE DATABASE. No broker call, no model call, no filing fetch -
+    every row here is already stored by feeds that run anyway, so
+    asking costs nothing and cannot fail a cycle.
+    """
+
+    #: Insider transactions that DISPOSED of stock. First, and separate,
+    #: because a thesis built on insiders buying is contradicted by an
+    #: insider selling in a way it is not by anything else here.
+    sales: tuple = ()
+    #: Insider transactions that acquired stock.
+    purchases: tuple = ()
+    #: Other insider transactions - option exercises, grants, gifts.
+    #: Kept apart because they are mostly compensation mechanics rather
+    #: than a view, and lumping them in with a purchase would overstate
+    #: the signal.
+    other_insider: tuple = ()
+    filings: tuple = ()
+    news: tuple = ()
+    #: How many rows were found beyond what is shown, per kind.
+    omitted: int = 0
+    #: True when the scan hit its row limit, so this answer may be
+    #: INCOMPLETE. House rule 3 in the direction that matters: a review
+    #: must never read a truncated scan as "nothing happened".
+    truncated: bool = False
+
+    @property
+    def anything(self) -> bool:
+        return bool(self.sales or self.purchases or self.other_insider
+                    or self.filings or self.news)
+
+
+def _describe_transaction(owner_name: str, role: str, tx: dict) -> str:
+    """One insider transaction, in a sentence a person can read."""
+    code = str(tx.get("code") or "").strip().upper()
+    words = TRANSACTION_WORDS.get(code) or f"transaction code {code or '?'}"
+    shares = str(tx.get("shares") or "").strip()
+    value = str(tx.get("value_usd") or "").strip()
+    price = str(tx.get("price_per_share") or "").strip()
+    when = str(tx.get("transaction_date") or "").strip()
+    # BOUNDED, because every field here is UPSTREAM DATA. A filing with
+    # a 10KB owner name would otherwise multiply the cost of every
+    # review of that position for as long as it is held. Found by the
+    # adversarial read, not by a test.
+    bits = [(owner_name or "an insider")[:MAX_FIELD_CHARS]]
+    if role:
+        bits.append(f"({role[:MAX_FIELD_CHARS]})")
+    bits.append(words)
+    if shares:
+        bits.append(f"of {shares} shares")
+    if price:
+        bits.append(f"at ${price}")
+    try:
+        if value:
+            bits.append(f"= ${float(value):,.0f}")
+    except (TypeError, ValueError):
+        pass
+    if when:
+        bits.append(f"on {when}")
+    return " ".join(bits)
+
+
+def evidence_since(conn, ticker: str, since,
+                   scan_rows: int = EVIDENCE_SCAN_ROWS) -> Evidence:
+    """Filings, insider transactions and news naming this company since
+    `since`. Never raises: a database missing a table returns nothing
+    found, because a review that cannot read the feed must still run.
+
+    WHY A SALE IS SEPARATED FROM A PURCHASE. Every order this bot has
+    ever placed came from insiders BUYING. The Form 4 feed sweeps the
+    whole daily index - every filing, every transaction code - so a
+    later sale by the same officer is already on disk; only the cluster
+    adapter filters to code `P`. Presenting the two in one list would
+    bury the single most direct contradiction of the thesis in with its
+    confirmation.
+
+    NOTHING HERE TELLS THE MODEL WHAT TO CONCLUDE. It states what was
+    filed. The prompt already asks whether the invalidation condition
+    has occurred, and that question is the model's to answer.
+    """
+    want = str(ticker or "").strip().upper()
+    if not want:
+        return Evidence()
+    cutoff = since.isoformat() if hasattr(since, "isoformat") else str(since)
+    sales: list = []
+    purchases: list = []
+    other: list = []
+    filings: list = []
+    news: list = []
+    omitted = 0
+    try:
+        rows = conn.execute(
+            "SELECT source, payload_raw FROM raw_events "
+            "WHERE fetched_at > ? AND source IN "
+            "('edgar_form4','alpaca_news','edgar_fts','edgar_xbrl') "
+            "ORDER BY fetched_at DESC LIMIT ?",
+            (cutoff, int(scan_rows))).fetchall()
+    except sqlite3.Error:
+        return Evidence()
+
+    def _room(bucket: list) -> bool:
+        nonlocal omitted
+        if len(bucket) < MAX_EVIDENCE_PER_KIND:
+            return True
+        omitted += 1
+        return False
+
+    for row in rows:
+        source = str(row[0] or "")
+        try:
+            payload = json.loads(row[1]) if row[1] else {}
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("ticker") or "").strip().upper() != want:
+            continue
+        if source == "edgar_form4":
+            owners = payload.get("owners") or []
+            first = owners[0] if isinstance(owners, list) and owners else {}
+            name = str((first or {}).get("name") or "").strip()
+            role = str((first or {}).get("relationship")
+                       or (first or {}).get("officer_title") or "").strip()
+            for tx in (payload.get("transactions") or []):
+                if not isinstance(tx, dict):
+                    continue
+                # DIRECTION FROM `acquired_disposed`, not from the code.
+                # The code says what KIND of transaction it was; A/D says
+                # which way the stock went, and it is the field the
+                # cluster adapter itself trusts.
+                way = str(tx.get("acquired_disposed") or "").strip().upper()
+                line = _describe_transaction(name, role, tx)
+                code = str(tx.get("code") or "").strip().upper()
+                if way == "D":
+                    if _room(sales):
+                        sales.append(line)
+                elif way == "A" and code == "P":
+                    if _room(purchases):
+                        purchases.append(line)
+                elif _room(other):
+                    other.append(line)
+        elif source == "alpaca_news":
+            head = str(payload.get("headline") or "").strip()[:140]
+            if head and _room(news):
+                news.append(head)
+        elif source.startswith("edgar_"):
+            what = (str(payload.get("form_type") or "").strip()
+                    or str(payload.get("match") or "").strip()
+                    or "a filing")
+            when = str(payload.get("filed_date")
+                       or payload.get("filed") or "").strip()
+            line = f"{what}{(' filed ' + when) if when else ''}"
+            if _room(filings):
+                filings.append(line)
+    return Evidence(sales=tuple(sales), purchases=tuple(purchases),
+                    other_insider=tuple(other), filings=tuple(filings),
+                    news=tuple(news), omitted=omitted,
+                    truncated=len(rows) >= int(scan_rows))
 
 
 def requested_check_at(conn, position_id: str):
@@ -683,7 +982,21 @@ def review_position(conn, position: dict, view: dict, market: dict,
     model = model or DEFAULT_REVIEW_MODEL
     position_id = str(position.get("id") or "")
     ticker = str(position.get("ticker") or "")
-    prompt = render_prompt(position, view, market, now=now)
+    # GATHER THE EVIDENCE BEFORE SPENDING. Pure database (no broker
+    # call, no fetch), so it cannot fail the call and costs nothing -
+    # and it happens here rather than in `render_prompt` so the renderer
+    # stays pure and a test can pin it (house rule 6).
+    #
+    # `opened_at` is the right cutoff, not the last review: a review
+    # that saw a filing last week and held is a review that already
+    # weighed it, but the model has no memory across calls, so dropping
+    # it would hide a fact from the only reader who needs it.
+    evidence = evidence_since(conn, ticker,
+                              position.get("opened_at")
+                              or position.get("opened_at_date") or "")
+    prompt = render_prompt(position, view, market, now=now,
+                           evidence=evidence,
+                           market_is_live=market.get("market_is_live"))
     call_id = str(uuid.uuid4())
     cost_cents = Decimal("0")
 

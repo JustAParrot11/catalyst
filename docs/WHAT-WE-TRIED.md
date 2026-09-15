@@ -3604,3 +3604,196 @@ line and by the signed figure on the dot.
   read as current.
 - **A P&L line is not a verdict.** RLMD is open; the number moves every
   minute and means nothing until it closes.
+
+---
+
+## 31. The review was asked if the thesis broke, and shown no evidence
+
+Owner-asked 2026-09-14: *"what sort of extra checks will it do next, its
+still not clear, will it check what the CEO does next or will it see if a
+partner of them did for example"*, then: *"ok then do what you suggest to
+improve"*.
+
+### The honest answer was NEITHER, and it was a real gap
+
+Measured by reading `render_prompt` rather than guessing. The review was
+given:
+
+| given | not given |
+|---|---|
+| today's date, the ticker, days held and remaining | **any new filing** |
+| the thesis written at entry | **any new insider transaction** |
+| the invalidation condition | **any news** |
+| entry price, current price, the move | — |
+
+So it was asked *"has that invalidation condition actually occurred?"*
+with nothing to check it against but the price. RLMD's own invalidation
+names *"any 8-K or press release disclosing a new Phase 3 NDV-01
+delay"* — and **no code anywhere looked for one.**
+
+**AND THE TRIGGER ALREADY KNEW.** `news_since` was computed on every
+review to decide *when* to look, and never shown *to* the review: news
+woke it up and the prompt did not mention the news. **Tenth instance** of
+this project's most recurring defect (§12, §14, §17, §22, §23, §26, §29,
+§30).
+
+### THE DATA WAS ALREADY ON DISK — that is the part worth remembering
+
+`edgar_form4` sweeps the **whole daily index**: every Form 4 filed that
+day, ~562 accessions, **every transaction code** — the module's own
+docstring measures `S 83, A 43, C 24, D 21, M 19, P 12` over an 80-filing
+sample. Only `form4_adapter` filters to code `P` + acquired `A` when
+building clusters.
+
+**So a later SALE by the same officer the bot bought behind has been
+stored the whole time and nothing read it.** Every order this bot has
+ever placed came from insiders *buying*; an insider selling afterwards is
+the most direct contradiction of that thesis available, and it was
+invisible to the only call that could act on it.
+
+### What the review now sees, rendered from real payload shapes
+
+```
+WHAT HAS BEEN FILED OR REPORTED SINCE THIS WAS OPENED
+Insiders DISPOSED of stock:
+  - TRAVERSA SERGIO (officer:Chief Executive Officer) sale of 120000
+    shares at $5.20 = $624,000 on 2026-09-22
+Insiders bought more on the open market:
+  - Shenouda Maged (officer:Chief Financial Officer) open-market
+    purchase of 40000 shares at $4.60 = $184,000 on 2026-09-18
+Other insider transactions (option exercises, grants and similar are
+compensation mechanics more often than a view, so weigh them
+accordingly):
+  - Doe Jane (director) transaction code M of 10000 shares at $0.01
+Filings naming the company:
+  - 8-K filed 2026-09-23
+Headlines naming the company:
+  - Relmada announces NDV-01 Phase 3 enrollment completion
+This is what the feeds hold; it is not a verdict, and none of it is
+checked against the invalidation condition for you.
+```
+
+### Four decisions in that, each with a reason
+
+- **Disposals are separated and come first.** Lumping a sale in with a
+  purchase would bury the one item that contradicts the thesis among the
+  ones that confirm it. That is a presentation choice with money on it.
+- **Direction comes from `acquired_disposed`, not from the code.** The
+  code says what *kind* of transaction; `A`/`D` says which way the stock
+  went, and it is the field the cluster adapter itself trusts. A disposal
+  with an unusual code still reads as a disposal.
+- **An option exercise is not a purchase.** `M` acquired is compensation
+  mechanics; counting it with an open-market buy would overstate the
+  signal. Kept in a third bucket that says so.
+- **An unknown code is PRINTED, not guessed.** `transaction code Z`
+  rather than a label. House rule 7 in the direction that matters here:
+  mislabelling a transaction is worse than printing a letter the model
+  can weigh for itself.
+
+**And nothing tells the model what to conclude.** A test asserts the
+section contains no "you should", "consider exiting", "this invalidates"
+or "exit_now". The prompt already asks whether the invalidation occurred;
+that question stays the model's.
+
+### ABSENCE IS NOT EVIDENCE, and this is where it bites hardest
+
+EDGAR publishes nothing while the market is shut. So *"no new filings"*
+means two completely different things, and a review told "nothing has
+been filed" on a Sunday would read it as the company being quiet.
+
+| market state | what the prompt says |
+|---|---|
+| open | *"a real quiet spell rather than a gap in the data"* |
+| shut | *"THE MARKET IS SHUT … an absence of OPPORTUNITY to file, not evidence that nothing is happening"* |
+| **unknown** | *"whether the market has been open was not checked — so this absence carries no information either way"* |
+
+**None is not "closed"** — §22's asymmetry, and a test asserts the three
+states read differently from each other.
+
+### THE WIRING WAS MISSING AND I FOUND IT BY CHECKING THE CALLER
+
+My first version read `market.get("market_is_live")` — and the `market`
+dict `cycle.py` builds carries `entry_price`, `last_price` and
+`move_pct` **and nothing else**. So the absence branch would have said
+"nobody looked" on every review, forever. The same defect this section is
+about, committed inside the fix for it.
+
+It now derives from **`prompts.market_is_live(snapshot)`** — the helper
+§22 already wrote — rather than a second derivation that would drift
+(§28's lesson). A test asserts the call site *and* that the shared helper
+still returns the three values.
+
+### House rule 5's written read, and it found two defects of my own
+
+`position_review.py` is MONEY-CRITICAL: it can close a position.
+
+| question | answer |
+|---|---|
+| **worst input** | every field is a FILER'S text. A filing with a 10KB owner name would have multiplied the cost of every review of that position for as long as it was held — **found by this read, not by a test.** Bounded at `MAX_FIELD_CHARS` = 80 per field |
+| **the scan truncates** | ~562 Form 4s a day means a three-week hold sits behind more rows than are worth scanning. It reads the newest 20,000, so a truncation drops the **oldest** — the right direction — and **says `INCOMPLETE` when it happens**, because a truncated scan that found nothing looks identical to a company that filed nothing, and one of those means a disposal may be one row past the limit |
+| **can it place, size or cancel anything** | no. It returns text into a prompt. The review's only power is `exit_now`, and `bring_exit_forward` refuses any date at or beyond the original — so the worst this evidence can cause is an **earlier** exit, which is the bounded direction |
+| **cost** | **zero.** Pure database: a test greps `evidence_since` for `broker`, `transport`, `authorize`, `record_usage`, `httpx` and requires none. It adds prompt tokens, which is why the per-kind cap exists |
+| **second call / retry** | idempotent read, no state. Each review re-reads; the cutoff is `opened_at`, deliberately not the last review — the model has no memory across calls, so dropping a filing an earlier review already weighed would hide it from the only reader who needs it |
+
+### Verification
+
+- **30 sabotage breakages, all 30 caught red**, each verified to still
+  parse first. Weighted at the direction that LOSES evidence: a disposal
+  filed as a purchase; direction read from the code; disposals not
+  separated; disposals drawn last; an exercise counted as a purchase; an
+  unknown code guessed at; the ticker filter gone; the cutoff gone; news
+  and filings never reaching the prompt; a shut market reading as quiet;
+  unknown reading as shut; the cap gone; the omitted count unstated; one
+  shared budget crowding out the disposal; a sqlite error raising; the
+  section leading the model; and the market state never arriving.
+- **24 red on the first pass. Four of the six misses were mine:**
+  - **two flawed sabotages.** One swapped a blank line with the `ANSWER`
+    heading, which moves nothing relative to the evidence block. The
+    other wrote `None or Evidence() and evidence_since(...)` — and
+    `Evidence()` is truthy, so the expression evaluated to
+    `evidence_since(...)` and the edit was a **no-op** (§28). Both
+    retargeted, then red.
+  - **truncation DETECTION was shipped untested.** Every test built
+    `Evidence(truncated=True)` by hand, so `truncated=False` always would
+    have passed all of them. The scan limit is injectable **for that one
+    reason**, and the test now sets it to 2 against 4 rows.
+  - **§22's OWN TRAP, and I walked into it re-pinning §22's own test.**
+    An existing test greped for the literal
+    `"render_prompt(position, view, market, now=now)"` and went red when
+    that call gained arguments — on a change that still passes the clock.
+    I re-pinned it by calling `render_prompt` directly with a pinned
+    date, **which proves the renderer and nothing about the wiring**,
+    because both new parameters have sensible defaults. A sabotage
+    cutting `now=now` out of `review_position` came back GREEN. Now
+    asserted through a **real governed review** that captures what
+    reached the renderer, with `authorize` stubbed to refuse so nothing
+    spends.
+  - one **NOT APPLIED**: a target string that occurs seven times in the
+    file, anchored to its neighbours instead.
+  - one further **NOT APPLIED** on the final pass, recorded as such: it
+    pointed at `EVIDENCE_SCAN_ROWS` in a line the injectable `scan_rows`
+    had replaced. §23's lesson — **a sabotage suite rots when the code
+    moves under it, and the tell is a NOT APPLIED count.**
+- The fixture goes through `init_db` and asserts `PRAGMA foreign_keys`
+  is on; seeding the position row was required because the recorded skip
+  has a real parent (§14).
+- Full suite green offline.
+
+### What is NOT claimed
+
+- **No review has ever run with this evidence in production.** One
+  position is open and it has not been reviewed yet. The first thing to
+  look at is a review's `prompt_rendered` on the Trades tab: it should
+  carry a `WHAT HAS BEEN FILED` section, and if it is always empty while
+  the market is open, the ticker match is not finding rows the feed is
+  storing.
+- **Whether showing a disposal changes any judgement is unmeasured.** The
+  claim is narrower and checkable: the review was asked about an
+  invalidation condition naming a filing, with no filings in front of
+  it, and now it has them.
+- **"A partner of them" is still NOT answered.** Nothing in this project
+  maps relationships between insiders, or between an insider and another
+  company. This finds transactions in **the position's own ticker** by
+  anyone required to file on it — which covers officers, directors and
+  10% holders, and does not cover a spouse trading a different company.
+  That would need a data source this bot does not have.

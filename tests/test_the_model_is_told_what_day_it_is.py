@@ -252,14 +252,28 @@ class TestTheWiringIsAsserted:
                 conn.close()
 
     def test_the_review_hands_its_own_clock_to_its_prompt(self):
-        import inspect
+        """RE-PINNED TO THE OUTCOME, not to the call-site string.
 
+        This asserted the literal
+        `"render_prompt(position, view, market, now=now)"` and went red
+        the moment that call gained a second argument - on a change that
+        still passes the clock. Section 22's own corollary, applied to
+        its own test: **a substring is not a call-site assertion.** What
+        must hold is that the prompt carries the clock the caller was
+        given, so the date is asserted in the prompt actually rendered,
+        against a date the wall clock cannot produce.
+        """
         from catalyst.research import position_review
 
-        src = inspect.getsource(position_review.review_position)
-        assert "render_prompt(position, view, market, now=now)" in src, (
-            "the review renders its prompt without the clock it already "
-            "computed, so the prompt's date can differ from the row's")
+        pinned = datetime(2019, 3, 14, 11, 22, tzinfo=timezone.utc)
+        text = position_review.render_prompt(
+            {"ticker": "RLMD", "opened_at_date": "2019-03-01",
+             "planned_exit_date": "2019-03-20"},
+            {"thesis": "t", "invalidation": "i"},
+            {"entry_price": "1", "last_price": "1", "move_pct": "0"},
+            now=pinned)
+        assert "2019-03-14" in text, text[:400]
+        assert "Thursday" in text, "the weekday is not rendered"
 
 
 class TestTheMarketStateIsStated:
