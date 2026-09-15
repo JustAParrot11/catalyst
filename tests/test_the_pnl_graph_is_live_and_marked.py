@@ -108,10 +108,27 @@ class TestItIsSemiLive:
 
     def test_the_live_point_replaces_a_bar_rather_than_doubling_back(self):
         """Two points at the same moment make the line fold over
-        itself, which reads as a price spike that never happened."""
-        s = series(live_price=4.61, live_at=NOW)
-        assert all(p.at < s.last.at for p in s.points[:-1])
+        itself, which reads as a price spike that never happened.
+
+        THE FIXTURE MUST CONTAIN A BAR AT OR AFTER THE QUOTE, or there
+        is nothing for the replacement to remove and the assertion is
+        vacuous - which is exactly how the first version of this test
+        let its sabotage come back GREEN (section 28's no-op lesson).
+        """
+        later = bars(n=8, first=OPEN, minutes=60)
+        quote_at = pnl._as_dt(later[4]["t"])
+        assert any(pnl._as_dt(b["t"]) >= quote_at for b in later), (
+            "the fixture has no bar at or after the quote, so this test "
+            "cannot exercise the replacement at all")
+        s = series(bars=later, live_price=9.99, live_at=quote_at)
+        assert s.last.live is True
+        assert s.last.at == quote_at
+        # Every earlier point is STRICTLY before it, and the bars that
+        # sat at or after it are gone rather than drawn beside it.
+        assert all(p.at < quote_at for p in s.points[:-1]), (
+            [p.at.isoformat() for p in s.points])
         assert [p.at for p in s.points] == sorted(p.at for p in s.points)
+        assert sum(1 for p in s.points if p.at == quote_at) == 1
 
     def test_with_no_quote_the_newest_bar_is_the_newest_point(self):
         s = series()
@@ -197,6 +214,31 @@ class TestTheEventsAreOnTheChart:
     def test_an_unreadable_timestamp_is_dropped_rather_than_guessed(self):
         s = series(marks=[{"at": "not-a-date", "kind": "news",
                            "label": "News"}])
+        assert s.marks == []
+
+    def test_an_unreadable_timestamp_does_not_become_NOW(self):
+        """DEFENCE IN DEPTH, and the half only this guard holds. The
+        window check also drops a mark stamped "now" whenever now falls
+        outside the plotted range, so the behavioural test above passed
+        with the parse guard broken. What must be true of the parser
+        itself is that it refuses rather than substitutes a clock -
+        a mark at the wrong moment is worse than one that is missing,
+        because the reader cannot tell it is wrong.
+        """
+        for bad in ("not-a-date", "2026-13-45", "yesterday", "??"):
+            assert pnl._as_dt(bad) is None, bad
+
+    def test_an_unreadable_mark_INSIDE_the_window_is_still_dropped(self):
+        """The same defect where the window cannot mask it: bars that
+        straddle the present, so a mark stamped "now" would land inside
+        the plotted range and be drawn."""
+        straddle = bars(n=6, first=NOW - timedelta(hours=3), minutes=60)
+        s = series(bars=straddle, opened=NOW - timedelta(hours=4),
+                   marks=[{"at": "not-a-date", "kind": "news",
+                           "label": "News"}])
+        assert s.points, "the fixture drew nothing, so nothing was tested"
+        assert s.points[0].at <= NOW <= s.points[-1].at, (
+            "the window does not contain now, so it would mask the defect")
         assert s.marks == []
 
     def test_a_skipped_review_is_not_marked(self):
