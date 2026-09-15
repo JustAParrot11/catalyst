@@ -216,9 +216,16 @@ def quotes_for(tickers, broker=None, now=None, use_cache=True) -> dict:
 
 
 def clear_cache() -> None:
-    """For tests, and for a caller that has just changed credentials."""
+    """For tests, and for a caller that has just changed credentials.
+
+    CLEARS BOTH CACHES. It cleared only the quote cache, so a test or a
+    credentials change left stale BARS in place - and a bar cache keyed
+    on the old account's data is exactly the kind of thing section 16
+    records going wrong quietly.
+    """
     with _lock:
         _cache.clear()
+        _bars_cache.clear()
 
 
 #: Intraday bars are fetched per position per page load, so the result
@@ -274,5 +281,13 @@ def bars_for(ticker, start, end, timeframe, broker=None, now=None,
     reason = "" if out else "the broker returned no bars for this window"
     if use_cache:
         with _lock:
+            # EVICT WHILE WE ARE HERE. The key carries the window's
+            # dates, so it changes every day and a long-running
+            # dashboard would otherwise accumulate one dead entry per
+            # ticker per day forever. Found by the adversarial read on
+            # this change, not by a test.
+            for dead in [k for k, v in _bars_cache.items()
+                         if (now - v[0]).total_seconds() >= BARS_CACHE_S]:
+                _bars_cache.pop(dead, None)
             _bars_cache[key] = (now, out, reason)
     return out, reason

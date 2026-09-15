@@ -3425,3 +3425,182 @@ caller's `if reason:` — which then goes red.
 - **This changes nothing about what the bot does.** `grep` over `risk/`,
   `execution/` and `cost/` for the new symbols returns nothing; it is a
   rendering change to a page.
+
+---
+
+## 30. A profit-and-loss line, and the one thing that was genuinely missing
+
+Owner-asked 2026-09-14: *"i want to be able to view some live or semi
+live profit/loss graph info when viewing each individual trade, almost
+live wall street like for current trades, and a profit loss graph with
+lines detailing events so we can see maybe when something happened"*.
+
+### Measured first: almost all of it already existed
+
+| what the owner asked for | where it already was |
+|---|---|
+| review moments, with what Claude said | `TradeStory.reviews` |
+| news, with timestamps and links | `TradeStory.sources` |
+| orders, stop confirmations | `TradeStory.orders`, `.stop_events` |
+| the live NBBO, with its own failure reasons | `dashboard/live.quotes_for` |
+
+**Ninth instance of this project's most recurring defect** (§12, §14,
+§17, §22, §23, §26, §29): the fact on record, one caller away from the
+page that needed it.
+
+**What was genuinely absent is INTRADAY PRICES.** `grep -rn "1Min"
+catalyst/` returned only the drawdown watermark — the bot had never
+fetched a bar finer than a day. So a position opened this morning had no
+series at all, which is exactly why RLMD's card drew a price ladder
+instead of a chart.
+
+### The arithmetic is a multiplication, not a model
+
+```
+pnl(t)   = (price(t) - fill) x qty
+floor    = (stop     - fill) x qty
+```
+
+On the real RLMD trade the floor is **−$39.45** — the same number
+`limit_applications` recorded against the $40.00 hard bound. Nothing is
+estimated, projected or modelled, and the caption says plainly that it is
+**unrealised** and carries no spread or fees.
+
+### Three numbers derived rather than typed
+
+| what | derived from | why not a constant |
+|---|---|---|
+| bar resolution (`1Min`…`1Day`) | the hold length against the plot's own pixel width | more points than pixels is detail nobody can see; and a band table has a hold length that falls between two rows |
+| the event lane's height | what actually goes in it | a typed `B = 52` put the overflow note's box at y=216.6 in a 214-tall viewBox — **off the page in every single case** |
+| the label row pitch | `EVENT_FONT_PX × charts.LINE_H` | see below |
+
+### I REPEATED §18's DEFECT EXACTLY, AND ONLY THE MEASUREMENT CAUGHT IT
+
+§18 records: *"the label gap was `FONT_SIZE + 2` = 13 against
+`text_boxes`' own measured box height of 14.3 — so the project's own
+measurement tool reported an overlap the code believed it had
+prevented."*
+
+I staggered labels onto rows **12px** apart against a measured box height
+of **12.35px**. Three marks produced three overlapping pairs; at twelve
+marks, twelve. Two numbers meaning the same thing, quietly disagreeing,
+in the same file, one change later.
+
+The fix is not a bigger gap. Labels are now **placed greedily against the
+last label already in each row**, so a collision is impossible *by
+construction* rather than by a count that happened to be big enough. A
+mark with no room keeps its rule and its hover; the caption says how many
+went unlabelled, because showing fewer captions than there are events
+silently is how a busy position reads as a quiet one.
+
+Measured after: **zero overlaps and zero overflow at 1, 2, 3, 4, 6, 9,
+13, 21 and 61 marks.**
+
+### AND THE MEASUREMENT TOOL ITSELF COULD NOT SEE THIS CHART
+
+`charts.text_boxes` matches only text carrying an inline
+`font-size="N"`. Both this chart and the **existing position chart**
+style labels with CSS classes, so for both it returns **zero text
+elements** — and `labels_outside_viewbox` therefore reports "nothing
+wrong" for a chart whose labels are off the page entirely.
+
+That is §25's vacuous pass in a second place: an assertion whose only
+failure mode is a crash. `tests/svg_measure.py` **reads the font sizes
+out of `render.py`'s own CSS** and **raises when it measures no text at
+all**, so an empty result can never again be confused with a clean one.
+`tests/test_svg_measure_cannot_pass_vacuously.py` holds both halves,
+including that `charts.text_boxes` really does see nothing here — so
+nobody closes the gap by deleting the new module.
+
+**The fix was deliberately NOT to write `font-size="10"` beside
+`class="pos-label"`.** That creates the two-numbers-one-meaning problem
+§18 already paid for. The CSS stays the single source and the test reads
+it.
+
+### The broker change, and house rule 5's written read
+
+`broker.py` is MONEY-CRITICAL. `get_bars(symbol, start, end, timeframe)`
+was **extracted** from `get_daily_bars`, which now delegates with
+`timeframe="1Day"` — one paging implementation rather than two, because
+§28 is this project paying for a second copy drifting out of step.
+
+| question | answer |
+|---|---|
+| **worst input it now accepts** | any `timeframe` string. An unknown one is a query param Alpaca refuses with a 4xx → `BrokerError` → caught → reported as an absent chart. It cannot place, size or cancel |
+| **broker lies / times out / answers half** | a non-list is refused **with its type**; an exception is reported with its message; paging is followed, and a test holds it. A half answer here is a **shorter line**, never a changed decision — nothing sizes off this |
+| **can it place, size or cancel anything it could not before** | no. `source_matches` over `risk/`, `execution/` and `cost/` finds `get_bars` only at its own definition, `bars_for`/`pnl`/`_pnl_series` nowhere at all. Both money-path callers still use `get_daily_bars`, and a test asserts it still sends `1Day` and `adjustment=split` |
+| **the second call, and the retry** | a 60-second cache keyed on (ticker, window, timeframe), so five open positions cost at most five requests and a refresh inside a minute costs none. **A failure is not cached**, so a blip retries on the next load rather than sticking |
+
+**It writes nothing.** Unlike the daily history it never touches
+`BarCache`, so it cannot become a second writer and corrupt the history
+sizing measures a stop from — the failure §18 found in `BarCache`'s
+shared metadata.
+
+**And it spends no part of the API budget the governor bounds:** that
+budget is Anthropic tokens; this is Alpaca market data, already in the
+subscription.
+
+### THE READ FOUND A DEFECT OF MY OWN, in the cache
+
+The key carries the window's dates, so it **changes every day** — and
+nothing evicted. A long-running dashboard would accumulate one dead entry
+per ticker per day, forever. Worse, `clear_cache()` cleared only the
+quote cache, so a credentials change left the previous account's bars in
+place, which is the shape §16 records going wrong quietly. Both fixed,
+both with tests; measured, five entries evict to one on the first fetch
+past the window.
+
+### What the chart refuses to draw
+
+| case | behaviour |
+|---|---|
+| a **short** | refused, never sign-flipped. The account is long-only (§3 row 11), so that branch has never been exercised, and a P&L chart with the sign backwards is worse than no chart |
+| no fill or quantity | no line, and the reason said |
+| no stop on record | **no floor**, rather than a floor at zero. Break-even is still drawn |
+| no bars at all | no chart, with the upstream reason beside it (§10b: a chart with no series is not a chart) |
+| a bar from before the fill | dropped — it would draw P&L on a position that did not exist, which on an intraday chart is most of the entry day |
+| a mark outside the plotted window | dropped, not pinned to an edge, where it would read as having happened there |
+| an unreadable timestamp | dropped, never replaced with the clock |
+
+**Colour still carries nothing.** The line and the dot are the same
+stroke whether the position is up or down — asserted by a test — because
+green-against-red measures ΔE 4.1 under deuteranopia on this dashboard's
+light surface. The sign is carried by position against the break-even
+line and by the signed figure on the dot.
+
+### Verification
+
+- **32 sabotage breakages, all 32 caught red**, each verified to still
+  parse first. Weighted deliberately at the two worst directions for a
+  money chart: **the P&L sign inverted**, **the floor's sign flipped**,
+  quantity dropped, break-even or the floor cropped out of the range, the
+  line taking its colour from the outcome, and the value label losing its
+  sign.
+- **29 red on the first pass. Two of the three that were not were my own
+  weak fixtures**, both the §28 no-op pattern:
+  - *the live point replacing a bar*: every bar in the fixture sat
+    **before** the quote, so removing the replacement filter removed
+    nothing. The fixture now asserts a bar exists at or after the quote
+    **before** asserting anything about the replacement.
+  - *an unreadable timestamp*: the **window check already dropped** a
+    mark stamped "now", so breaking the parse guard changed nothing —
+    defence in depth. Tested directly now (`_as_dt` must return `None`),
+    plus a straddling-window case where the window cannot mask it.
+  - the third was **NOT APPLIED**: the target string occurred twice.
+    Recorded as not applied, retargeted, then red.
+- The card **rendered from the owner's own RLMD rows** with an injected
+  broker and an injected quote — no network — before and after.
+- Full suite green offline.
+
+### What is NOT claimed
+
+- **No intraday bar has ever been fetched in production.** Every broker
+  in the tests is injected. The first thing to look at is whether an open
+  position's caption reads *"Drawn from Alpaca 1Min bars"* or *"Drawn
+  from cached daily closes"* — if it is always the latter, the fetch is
+  failing and the fallback is hiding it.
+- **"Live" means fresh on page load, not streaming.** The newest point
+  carries its own clock time so a page open since this morning cannot
+  read as current.
+- **A P&L line is not a verdict.** RLMD is open; the number moves every
+  minute and means nothing until it closes.

@@ -535,3 +535,75 @@ class TestTheBrokerChangeIsAdditiveOnly:
         b = Broker("k", "s", transport=httpx.MockTransport(handler))
         assert len(b.get_bars("X", "a", "b", timeframe="1Min")) == 2
         assert len(calls) == 2, "paging was not followed"
+
+
+class TestTheCacheDoesNotLeak:
+    """Found by the adversarial read on this change, not by a test.
+
+    The cache key carries the fetch window's dates, so it changes every
+    day. Without eviction a long-running dashboard accumulates one dead
+    entry per ticker per day, forever.
+    """
+
+    def setup_method(self):
+        from catalyst.dashboard import live
+
+        live.clear_cache()
+
+    def test_stale_entries_are_evicted_on_the_next_fetch(self):
+        from catalyst.dashboard import live
+
+        class Ok:
+            def get_bars(self, *a, **kw):
+                return [{"t": "2026-09-01T00:00:00Z", "c": 1.0}]
+
+        t0 = NOW
+        for i in range(5):
+            live.bars_for(f"T{i}", f"a{i}", "b", "1Min", broker=Ok(),
+                          now=t0 + timedelta(seconds=i))
+        assert len(live._bars_cache) == 5
+        live.bars_for("LATE", "a", "b", "1Min", broker=Ok(),
+                      now=t0 + timedelta(seconds=live.BARS_CACHE_S + 10))
+        assert len(live._bars_cache) == 1, (
+            "stale windows were not evicted: "
+            f"{sorted(live._bars_cache)}")
+
+    def test_a_fresh_entry_is_served_rather_than_re_fetched(self):
+        from catalyst.dashboard import live
+
+        calls = []
+
+        class Counting:
+            def get_bars(self, *a, **kw):
+                calls.append(1)
+                return [{"t": "2026-09-01T00:00:00Z", "c": 1.0}]
+
+        for _ in range(4):
+            live.bars_for("X", "a", "b", "1Min", broker=Counting(), now=NOW)
+        assert len(calls) == 1, (
+            f"the cache did not serve a repeat within {live.BARS_CACHE_S}s")
+
+    def test_a_FAILURE_is_not_cached_so_a_blip_retries(self):
+        """A transient outage must not stick for a whole cache window."""
+        from catalyst.dashboard import live
+
+        class Boom:
+            def get_bars(self, *a, **kw):
+                raise RuntimeError("blip")
+
+        live.bars_for("Y", "a", "b", "1Min", broker=Boom(), now=NOW)
+        assert not live._bars_cache, "a failure was cached"
+
+    def test_clear_cache_clears_the_bars_too(self):
+        from catalyst.dashboard import live
+
+        class Ok:
+            def get_bars(self, *a, **kw):
+                return [{"t": "2026-09-01T00:00:00Z", "c": 1.0}]
+
+        live.bars_for("Z", "a", "b", "1Min", broker=Ok(), now=NOW)
+        assert live._bars_cache
+        live.clear_cache()
+        assert not live._bars_cache, (
+            "clear_cache left stale bars behind - a credentials change "
+            "would keep serving the old account's prices")
