@@ -6112,6 +6112,14 @@ def _trade_story(st, p: str, index: int, folded: bool = True) -> str:
     # every call to Claude - because the separate small bars answered
     # none of "how is this trade actually going". The rail and hold bar
     # remain as the FALLBACK for a position the full chart cannot draw.
+    # MONEY FIRST, THEN PRICE. Owner-asked 2026-09-14: "some live or
+    # semi live profit/loss graph info when viewing each individual
+    # trade ... and a profit loss graph with lines detailing events so
+    # we can see maybe when something happened". The price chart below
+    # answers "what is the stock doing"; this one answers "how am I
+    # doing", which is the question the card is opened for, so it goes
+    # above rather than beside.
+    out.append(_pnl_block(st, p, index))
     chart = _position_chart(st, p, index)
     out.append(chart)
     if not chart:
@@ -7563,6 +7571,346 @@ def _price_ladder(st, p: str, index: int) -> str:
              "line is empty rather than guessed - these are the prices on "
              "the record. " + _reviews_sentence(st))
     return "".join(out) + figcap(words)
+
+
+#: Size of an event label, and the two numbers derived from it.
+#:
+#: MEASURED WITH THE PROJECT'S OWN TOOL, NOT CHOSEN - and the first
+#: version of this got it wrong in precisely the way section 18 records.
+#: It staggered labels onto rows **12px** apart while `text_boxes`
+#: measures a 9.5px label's box as 9.5 + 9.5 x (LINE_H - 1) = 12.4px
+#: tall, so every adjacent pair collided: three marks produced three
+#: overlapping pairs. Two numbers meaning the same thing, quietly
+#: disagreeing. Both now come from one place.
+EVENT_FONT_PX = 9.5
+#: Vertical pitch between the two label rows. Derived, with a real gap
+#: on top of the measured box height rather than exactly it.
+EVENT_ROW_PX = EVENT_FONT_PX * charts.LINE_H + 3
+#: Horizontal clearance a label needs from its neighbour in the SAME
+#: row, from the same per-character width the measurement tool uses.
+EVENT_CHAR_PX = charts.CHAR_W * (EVENT_FONT_PX / charts.FONT_SIZE)
+EVENT_GAP_PX = 8.0
+#: Rows available. Two, because a third pushes labels into the caption.
+EVENT_ROWS = 2
+#: Where the first label row sits below the plot floor.
+EVENT_LANE_TOP = 21.0
+
+
+def _place_event_labels(marks, x_of):
+    """Which marks get a label, and on which row.
+
+    Returns `[(mark, row)]` plus the number left unlabelled. Placed
+    GREEDILY against the last label already in each row, so a collision
+    is impossible BY CONSTRUCTION rather than by a count that happened
+    to be big enough - the "picket fence" of overprinted review rules
+    (owner's screenshot, 2026-09-11) is the failure this prevents.
+
+    A mark with no room still draws its rule and keeps its hover text.
+    The moment is never lost, only its caption.
+    """
+    placed, right_edge, dropped = [], [None] * EVENT_ROWS, 0
+    for mark in marks:
+        width = max(len(mark.label), 1) * EVENT_CHAR_PX
+        left = x_of(mark.at) - width / 2.0
+        for row in range(EVENT_ROWS):
+            edge = right_edge[row]
+            if edge is None or left >= edge + EVENT_GAP_PX:
+                right_edge[row] = left + width
+                placed.append((mark, row))
+                break
+        else:
+            dropped += 1
+    return placed, dropped
+
+
+def _pnl_marks(st):
+    """Everything that happened to this position, as (when, kind, label).
+
+    EVERY ONE OF THESE WAS ALREADY ON `TradeStory` and reachable only
+    from a table. Owner-asked 2026-09-14: *"a profit loss graph with
+    lines detailing events so we can see maybe when something
+    happened"* - the events existed, the chart did not mark them.
+    """
+    marks = []
+    if st.opened_at:
+        marks.append({"at": st.opened_at, "kind": "entry",
+                      "label": "Bought",
+                      "detail": f"filled at ${_num(st.entry_price) or 0:.2f}"})
+    # A REVIEW IS A MOMENT CLAUDE WAS PAID TO RE-READ THE THESIS, and
+    # what it said is the interesting part. A skipped review cost
+    # nothing and decided nothing, so it is not drawn (same rule the
+    # review-count sentence already uses).
+    for row in (st.reviews or ()):
+        when, action, skipped = row[0], str(row[1] or ""), row[5]
+        if skipped:
+            continue
+        marks.append({"at": when, "kind": "review",
+                      "label": {"exit_now": "Exit call",
+                                "hold": "Review"}.get(action, "Review"),
+                      "detail": action})
+    # NEWS NAMING THE COMPANY. This is the signal that brings a review
+    # forward, and until now it appeared on the chart nowhere at all.
+    for src in (st.sources or ()):
+        when = src[2] if len(src) > 2 else None
+        head = str(src[3] if len(src) > 3 else "") or "News"
+        if str(src[0] or "") == "alpaca_news" and when:
+            marks.append({"at": when, "kind": "news", "label": "News",
+                          "detail": head})
+    if st.closed_at:
+        marks.append({"at": st.closed_at, "kind": "exit", "label": "Sold",
+                      "detail": str(st.exit_reason or "")})
+    return marks
+
+
+def _pnl_series(st, now=None, broker=None, fetch=True):
+    """The P&L series for one position, fetched. Never raises.
+
+    ORDER OF PREFERENCE, and each fallback is NAMED so the caption can
+    say which one drew the line (the section 24 lesson: "Alpaca said"
+    and "a file on disk said" are not the same claim):
+
+      1. intraday bars from Alpaca over the hold, at a resolution
+         derived from how long it has been held;
+      2. the cached daily closes, which is all a long hold needs and
+         all a closed trade has;
+      3. nothing, with the reason.
+
+    Plus, for an OPEN position only, the live NBBO mid as the newest
+    point - which is what makes this semi-live. It is dated on the
+    chart, because a page open since this morning must not read as
+    current.
+    """
+    from catalyst.dashboard import live, pnl
+
+    now = now or datetime.now(timezone.utc)
+    opened = pnl._as_dt(st.opened_at)
+    if opened is None:
+        s = pnl.build(fill=st.entry_price, qty=st.qty, stop=st.stop_price)
+        s.empty_reason = s.empty_reason or (
+            "no opening time is recorded for this position, so there is no "
+            "axis to draw it against")
+        return s
+
+    closed = pnl._as_dt(st.closed_at)
+    until = closed or now
+    tf = pnl.timeframe_for(max(until - opened, timedelta(minutes=1)))
+    start, end = pnl.window_for(opened, until)
+
+    bars, source, why = [], "", ""
+    if fetch:
+        bars, why = live.bars_for(st.ticker, start, end, tf, broker=broker,
+                                  now=now)
+        if bars:
+            source = "broker_intraday"
+    if not bars:
+        # THE DAILY CACHE, which is what a three-week hold wants anyway
+        # and what a closed trade has. Read-only, exactly as section 24
+        # left it.
+        cached = [b for b in _load_position_bars(st.ticker)
+                  if pnl._as_dt(b.day) and opened.date() <= b.day
+                  <= until.date()]
+        if cached:
+            bars, source, tf = cached, "cached_daily_close", "1Day"
+
+    quote = None
+    if st.status == "open":
+        got = live.quotes_for([st.ticker], broker=broker, now=now)
+        quote = got.get(str(st.ticker or "").upper())
+
+    s = pnl.build(fill=st.entry_price, qty=st.qty, stop=st.stop_price,
+                  bars=bars, opened=opened, timeframe=tf,
+                  side=str(st.direction or "long"),
+                  marks=_pnl_marks(st),
+                  live_price=(quote.mid if quote and quote.live else None),
+                  live_at=(quote.at if quote and quote.live else None))
+    s.source = source
+    # HOUSE RULE 3: when there is no line, the upstream reason travels
+    # with the absence rather than being replaced by a tidy sentence.
+    if not s.points and not s.empty_reason:
+        s.empty_reason = why or "no prices are on record for this position"
+    elif not s.points and why:
+        s.empty_reason = f"{s.empty_reason} Upstream said: {why}"
+    s.quote_error = (quote.error if quote and not quote.live else "")
+    return s
+
+
+def _pnl_chart(st, p: str, index: int, series=None) -> str:
+    """Unrealised profit and loss over time, with the stop as a floor.
+
+    Owner-asked 2026-09-14. The card drew PRICE and left "how am I
+    doing" to be worked out from a fill, a quantity and a tile. This is
+    that multiplication drawn once, in money, with the events on it.
+
+    THE BREAK-EVEN LINE IS THE REFERENCE. Above it is profit, below is
+    loss, and that is how the sign is carried - not by colour, for the
+    reason `.pos-exit` records: green-against-red measures deltaE 4.1
+    under deuteranopia on this dashboard's own light surface.
+
+    Returns "" when there is nothing honest to draw, and the caller
+    prints the reason - a chart with no series is not a chart
+    (WHAT-WE-TRIED section 10b).
+    """
+    s = series if series is not None else _pnl_series(st)
+    if s is None or not s.points:
+        return ""
+
+    # THE LANE'S HEIGHT IS DERIVED FROM WHAT GOES IN IT, not typed.
+    # With a typed B = 52 the "too close to label" note's box ended at
+    # y = 216.6 against a 214-tall viewBox - off the page, in every
+    # single case, and found by measuring rather than by looking. Same
+    # class of defect as section 18's label stack escaping through the
+    # top: written for the common case, overflowing in the real one.
+    W, L, R, T, PLOT_H = 660, 92, 62, 18, 144
+    B = int(EVENT_LANE_TOP + (EVENT_ROWS + 1) * EVENT_ROW_PX
+            + EVENT_FONT_PX * (charts.LINE_H - 1.0) + 2) + 1
+    H = T + PLOT_H + B
+    lo, hi = s.lo, s.hi
+    pad = (hi - lo) * 0.12 or max(abs(hi), 1.0) * 0.08
+    lo, hi = lo - pad, hi + pad
+    first, last = s.points[0].at, s.points[-1].at
+    span = max((last - first).total_seconds(), 60.0)
+    plot_bottom = H - B
+
+    def x(at):
+        return L + (at - first).total_seconds() / span * (W - L - R)
+
+    def y(v):
+        return T + (hi - float(v)) / (hi - lo) * (plot_bottom - T)
+
+    out = [f'<svg id="{p}-t{index}-pnl" class="pnl-chart" '
+           f'viewBox="0 0 {W} {H}" role="img" aria-label='
+           f'"unrealised profit and loss for {esc(st.ticker)}, with the '
+           f'stop as a floor and every event marked">']
+
+    # WHAT THE STOP IS THERE TO BOUND: break-even down to the floor.
+    if s.stop_pnl is not None:
+        top, bot = y(0.0), y(s.stop_pnl)
+        out.append(f'<rect x="{L}" y="{min(top, bot):.1f}" '
+                   f'width="{W - L - R}" height="{abs(bot - top):.1f}" '
+                   f'class="pnl-risk"/>')
+
+    rules = [(0.0, "pnl-zero", "break even")]
+    if s.stop_pnl is not None:
+        rules.append((s.stop_pnl, "pnl-floor",
+                      f"stop {_signed_money(s.stop_pnl)}"))
+    for value, cls, label in rules:
+        out.append(f'<line x1="{L}" y1="{y(value):.1f}" x2="{W - R}" '
+                   f'y2="{y(value):.1f}" class="{cls}"/>')
+        out.append(f'<text x="{L - 6}" y="{y(value) + 3:.1f}" '
+                   f'text-anchor="end" class="pos-label">{esc(label)}</text>')
+
+    pts = " ".join(f"{x(pt.at):.1f},{y(pt.pnl):.1f}" for pt in s.points)
+    out.append(f'<polyline points="{pts}" class="pnl-line"/>')
+
+    # THE NEWEST READING, labelled with its own value and clock time -
+    # the reader must be able to tell a live quote from a settled bar,
+    # and a stale page from a fresh one.
+    now = s.points[-1]
+    out.append(f'<circle cx="{x(now.at):.1f}" cy="{y(now.pnl):.1f}" r="4" '
+               f'class="pnl-live"/>')
+    label = _signed_money(now.pnl)
+    anchor = "end" if x(now.at) > W - R - 60 else "start"
+    dx = -8 if anchor == "end" else 8
+    out.append(f'<text x="{x(now.at) + dx:.1f}" y="{y(now.pnl) - 8:.1f}" '
+               f'text-anchor="{anchor}" class="pnl-val">{esc(label)}</text>')
+
+    # EVENTS IN THEIR OWN LANE, never across the line. Every mark gets a
+    # rule and a hover; labels are placed only where they fit.
+    for mark in s.marks:
+        mx = x(mark.at)
+        cls = "pnl-event-exit" if mark.kind == "exit" else "pnl-event"
+        out.append(f'<line x1="{mx:.1f}" y1="{plot_bottom - 6:.1f}" '
+                   f'x2="{mx:.1f}" y2="{plot_bottom + 10:.1f}" '
+                   f'class="{cls}"><title>{esc(mark.label)}: '
+                   f'{esc(mark.detail)}</title></line>')
+    placed, dropped = _place_event_labels(s.marks, x)
+    for mark, row in placed:
+        out.append(f'<text x="{x(mark.at):.1f}" '
+                   f'y="{plot_bottom + EVENT_LANE_TOP + row * EVENT_ROW_PX:.1f}" '
+                   f'text-anchor="middle" class="pnl-event-label">'
+                   f'{esc(mark.label)}</text>')
+    if dropped:
+        # SAY HOW MANY ARE UNLABELLED rather than silently showing
+        # fewer than there are: the reader must be able to tell a quiet
+        # position from a crowded one whose captions did not fit.
+        out.append(f'<text x="{L}" y="{plot_bottom + EVENT_LANE_TOP + EVENT_ROWS * EVENT_ROW_PX:.1f}" '
+                   f'class="pnl-event-label">{len(s.marks)} events marked, '
+                   f'{dropped} too close to label - hover any rule</text>')
+
+    out.append("</svg>")
+    return "".join(out)
+
+
+def _pnl_block(st, p: str, index: int, series=None) -> str:
+    """The P&L chart with the sentence that makes it readable.
+
+    A NUMBER ON A PAGE IS NOT AN ANSWERED QUESTION - this project's most
+    repeated dashboard lesson - so the chart is preceded by a line
+    saying what it is, how fresh it is and what is not in it, and
+    followed by nothing the reader has to infer.
+    """
+    s = series if series is not None else _pnl_series(st)
+    if s is None:
+        return ""
+    chart = _pnl_chart(st, p, index, series=s)
+    if not chart:
+        # HOUSE RULE 3: say why it is empty, with the upstream reason.
+        return caveat("No profit-and-loss line can be drawn yet. "
+                      + esc(s.empty_reason or "no reason was recorded"))
+
+    now = s.last
+    money = _signed_money(now.pnl)
+    share = _pct_of(abs(now.pnl), s.fill * s.qty) if s.fill and s.qty else ""
+    when = ("read moments ago" if now.live
+            else "the last settled price on record")
+    lead = (f"<b>{money}</b> unrealised"
+            + (f", {share} of the ${s.fill * s.qty:,.0f} committed" if share
+               else "")
+            + f" &mdash; at ${now.price:,.4f}, {when}"
+            + (f" ({_clock(now.at)} UTC)" if now.live else "") + ". ")
+    if s.stop_pnl is not None:
+        lead += (f"The floor is <b>{_signed_money(s.stop_pnl)}</b>: the most "
+                 "this can lose while the stop rests at the broker. ")
+    # WHICH SOURCE DREW IT. Section 24's lesson, applied to a second
+    # chart: "Alpaca said" and "a file on disk said" are not the same
+    # claim and the page has to be able to say which.
+    lead += {"broker_intraday": f"Drawn from Alpaca {s.timeframe} bars. ",
+             "cached_daily_close": ("Drawn from cached daily closes, not "
+                                    "intraday &mdash; so it steps once a "
+                                    "day. "),
+             }.get(s.source, "")
+    if st.status == "open" and not now.live:
+        lead += ("<b>Not live:</b> " + esc(s.quote_error or "no quote was "
+                 "available") + ". ")
+    lead += ("Unrealised means nothing is banked until it closes, and this "
+             "line carries no spread or fees.")
+    return (f'<p class="trade-sum">{lead}</p>' + chart
+            # prov() ESCAPES, so an entity written here reaches the page
+            # as a literal "&mdash;". Fourth instance of that trap in
+            # this file's history (section 20); the caption is plain
+            # text with a plain dash, so neither helper can get it wrong.
+            + prov("Time across, money up. Above the break-even line is "
+                   "profit and below it is loss - that, and the figure on "
+                   "the dot, is how the sign is carried, never colour. "
+                   "Each rule in the lane is something that happened; "
+                   "hover it for what."))
+
+
+def _clock(at) -> str:
+    try:
+        return at.strftime("%H:%M")
+    except Exception:            # noqa: BLE001
+        return DASH
+
+
+def _signed_money(value) -> str:
+    """Dollars with an explicit sign, because on a P&L chart the sign is
+    the point and a bare "$39.45" reads as a gain."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return DASH
+    return f"{'-' if v < 0 else '+'}${abs(v):,.2f}"
 
 
 def _position_chart(st, p: str, index: int) -> str:

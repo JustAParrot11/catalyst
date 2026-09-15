@@ -263,6 +263,35 @@ class Broker:
         return self._request_object(
             "GET", f"{self._data_url}/v2/stocks/{symbol}/quotes/latest")
 
+    def get_bars(self, symbol: str, start: str, end: str,
+                 *, timeframe: str = "1Day", limit: int = 10000,
+                 max_pages: int = 6) -> list[dict]:
+        """Bars for one symbol at `timeframe`, oldest first.
+
+        EXTRACTED FROM `get_daily_bars` 2026-09-14, which now delegates
+        here with `timeframe="1Day"` and is otherwise unchanged. The
+        paging, the adjustment and the object handling are one
+        implementation rather than two, because this project has already
+        paid for a second copy drifting out of step with the first
+        (WHAT-WE-TRIED section 28: a cache marker that existed on one
+        paid path and not the other, invisible until it was measured).
+
+        WHY A SECOND TIMEFRAME EXISTS. The trades page draws a P&L line
+        for an OPEN position, and a position opened this morning has no
+        daily closes at all - so the only honest chart was a price
+        ladder. Intraday bars are what make the line exist. The caller
+        is `catalyst/dashboard`; nothing in the money path asks for
+        anything but `1Day`.
+
+        READ-ONLY, and that is the whole of its risk surface: a market
+        data GET. It cannot place, size, cancel or price anything, and
+        it spends no part of the API budget the governor bounds (that
+        budget is Anthropic tokens; this is Alpaca market data, already
+        in the subscription).
+        """
+        return self._bars(symbol, start, end, timeframe=timeframe,
+                          limit=limit, max_pages=max_pages)
+
     def get_daily_bars(self, symbol: str, start: str, end: str,
                        *, limit: int = 10000, max_pages: int = 6) -> list[dict]:
         """Daily bars for one symbol, oldest first.
@@ -287,8 +316,15 @@ class Broker:
         years, so six pages is a ceiling that cannot bind in practice
         while still refusing to loop forever on a malformed token.
         """
+        return self._bars(symbol, start, end, timeframe="1Day",
+                          limit=limit, max_pages=max_pages)
+
+    def _bars(self, symbol: str, start: str, end: str, *, timeframe: str,
+              limit: int, max_pages: int) -> list[dict]:
+        """The one paging implementation. See `get_daily_bars` for why
+        paging is followed rather than hoped about."""
         out: list[dict] = []
-        params = {"timeframe": "1Day", "start": start, "end": end,
+        params = {"timeframe": timeframe, "start": start, "end": end,
                   "limit": limit, "adjustment": "split"}
         url = f"{self._data_url}/v2/stocks/{symbol}/bars"
         for _ in range(max_pages):
