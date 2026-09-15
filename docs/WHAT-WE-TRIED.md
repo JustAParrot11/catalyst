@@ -3797,3 +3797,228 @@ still returns the three values.
   anyone required to file on it — which covers officers, directors and
   10% holders, and does not cover a spouse trading a different company.
   That would need a data source this bot does not have.
+
+---
+
+## 32. The demotion machinery was working and being fed the wrong arm
+
+Owner-asked 2026-09-14, on the RLMD card: *"it feels heavily insider
+trade focused"* — then, after I proposed unwiring the conjunction arm,
+*"ok then do what you suggest to improve"*. **Measuring my own proposal
+found it was wrong, and measuring why conjunction still had half the
+budget found the real defect.**
+
+### TRIED, MEASURED AND REJECTED: unwiring the conjunction arm
+
+§4's open trigger said to unwire conjunctions if they produced no
+directional view over the next window. They have ~114 paid calls and
+**zero** directional views, so the trigger is met. I measured what
+unwiring would actually do to the belt before doing it, across 20 cycles
+of 6 slots:
+
+| | earnings_drift | hunt | screen | conjunction |
+|---|---|---|---|---|
+| today | 40 | 40 | 20 | 20 |
+| conjunction **unwired** | 40 | 40 | **40** | — |
+
+**The hunt gains nothing**, because the rotation is one per arm per round
+and the hunt already takes its full share every round. The freed slots go
+to **`screen`** — the arm that graded **worst** out of sample (49.3% hit
+rate, 41.2% max drawdown). So unwiring the non-converter funds the
+coin-flip arm, and the probe share (one round in four, never zero) is
+already the bound, *and* it keeps generating the evidence that could
+restore the arm. Unwiring takes that evidence to zero.
+
+Recorded as `TestUnwiringWouldHaveMadeItWORSE`, with
+`test_conjunction_is_still_in_the_rotation`, so a later session cannot
+re-propose it without the measurement going red.
+
+### THE REAL DEFECT: the first stamp won forever, so the wrong arm was demoted
+
+Measured from the owner's 09-14 bundle — 58 research calls, 16 paid:
+
+| arm, from the candidate id | paid calls | spend |
+|---|---|---|
+| conjunction (`conj-…`) | **8 of 16 (50%)** | $0.8988 |
+| insider (`insider_cluster-…`) | 8 of 16 | $0.8819 |
+
+Conjunction took half the paid calls on a day its own record qualified it
+for a probe share. **The demotion machinery was correct and wired; its
+input was wrong.**
+
+`conjunctions._hash_id` builds a **content hash with no date in it** —
+`conj|TICKER|kinds` — deliberately, so a re-run is idempotent. Combined
+with `INSERT OR IGNORE` in `_record_origin` that means **the first stamp
+wins forever**: every conjunction first seen before the 09-11 change that
+gave conjunctions their own origin is stamped `screen` for the life of
+the database, and no later cycle could correct it.
+
+**And the harm is the opposite way round from how it reads.** Those rows
+inflate `screen`'s call count, so on the owner's database:
+
+```
+BEFORE the next cycle (the owner's database today):
+   conversion  : {'screen': (45, 0)}
+   demoted     : {'screen'}
+AFTER one cycle with the fix:
+   conversion  : {'conjunction': (45, 0)}
+   demoted     : {'conjunction'}
+```
+
+**The arm being demoted to a probe share was `screen`** — the arm that
+produced 24 of the 26 directional views this bot has ever formed and the
+only order it has ever placed. Measured against the real supply shape
+(conjunctions build the most, drift and the hunt are thin), 6 slots:
+
+| demoted | earnings_drift | hunt | screen | conjunction |
+|---|---|---|---|---|
+| nothing | 20 | 20 | 40 | 40 |
+| **`screen`** (what the stale stamp caused) | 20 | 20 | **20** | **60** |
+| `conjunction` (the fix) | 20 | 20 | **60** | **20** |
+
+So the stale stamp handed the non-converting arm **three times** the
+slots of the only arm that has ever converted, and the fix inverts it
+exactly.
+
+**An even supply cannot see this at all** — with six slots and four arms
+each holding stock, every arm takes one a round and a probe share changes
+nothing. `test_the_even_supply_case_CANNOT_see_it` records that, so a
+later session does not simplify the fixture and conclude the demotion is
+a no-op.
+
+### The fix is a rule, not a backfill script
+
+A builder naming **its own** arm is authoritative about that candidate,
+so it UPSERTs. The blanket `screen` sweep is not — it runs last over
+everything that survived — so it keeps `INSERT OR IGNORE` and can never
+take a candidate a specific arm has claimed. `BLANKET_ORIGIN` names it
+rather than the string appearing twice.
+
+Stale rows therefore correct themselves on the next cycle that rebuilds
+the candidate, with nothing to run by hand and no migration. That matters
+because a one-off backfill fixes today's rows and leaves the mechanism
+that produced them in place.
+
+**`rationale` is COALESCEd rather than assigned:** the hunt records why
+it nominated something and the conjunction builder passes `None`, so a
+plain assignment would erase a real rationale on the cycle a candidate
+qualified for both.
+
+**The COALESCE and the `WHERE` clause are a defence-in-depth pair.**
+Replacing COALESCE with a plain assignment stays GREEN on its own,
+because the WHERE clause finds nothing to change when the origin already
+matches and a rationale is already set. Breaking **both** goes red — the
+only honest way to show a pair is load-bearing (§14, §17, §24). The WHERE
+clause has its own measurable property: a settled row must cost **no
+write**, counted with `conn.total_changes`, because this runs over every
+candidate every fifteen minutes.
+
+### THE UPGRADE RUN FOUND A DEFECT IN MY OWN WHERE CLAUSE
+
+Run rather than assumed, against a copy of the owner's database: the
+before/after demotion was right, and then
+
+```
+writes to re-stamp 45 settled rows: 45
+```
+
+The clause said `candidate_origin.rationale IS NULL`. **The conjunction
+builder passes no rationale**, so those rows keep it NULL forever, so the
+condition is permanently TRUE and every conjunction row was rewritten on
+every cycle — roughly 7,000 pointless UPDATEs every fifteen minutes, on
+the arm with the most rows, while the code comment two lines above
+claimed a settled row cost no write.
+
+Isolated, 10 re-stamps of one settled row:
+
+| incoming rationale | writes |
+|---|---|
+| `"the chain"` (my test fixture, the hunt's shape) | **0** |
+| `None` (what conjunctions and drift pass) | **10** |
+
+**My fixture supplied a rationale, so it exercised the only shape where
+the clause worked.** Third instance of *a fixture that cannot produce the
+owner's state agrees with the bug* — §14 (foreign keys off), §23 (`g1`
+entity ids), §24 (the 553-day cache). The tests are now parametrised over
+**every shape a real builder passes**, so neither can be the only one
+covered again.
+
+The clause now asks the question it meant to ask — *would this change
+anything* — rather than a proxy for it: the incoming rationale must be a
+real value that **differs** from what is stored. That still covers the
+case the NULL test was written for (a reason arriving on a later
+nomination) and adds one it never did (a fresher reason from the same
+arm). After the fix, four further cycles over those 45 rows cost **0**
+writes and the demotion is still correct.
+
+**Nothing was corrupted by it** — the SET was a no-op in value — so the
+cost was write amplification and a false claim in a comment. It is in
+here because the comment being false is the part that would have misled
+the next session.
+
+### A test pinned to source ORDER broke on a change that strengthened it
+
+`test_the_conjunction_arm_is_stamped_as_its_own_origin` asserted that the
+conjunction stamp appeared **earlier in the module's source** than the
+blanket sweep — because with `INSERT OR IGNORE` everywhere, source order
+was the only thing keeping the right origin. It is not any more, so the
+assertion broke on a change that makes the property **stronger**.
+
+Re-pinned to the property, run rather than read: stamp the arm, run the
+sweep second, and the arm's stamp survives — **and** the case source
+order could never cover, a candidate the sweep reached *first on an
+earlier cycle*, which is the owner's actual state. Third time in three
+days that a test pinned to phrasing or position broke on a rewrite that
+improved the thing (§26, §27): **assert the property the reader depends
+on, not the shape that currently expresses it.**
+
+### A weak test of my own, found by sabotage
+
+My first version of that asserted `nominated_at` survived a second stamp
+— which the SET clause guarantees anyway, since it only touches `origin`
+and `rationale`. It passed with the WHERE clause deleted and was testing
+nothing. §6's opening row again, and `total_changes` is the only
+observable difference.
+
+### And the bundle could not check any of this
+
+`candidate_origin` was **not in the logic scope**, whose own `why`
+promises the funnel — and §3 says the funnel means the drop reason per
+stage **and per arm**, because the per-arm split is what made 89 wasted
+calls visible. So answering "which arm took the 16 paid calls" meant
+inferring the arm from each candidate id's prefix, which works only by
+luck of the id format and is **blind to exactly this defect**: a stale
+stamp is invisible when you read the id. It is in the scope now, windowed
+on `nominated_at`, which was already a registered time column.
+
+### Verification
+
+- **17 sabotage breakages, 16 caught red**, each verified to still parse
+  first. The one green is the COALESCE half of the pair above, recorded
+  as such in the code; sabotage 8 breaks both and goes red.
+- Three of the original eight came back GREEN and each was a real gap:
+  no call-site assertion (fixed with `tests/source_guard.py`), and the
+  two halves of the pair. Four more were added for the harm measurement
+  and the bundle: the probe share no longer throttling, conjunction
+  unwired after all, the owner's exact stale state stopping reproducing,
+  and the logic scope losing the arm — all four red.
+- **The upgrade run, not assumed:** today's `init_db` over the owner's
+  schema — no table lost, all 45 origin rows preserved, `PRAGMA
+  foreign_keys` = 1 — then one cycle produced the before/after demotion
+  above, and **found the WHERE-clause defect no test could see.**
+- Full suite green offline.
+
+### What is NOT claimed
+
+- **Whether conjunctions ever convert is still unmeasured**, and now it
+  is measurable: the arm keeps a probe share and its calls are counted
+  against it rather than against `screen`. §4's open trigger stands, but
+  it must be re-read on the corrected count — the number it was about to
+  be judged on was another arm's.
+- **This changes no threshold and no bound.** It corrects which arm a
+  call is counted against. `grep` over `risk/`, `execution/` and `cost/`
+  for `BLANKET_ORIGIN` returns nothing.
+- **The rows already stale are not rewritten by a migration.** They
+  correct on the next cycle that rebuilds the candidate, so an arm that
+  has stopped emitting a given candidate keeps its old stamp — correctly,
+  since nothing is claiming it.

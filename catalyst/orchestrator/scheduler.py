@@ -1140,6 +1140,16 @@ def _hunt_due(daily_state: dict | None, owner_cap, as_of, conn=None) -> bool:
     return True
 
 
+#: The arm the blanket sweep stamps, and the ONLY origin that must never
+#: overwrite another. It runs last, over everything that survived the
+#: screen, so it would otherwise reclaim candidates a specific builder
+#: had already named. Declared once rather than written at both the
+#: sweep's call site and the rule that exempts it, because two copies of
+#: a string that must match is how the conjunction stamp went wrong in
+#: the first place.
+BLANKET_ORIGIN = "screen"
+
+
 def _record_origin(conn, candidates, origin: str, rationales, as_of) -> None:
     """Stamp where each candidate came from.
 
@@ -1161,11 +1171,93 @@ def _record_origin(conn, candidates, origin: str, rationales, as_of) -> None:
     # takes discovery down the first time a write fails.
     import sqlite3
 
+    # A SPECIFIC ARM'S CLAIM BEATS THE BLANKET SWEEP, AND CORRECTS A
+    # STALE ONE.
+    #
+    # MEASURED 2026-09-15, from the owner's 09-14 bundle: conjunction
+    # took **8 of 16 paid research calls - 50%** on a day its own record
+    # (~114 calls, 0 directional views) qualified it for a probe share of
+    # one round in four. The demotion machinery was correct and wired;
+    # its INPUT was wrong.
+    #
+    # WHY. A candidate id is a CONTENT HASH with no date in it
+    # (`conjunctions._hash_id`: "conj|TICKER|kinds"), deliberately, so a
+    # re-run is idempotent. Combined with `INSERT OR IGNORE` that means
+    # THE FIRST STAMP WINS FOREVER - so every conjunction first seen
+    # before the 2026-09-11 fix that gave conjunctions their own origin
+    # is stamped `screen` for the life of the database, and no later
+    # cycle can correct it.
+    #
+    # Two consequences, both of which cost money:
+    #   - conjunction's counted calls are UNDERSTATED, so
+    #     `demoted_arms` (calls >= 40 with no view) fires late or never
+    #     and the arm keeps a full share of a fully committed budget;
+    #   - the insider arm's counted calls are OVERSTATED by the same
+    #     rows, so the Arms page's cost-per-view for the one arm that
+    #     has ever produced a tradeable view is a blend of two arms.
+    #     That is the page built to answer "is the insider data
+    #     helping" reading the wrong number.
+    #
+    # THE RULE, and it is a rule rather than a backfill script: a
+    # builder naming ITS OWN arm is authoritative about that candidate,
+    # so it UPSERTS. The blanket `screen` sweep is not - it runs last
+    # over everything that survived, so it keeps `INSERT OR IGNORE` and
+    # can never take a candidate a specific arm has claimed. Stale rows
+    # correct themselves on the next cycle that rebuilds the candidate,
+    # with nothing to run by hand.
+    #
+    # `rationale` is COALESCEd rather than overwritten: the hunt records
+    # why it nominated something and the conjunction builder passes
+    # None, so a plain assignment would erase a real rationale on the
+    # cycle a candidate qualified for both.
+    #
+    # THE COALESCE AND THE `WHERE` ARE A DEFENCE-IN-DEPTH PAIR, and the
+    # sabotage round records it: replacing COALESCE with a plain
+    # assignment stays GREEN on its own, because the WHERE clause finds
+    # nothing to change when the row is already right. Breaking BOTH goes
+    # red, which is the only honest way to show a pair is load-bearing
+    # (sections 14, 17, 24). The WHERE clause has its own measurable
+    # property - a settled row costs no write, counted with
+    # `total_changes` - so it is not merely the silent half.
+    #
+    # THE WHERE CLAUSE SAYS "WOULD THIS CHANGE ANYTHING", AND MY FIRST
+    # VERSION SAID `rationale IS NULL` INSTEAD. Those read the same until
+    # you notice which builders pass a rationale. The conjunction builder
+    # passes None, so its rows keep `rationale` NULL forever, so
+    # `rationale IS NULL` was permanently TRUE and every conjunction row
+    # was rewritten on every cycle - roughly 7,000 pointless UPDATEs
+    # every fifteen minutes, on the one arm that has the most rows.
+    #
+    # Measured, in isolation, 10 re-stamps of one settled row:
+    #     with a rationale (my test fixture)  ->  0 writes
+    #     with none (what conjunctions pass)  -> 10 writes
+    #
+    # Found by running the upgrade against a copy of the owner's
+    # database, NOT by a test: my fixture supplied a rationale, so it
+    # exercised the only shape where the clause worked. Third instance of
+    # a fixture that cannot produce the owner's state agreeing with the
+    # bug (sections 14, 23, 24). The incoming rationale now has to be a
+    # real value that DIFFERS from what is stored, which also still
+    # covers the case the NULL test was written for: filling in a
+    # rationale that was never recorded.
+    sql = ("INSERT OR IGNORE INTO candidate_origin "
+           "(candidate_id, origin, rationale, nominated_at) "
+           "VALUES (?,?,?,?)")
+    if origin != BLANKET_ORIGIN:
+        sql = ("INSERT INTO candidate_origin "
+               "(candidate_id, origin, rationale, nominated_at) "
+               "VALUES (?,?,?,?) "
+               "ON CONFLICT(candidate_id) DO UPDATE SET "
+               "  origin = excluded.origin, "
+               "  rationale = COALESCE(excluded.rationale, rationale) "
+               "WHERE candidate_origin.origin != excluded.origin "
+               "   OR (excluded.rationale IS NOT NULL "
+               "       AND (candidate_origin.rationale IS NULL "
+               "            OR candidate_origin.rationale "
+               "               != excluded.rationale))")
     try:
         conn.executemany(
-            "INSERT OR IGNORE INTO candidate_origin "
-            "(candidate_id, origin, rationale, nominated_at) "
-            "VALUES (?,?,?,?)",
+            sql,
             [(c.id, origin, (rationales or {}).get(c.id), as_of.isoformat())
              for c in candidates])
         conn.commit()
@@ -1661,7 +1753,7 @@ def _run_one_cycle(db_file: str, daily_state: dict | None = None):
         # BOTH SIDES STAMPED, or the comparison is worthless. Anything
         # the hunt did not already claim came from the mechanical
         # screen, and INSERT OR IGNORE leaves the hunt's own rows alone.
-        _record_origin(conn, kept, "screen", {}, as_of)
+        _record_origin(conn, kept, BLANKET_ORIGIN, {}, as_of)
         return kept
 
     conn = sqlite3.connect(db_file)

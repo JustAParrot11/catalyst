@@ -159,22 +159,67 @@ class TestItIsActuallyWiredIn:
         src = inspect.getsource(cycle.run_cycle)
         assert "fresh[:max_research]" in src
 
-    def test_the_conjunction_arm_is_stamped_as_its_own_origin(self):
+    def test_the_conjunction_arm_is_stamped_as_its_own_origin(self, tmp_path):
         """Without a separate stamp every mechanical candidate is
         'screen', every arm looks identical, and the whole allocation is
-        inert however well the rotation works."""
+        inert however well the rotation works.
+
+        RE-PINNED 2026-09-15. This asserted the conjunction stamp appeared
+        EARLIER IN THE SOURCE than the blanket sweep, because with
+        `INSERT OR IGNORE` everywhere the ordering was the only thing
+        keeping the right origin. It is not any more: a specific arm
+        upserts and the blanket sweep cannot take a claimed candidate, so
+        the ordering is no longer the mechanism and asserting it broke on
+        a change that makes the property STRONGER. The property is
+        asserted directly now - run the sweep second and see whose stamp
+        survives - which also covers the case source order never could: a
+        candidate the sweep reached FIRST, on an earlier cycle.
+        """
         import inspect
+        from datetime import datetime, timezone
 
         from catalyst.orchestrator import scheduler
+        from catalyst.storage import init_db
 
         src = inspect.getsource(scheduler)
         assert '"conjunction"' in src, (
             "conjunctions are not stamped, so they cannot be told apart "
             "from insider clusters and cannot be held to their record")
-        # Stamped BEFORE the blanket "screen" sweep, or INSERT OR IGNORE
-        # keeps the wrong one.
-        assert src.index('"conjunction", None, as_of') < src.index(
-            '_record_origin(conn, kept, "screen"')
+
+        class C:
+            id = "conj-0123456789abcdef0123"
+
+        now = datetime.now(timezone.utc)
+        conn = init_db(str(tmp_path / "stamp.db"))
+        try:
+            conn.execute(
+                "INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?,?)",
+                (C.id, "CHYM", "credit_amendment", now.date().isoformat(),
+                 "estimated", "[]", now.isoformat(), "fin", "[]"))
+            conn.commit()
+
+            def stamped():
+                return conn.execute(
+                    "SELECT origin FROM candidate_origin WHERE "
+                    "candidate_id = ?", (C.id,)).fetchone()[0]
+
+            # The sweep running after the arm cannot take it.
+            scheduler._record_origin(conn, [C], "conjunction", None, now)
+            scheduler._record_origin(conn, [C], scheduler.BLANKET_ORIGIN,
+                                     {}, now)
+            assert stamped() == "conjunction"
+
+            # And the sweep having got there FIRST on an earlier cycle
+            # does not make it permanent, which source order cannot say.
+            conn.execute("DELETE FROM candidate_origin")
+            conn.commit()
+            scheduler._record_origin(conn, [C], scheduler.BLANKET_ORIGIN,
+                                     {}, now)
+            assert stamped() == scheduler.BLANKET_ORIGIN
+            scheduler._record_origin(conn, [C], "conjunction", None, now)
+            assert stamped() == "conjunction"
+        finally:
+            conn.close()
 
     def test_every_rotation_name_is_an_origin_something_really_writes(self):
         """Classified by the rule, not by enumeration: a name in the
