@@ -99,22 +99,14 @@ def _percentile(values: list[Decimal], q: Decimal) -> Decimal:
     return ordered[max(0, min(idx, len(ordered) - 1))]
 
 
-def observed_call_cents(conn, component: str, seed,
-                        *, now: datetime | None = None,
-                        min_calls: int = MIN_OBSERVED_CALLS,
-                        window_days: int = OBSERVED_WINDOW_DAYS,
-                        ) -> tuple[Decimal, int]:
-    """(estimated cents for one `component` call, sample size).
-
-    Returns the seed with a sample of 0 whenever there is not yet
-    enough evidence, the table is missing, or the rows will not parse -
-    so a cold start, an upgraded database and a corrupt ledger all
-    behave exactly as the code did before this module existed.
-
-    NEVER RAISES. An estimate is not worth a failed cycle: the caller is
-    deciding whether to make a call, and the honest fallback is the
-    number it used yesterday.
-    """
+def _observed(conn, component: str, seed, *, per_request: bool,
+              now: datetime | None = None,
+              min_calls: int = MIN_OBSERVED_CALLS,
+              window_days: int = OBSERVED_WINDOW_DAYS,
+              ) -> tuple[Decimal, int]:
+    """The shared body of the two readings. One query, one parse, one
+    percentile - so a per-call and a per-request figure can never drift
+    apart in anything except the grouping."""
     try:
         floor = Decimal(str(seed))
         if not floor.is_finite() or floor <= 0:
@@ -126,14 +118,15 @@ def observed_call_cents(conn, component: str, seed,
     since = (now - timedelta(days=window_days)).isoformat()
     try:
         rows = conn.execute(
-            "SELECT priced_cents FROM cost_events "
+            "SELECT priced_cents, api_call_id, id FROM cost_events "
             "WHERE component = ? AND kind = 'scheduled' "
             "  AND priced_cents IS NOT NULL AND priced_at >= ?",
             (str(component), since)).fetchall()
     except (sqlite3.Error, AttributeError):
         return floor, 0
 
-    seen: list[Decimal] = []
+    totals: dict[str, Decimal] = {}
+    order: list[str] = []
     for row in rows:
         try:
             value = Decimal(str(row[0]))
@@ -142,12 +135,70 @@ def observed_call_cents(conn, component: str, seed,
         # A NEGATIVE ROW IS A CORRECTION, NOT A CALL. `backfill_adjustment`
         # rows carry the reconciliation's own true-up and would drag an
         # average below what any call has ever cost.
-        if value.is_finite() and value > 0:
-            seen.append(value)
+        if not (value.is_finite() and value > 0):
+            continue
+        # A ROW WITH NO api_call_id IS ITS OWN CALL, never a member of a
+        # NULL group. Grouping every unstamped row together would
+        # collapse a hundred calls into one sample, fall under the
+        # minimum, and silently return the seed - loosening every limit
+        # that reads this while looking like it had measured something.
+        key = str(row[1] or "").strip() or f"row:{row[2]}"
+        if per_request:
+            key = f"row:{row[2]}"
+        if key not in totals:
+            totals[key] = Decimal("0")
+            order.append(key)
+        totals[key] += value
 
+    seen = [totals[k] for k in order]
     if len(seen) < max(1, int(min_calls)):
         return floor, len(seen)
     return _percentile(seen, OBSERVED_PERCENTILE), len(seen)
+
+
+def observed_call_cents(conn, component: str, seed, **kw
+                        ) -> tuple[Decimal, int]:
+    """(estimated cents for one whole `component` CALL, sample size).
+
+    A CALL IS NOT A REQUEST, and conflating the two is what this
+    signature now settles. `cost_events` holds one row per HTTP request,
+    and a hunt is several requests - the digest turn, its tool turns and
+    the nomination - all carrying the same `api_call_id`. So the rows
+    are summed per `api_call_id` before the percentile is taken.
+
+    MEASURED FROM THE OWNER'S OWN 2026-09-15 BUNDLE, which is why this
+    exists: 56 hunt rows were 17 hunts, 3.3 requests each. The
+    per-request p75 was 15.3c and the per-CALL p75 was 56.2c, so every
+    consumer that meant "what does a hunt cost" was reading a figure
+    3.7x too cheap - and `hunts_per_day` divides the daily budget by it.
+    The hunt ran 17 times and took 74% of a day that hit the cap.
+
+    Returns the seed with a sample of 0 whenever there is not yet
+    enough evidence, the table is missing, or the rows will not parse -
+    so a cold start, an upgraded database and a corrupt ledger all
+    behave exactly as the code did before this module existed.
+
+    NEVER RAISES. An estimate is not worth a failed cycle: the caller is
+    deciding whether to make a call, and the honest fallback is the
+    number it used yesterday.
+    """
+    return _observed(conn, component, seed, per_request=False, **kw)
+
+
+def observed_request_cents(conn, component: str, seed, **kw
+                           ) -> tuple[Decimal, int]:
+    """(estimated cents for ONE REQUEST of a `component`, sample size).
+
+    The reading for a caller estimating a single turn rather than the
+    whole call it belongs to - `hunt.hunt_turn_estimate` is the only
+    one, because the governor authorises each turn separately.
+
+    Named apart from `observed_call_cents` on purpose. This used to be
+    the only reading and it wore the other one's name, so three callers
+    that meant "a whole hunt" got a turn's price and a docstring stated
+    the opposite belief in as many words.
+    """
+    return _observed(conn, component, seed, per_request=True, **kw)
 
 
 def observed_or_seed(conn, component: str, seed, **kw) -> Decimal:

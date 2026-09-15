@@ -4478,3 +4478,115 @@ naming the wrong id, one of two answered).
   unmeasured.** This restores a turn that was being thrown away; what the
   model does with it is the open question, and the funnel per arm is
   where it will show.
+
+---
+
+## 35. The hunt's cost was measured per HTTP request and spent per hunt
+
+Owner-asked 2026-09-15: *"i worry about the API spending, we have yet
+again spent near $8. I'm unsure if we're really being optimal here."*
+
+**The worry was justified, the accounting was not at fault, and the cause
+was a measured number measured in the wrong unit.**
+
+### First: nothing is mis-accounted
+
+| check | result |
+|---|---|
+| reconciliation for 2026-09-14 | local **1034.845c** vs billed **1034.845c**, discrepancy **0** |
+| unacknowledged discrepancies | 0 |
+| unpriced rows | 0 |
+| ledger cross-check | agrees |
+
+So the spend is real. $10.35 on 09-14 and $10.02 on 09-15 against a
+`daily_cap_cents` of **$10.00** — and the cap bound, 8 denies with
+`daily_cap_exceeded`. The hard stop works.
+
+### Where it went, measured from the owner's own bundle
+
+| component | requests | spend | share |
+|---|---|---|---|
+| **hunt** | 56 | **$7.39** | **73.8%** |
+| research | 23 | $2.56 | 25.5% |
+| position_review | 1 | $0.07 | 0.7% |
+
+**§28's caching fix IS working** — the hunt's rows now carry
+`cache_creation=1,604,993` and `cache_read=2,417,032` where they were
+**0 and 0**. Cache writes at 1.25x are now the dominant line
+(~$4.01 of the $7.39), which is inherent to a growing conversation
+rather than a defect.
+
+### THE DEFECT: a call is not a request
+
+`cost_events` holds **one row per HTTP request**. A hunt is several
+requests — the digest turn, its tool turns, the nomination — all sharing
+one `api_call_id`. `observed_call_cents` returned the 75th percentile of
+the **per-row** figure, and three callers that meant "what does a whole
+hunt cost" read it:
+
+```
+hunt      56 rows  =  17 hunts, 3.3 requests each
+          per-REQUEST p75  15.32c   <- what they were reading
+          per-CALL    p75  56.16c   <- what they meant
+          ratio             3.7x
+research  23 rows  =  22 calls, 1.0 requests each  (no error here)
+```
+
+`hunts_per_day` divides the daily budget by that figure, so:
+
+| | at the owner's $100 cap |
+|---|---|
+| before | **10 hunts/day** authorised (17 actually ran) |
+| after | **2 hunts/day** |
+
+**§14 IS PARTLY SUPERSEDED BY THIS.** That section removed a typed
+`min(4, …)` ceiling on the strength of *"the budget afforded fourteen"*
+— a figure computed from the per-request reading. The budget affords
+**two**. The typed ceiling of 4 was closer to right than the derivation
+that replaced it, which is an uncomfortable row and the reason it is
+written down: **a number being derived rather than typed does not make
+it correct, it makes it correct-if-the-unit-is-right.**
+
+### And the belief was stated in a docstring, in as many words
+
+`hunt._turn_estimate`'s own docstring said *"a hunt's cost is recorded
+per CALL … what can be measured is the whole hunt"*, and reasoned that
+using a whole hunt's cost for one turn was deliberately pessimistic. It
+was reading a turn's price all along. **The reasoning was inverted and
+the value happened to be right** — so that caller now asks for
+`observed_request_cents` by name, and the three that meant a whole hunt
+get `observed_call_cents`, which groups by `api_call_id`.
+
+Same shape as §14's `orders.decision_id` and §22's spread sentinel: **a
+field's meaning lived in one module's comments and every other reader
+took it at face value.**
+
+### The trap in the fix, and it would have been silent
+
+Grouping by `api_call_id` collapses **every row with no id into one
+group**. That would take a hundred calls to a sample of one, fall under
+`MIN_OBSERVED_CALLS`, and silently return the seed — loosening every
+limit that reads it while looking like it had measured something. **A row
+with no `api_call_id` is its own call**, keyed on its own row id.
+
+### Verification
+
+- Both readings computed against the owner's real `cost_events` rows
+  replayed into a fresh schema: 56/17 for the hunt, 23/22 for research.
+- `hunts_per_day` returns **2** at $100 after the change, **10** before.
+- Full suite green offline.
+
+### What is NOT claimed
+
+- **The saving is arithmetic, not an observed bill.** At 2 hunts a day
+  instead of 17 the hunt's share should fall from ~$7.39 to ~$1.12. The
+  number to watch is the hunt's row count on the Cost page.
+- **Whether the hunt ever converts is still unmeasured** — 0 directional
+  views lifetime. §14's bound (40 paid calls) is now correctly priced at
+  about **$22**, not under $5, which makes that experiment four times
+  dearer than it was recorded as being.
+- The month is on track either way: $53.65 MTD on the 15th, projecting
+  ~$107 against a $100 cap, so the monthly cap would have gone dark for
+  the last two or three days of the month.
+
+---

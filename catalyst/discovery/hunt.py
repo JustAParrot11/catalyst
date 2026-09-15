@@ -814,20 +814,30 @@ HUNT_TURN_ESTIMATE_CENTS = Decimal("20")
 
 
 def _turn_estimate(conn) -> Decimal:
-    """A continuation turn, estimated from what whole hunts have cost.
+    """A continuation turn, estimated from what single turns have cost.
 
-    There is no separate ledger row for a single turn - a hunt's cost is
-    recorded per CALL, which is why this constant was never measured and
-    stayed at 20c indefinitely. What can be measured is the whole hunt,
-    and a continuation turn re-reads the transcript so far, so it is
-    bounded above by the hunt total. Using that total is deliberately
-    pessimistic: the governor compares an estimate against actual spend
-    rather than reserving it, so over-estimating costs only at the cap
-    boundary while under-estimating costs the cap.
+    THE OLD DOCSTRING HERE STATED A BELIEF THAT WAS FALSE, and it is
+    worth keeping the correction: it said "a hunt's cost is recorded per
+    CALL ... what can be measured is the whole hunt", and reasoned that
+    using a whole hunt's cost for one turn was deliberately pessimistic.
+    `cost_events` holds one row per HTTP REQUEST, so the figure it was
+    reading was already a turn's price. The reasoning was inverted and
+    the value happened to be right.
+
+    Measured on the owner's 2026-09-15 bundle: 56 hunt rows, 17 hunts,
+    3.3 requests each. So what this function wants IS the per-request
+    reading, and it now asks for it by name - while the three callers
+    that genuinely meant a whole hunt were getting a turn's price and
+    under-estimating by 3.7x.
+
+    The floor stays: the governor compares an estimate against actual
+    spend rather than reserving it, so over-estimating costs only at the
+    cap boundary while under-estimating costs the cap.
     """
-    from catalyst.cost.observed import observed_call_cents
+    from catalyst.cost.observed import observed_request_cents
 
-    measured, n = observed_call_cents(conn, "hunt", HUNT_TURN_ESTIMATE_CENTS)
+    measured, n = observed_request_cents(conn, "hunt",
+                                         HUNT_TURN_ESTIMATE_CENTS)
     return max(measured, HUNT_TURN_ESTIMATE_CENTS) if n else \
         HUNT_TURN_ESTIMATE_CENTS
 #: Turns in one hunt, tool turns plus the final nomination.
